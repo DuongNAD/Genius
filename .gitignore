@@ -1,0 +1,20 @@
+# Secrets & Env files
+.env
+
+# Python Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing & Caches
+.pytest_cache/
+
+# Shared Context Pipeline outputs
+research.md
+design.md
+app.py
+review.md
+architecture.md
+
+# Agent Metadata folders
+.agents/*/

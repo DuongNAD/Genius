@@ -1,0 +1,6 @@
+pydantic==2.12.5
+tenacity==9.1.4
+PyYAML==6.0.3
+pytest==9.0.3
+pathspec>=0.10.3
+tiktoken>=0.7.0

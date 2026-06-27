@@ -1,0 +1,250 @@
+import os
+import sys
+import runpy
+import asyncio
+import httpx
+from unittest.mock import AsyncMock, patch
+from ag_core.config import load_config
+from ag_core.agents.grok_researcher import GrokResearcherAgent
+from ag_core.agents.claude_architect import ClaudeArchitectAgent
+from ag_core.agents.codex_reviewer import CodexReviewerAgent
+from ag_core.providers.grok_provider import GrokProvider
+from ag_core.providers.anthropic_provider import AnthropicProvider
+from ag_core.providers.openai_provider import OpenAIProvider
+
+def test_config_loading_and_merging():
+    config = load_config()
+    assert config.app.name == "Antigravity Core"
+    assert config.app.version == "2.0"
+    assert config.models.openai == "gpt-4o"
+    assert config.models.anthropic == "claude-3-5-sonnet"
+    assert config.models.grok == "grok-2"
+    assert config.scanner.chunk_size_limit == 8000
+    assert ".git/" in config.scanner.exclude_patterns
+    
+    # Secrets should be merged from .env
+    assert config.openai_api_key == "mock-openai-key"
+    assert config.anthropic_api_key == "mock-anthropic-key"
+    assert config.grok_api_key == "mock-grok-key"
+
+def test_grok_researcher_agent_flow(tmp_path, monkeypatch):
+    async def run_test():
+        monkeypatch.chdir(tmp_path)
+        
+        # Create a dummy file to scan
+        (tmp_path / "dummy.txt").write_text("Hello Grok", encoding="utf-8")
+        
+        provider = GrokProvider(api_key="mock-key", model_name="grok-2")
+        
+        mock_res = httpx.Response(
+            status_code=200,
+            json={
+                "choices": [{"message": {"content": "Research Report Content"}}],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 20,
+                    "total_tokens": 30
+                }
+            },
+            request=httpx.Request("POST", "https://api.x.ai/v1/chat/completions")
+        )
+        
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_res
+            
+            config = load_config()
+            agent = GrokResearcherAgent(provider=provider, config=config)
+            result = await agent.run(prompt="Analyze requirements.")
+            
+            assert result == "Research Report Content"
+            assert os.path.exists("research.md")
+            with open("research.md", "r", encoding="utf-8") as f:
+                assert f.read() == "Research Report Content"
+                
+    asyncio.run(run_test())
+
+def test_claude_architect_agent_flow(tmp_path, monkeypatch):
+    async def run_test():
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "dummy.txt").write_text("Hello Claude", encoding="utf-8")
+        
+        provider = AnthropicProvider(api_key="mock-key", model_name="claude-3-5-sonnet")
+        
+        mock_res = httpx.Response(
+            status_code=200,
+            json={
+                "content": [{"text": "Architecture Design Document"}],
+                "usage": {
+                    "input_tokens": 15,
+                    "output_tokens": 25
+                }
+            },
+            request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        )
+        
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_res
+            
+            config = load_config()
+            agent = ClaudeArchitectAgent(provider=provider, config=config)
+            result = await agent.run(prompt="Create architecture.")
+            
+            assert result == "Architecture Design Document"
+            assert os.path.exists("architecture.md")
+            with open("architecture.md", "r", encoding="utf-8") as f:
+                assert f.read() == "Architecture Design Document"
+                
+    asyncio.run(run_test())
+
+def test_codex_reviewer_agent_flow(tmp_path, monkeypatch):
+    async def run_test():
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "dummy.txt").write_text("Hello Codex", encoding="utf-8")
+        
+        provider = OpenAIProvider(api_key="mock-key", model_name="gpt-4o")
+        
+        mock_res = httpx.Response(
+            status_code=200,
+            json={
+                "choices": [{"message": {"content": "Code Review Summary"}}],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 18,
+                    "total_tokens": 30
+                }
+            },
+            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        )
+        
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_res
+            
+            config = load_config()
+            agent = CodexReviewerAgent(provider=provider, config=config)
+            result = await agent.run(prompt="Review code.")
+            
+            assert result == "Code Review Summary"
+            assert os.path.exists("review.md")
+            with open("review.md", "r", encoding="utf-8") as f:
+                assert f.read() == "Code Review Summary"
+                
+    asyncio.run(run_test())
+
+def test_skill_bootstrap_grok_researcher(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "app:\n  name: \"Antigravity Core\"\n  version: \"2.0\"\nmodels:\n  openai: \"gpt-4o\"\n  anthropic: \"claude-3-5-sonnet\"\n  grok: \"grok-2\"\nscanner:\n  chunk_size_limit: 8000\n  exclude_patterns: [\".git/\"]\n",
+        encoding="utf-8"
+    )
+    (tmp_path / ".env").write_text(
+        "OPENAI_API_KEY=mock-openai-key\nANTHROPIC_API_KEY=mock-anthropic-key\nGROK_API_KEY=mock-grok-key\n",
+        encoding="utf-8"
+    )
+    
+    mock_res = httpx.Response(
+        status_code=200,
+        json={
+            "choices": [{"message": {"content": "Skill Bootstrap Grok Researcher Output"}}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+                "total_tokens": 30
+            }
+        },
+        request=httpx.Request("POST", "https://api.x.ai/v1/chat/completions")
+    )
+    
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post, \
+         patch("sys.exit") as mock_exit:
+        mock_post.return_value = mock_res
+        
+        run_py_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            ".agents", "skills", "grok_researcher", "run.py"
+        )
+        
+        runpy.run_path(run_py_path, run_name="__main__")
+        
+        assert not mock_exit.called
+        assert os.path.exists("research.md")
+        with open("research.md", "r", encoding="utf-8") as f:
+            assert f.read() == "Skill Bootstrap Grok Researcher Output"
+
+def test_skill_bootstrap_claude_architect(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "app:\n  name: \"Antigravity Core\"\n  version: \"2.0\"\nmodels:\n  openai: \"gpt-4o\"\n  anthropic: \"claude-3-5-sonnet\"\n  grok: \"grok-2\"\nscanner:\n  chunk_size_limit: 8000\n  exclude_patterns: [\".git/\"]\n",
+        encoding="utf-8"
+    )
+    (tmp_path / ".env").write_text(
+        "OPENAI_API_KEY=mock-openai-key\nANTHROPIC_API_KEY=mock-anthropic-key\nGROK_API_KEY=mock-grok-key\n",
+        encoding="utf-8"
+    )
+    
+    mock_res = httpx.Response(
+        status_code=200,
+        json={
+            "content": [{"text": "Skill Bootstrap Claude Architect Output"}],
+            "usage": {
+                "input_tokens": 15,
+                "output_tokens": 25
+            }
+        },
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+    
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post, \
+         patch("sys.exit") as mock_exit:
+        mock_post.return_value = mock_res
+        
+        run_py_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            ".agents", "skills", "claude_architect", "run.py"
+        )
+        
+        runpy.run_path(run_py_path, run_name="__main__")
+        
+        assert not mock_exit.called
+        assert os.path.exists("architecture.md")
+        with open("architecture.md", "r", encoding="utf-8") as f:
+            assert f.read() == "Skill Bootstrap Claude Architect Output"
+
+def test_skill_bootstrap_codex_reviewer(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "app:\n  name: \"Antigravity Core\"\n  version: \"2.0\"\nmodels:\n  openai: \"gpt-4o\"\n  anthropic: \"claude-3-5-sonnet\"\n  grok: \"grok-2\"\nscanner:\n  chunk_size_limit: 8000\n  exclude_patterns: [\".git/\"]\n",
+        encoding="utf-8"
+    )
+    (tmp_path / ".env").write_text(
+        "OPENAI_API_KEY=mock-openai-key\nANTHROPIC_API_KEY=mock-anthropic-key\nGROK_API_KEY=mock-grok-key\n",
+        encoding="utf-8"
+    )
+    
+    mock_res = httpx.Response(
+        status_code=200,
+        json={
+            "choices": [{"message": {"content": "Skill Bootstrap Codex Reviewer Output"}}],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 18,
+                "total_tokens": 30
+            }
+        },
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    )
+    
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post, \
+         patch("sys.exit") as mock_exit:
+        mock_post.return_value = mock_res
+        
+        run_py_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            ".agents", "skills", "codex_reviewer", "run.py"
+        )
+        
+        runpy.run_path(run_py_path, run_name="__main__")
+        
+        assert not mock_exit.called
+        assert os.path.exists("review.md")
+        with open("review.md", "r", encoding="utf-8") as f:
+            assert f.read() == "Skill Bootstrap Codex Reviewer Output"
