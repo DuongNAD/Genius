@@ -1,4 +1,5 @@
 import abc
+import asyncio
 from typing import Any, Dict
 from pydantic import BaseModel, Field
 
@@ -16,6 +17,62 @@ class ProviderResponse(BaseModel):
     usage: TokenUsage = Field(default_factory=TokenUsage, description="Token usage statistics")
 
 
+# --- Rate Limiting Utility ---
+
+class TokenBucket:
+    def __init__(self, rate: float = 10.0, capacity: float = 10.0):
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = capacity
+        try:
+            loop = asyncio.get_event_loop()
+            self.last_refill = loop.time() if loop.is_running() else 0.0
+        except RuntimeError:
+            self.last_refill = 0.0
+
+    def _refill(self):
+        try:
+            loop = asyncio.get_event_loop()
+            if not loop.is_running():
+                return
+            now = loop.time()
+        except RuntimeError:
+            return
+        elapsed = now - self.last_refill
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+        self.last_refill = now
+
+    async def acquire(self):
+        self._refill()
+        while self.tokens < 1:
+            await asyncio.sleep(0.01)
+            self._refill()
+        self.tokens -= 1
+
+
+class wait_retry_after:
+    def __init__(self, fallback):
+        self.fallback = fallback
+
+    def __call__(self, retry_state):
+        import httpx
+        if retry_state.outcome.failed:
+            ex = retry_state.outcome.exception()
+            if isinstance(ex, httpx.HTTPStatusError) and ex.response.status_code == 429:
+                retry_after = ex.response.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        delay = float(retry_after)
+                        if delay > 10.0:
+                            raise ValueError(f"Retry-After delay too large: {delay}s")
+                        return delay
+                    except ValueError as e:
+                        if "Retry-After delay too large" in str(e):
+                            raise
+                        pass
+        return self.fallback(retry_state)
+
+
 # --- Base Provider ABC ---
 
 class BaseProvider(abc.ABC):
@@ -28,6 +85,8 @@ class BaseProvider(abc.ABC):
         self.api_key = api_key
         self.base_url = base_url
         self.extra_params = kwargs
+        self.rate_limiter = TokenBucket(rate=10.0, capacity=10.0)
+        self.semaphore = asyncio.Semaphore(5)
 
     @abc.abstractmethod
     async def send_prompt(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:

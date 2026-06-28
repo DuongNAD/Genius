@@ -3,7 +3,7 @@ from typing import Any, Dict
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 
-from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
+from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage, wait_retry_after
 
 def _is_retriable(exception: BaseException) -> bool:
     if isinstance(exception, httpx.TimeoutException):
@@ -25,7 +25,7 @@ class AnthropicProvider(BaseProvider):
 
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
+        wait=wait_retry_after(fallback=wait_exponential(multiplier=1, min=2, max=10)),
         retry=retry_if_exception(_is_retriable),
         reraise=True
     )
@@ -43,38 +43,43 @@ class AnthropicProvider(BaseProvider):
         return response.json()
 
     async def send_prompt(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        if not self.api_key:
-            raise ValueError("Anthropic API key must be provided or set via ANTHROPIC_API_KEY environment variable.")
+        async with self.semaphore:
+            await self.rate_limiter.acquire()
+            if not self.api_key:
+                raise ValueError("Anthropic API key must be provided or set via ANTHROPIC_API_KEY environment variable.")
+                
+            # Extract max_tokens (default 1024, as Anthropic requires this key)
+            extra = self.extra_params.copy()
+            extra.update(kwargs)
+            max_tokens = extra.pop("max_tokens", 1024)
             
-        # Extract max_tokens (default 1024, as Anthropic requires this key)
-        extra = self.extra_params.copy()
-        extra.update(kwargs)
-        max_tokens = extra.pop("max_tokens", 1024)
-        
-        payload = {
-            "model": self.model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            **extra
-        }
-        
-        async with httpx.AsyncClient() as client:
-            res_json = await self._send_request_with_retry(client, payload)
+            payload = {
+                "model": self.model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                **extra
+            }
             
-        content = res_json["content"][0]["text"]
-        usage_data = res_json.get("usage", {})
-        
-        prompt_tokens = usage_data.get("input_tokens", 0)
-        completion_tokens = usage_data.get("output_tokens", 0)
-        total_tokens = prompt_tokens + completion_tokens
-        
-        # Validate output shape
-        response = ProviderResponse(
-            content=content,
-            usage=TokenUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens
+            async with httpx.AsyncClient() as client:
+                res_json = await self._send_request_with_retry(client, payload)
+                
+            content_blocks = res_json.get("content", [])
+            content = ""
+            if content_blocks:
+                content = content_blocks[0].get("text") or ""
+            usage_data = res_json.get("usage", {})
+            
+            prompt_tokens = usage_data.get("input_tokens", 0)
+            completion_tokens = usage_data.get("output_tokens", 0)
+            total_tokens = prompt_tokens + completion_tokens
+            
+            # Validate output shape
+            response = ProviderResponse(
+                content=content,
+                usage=TokenUsage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens
+                )
             )
-        )
-        return response.model_dump()
+            return response.model_dump()

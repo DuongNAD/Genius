@@ -3,7 +3,7 @@ from typing import Any, Dict
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 
-from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
+from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage, wait_retry_after
 
 def _is_retriable(exception: BaseException) -> bool:
     if isinstance(exception, httpx.TimeoutException):
@@ -25,7 +25,7 @@ class GrokProvider(BaseProvider):
 
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
+        wait=wait_retry_after(fallback=wait_exponential(multiplier=1, min=2, max=10)),
         retry=retry_if_exception(_is_retriable),
         reraise=True
     )
@@ -42,28 +42,33 @@ class GrokProvider(BaseProvider):
         return response.json()
 
     async def send_prompt(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        if not self.api_key:
-            raise ValueError("Grok API key must be provided or set via GROK_API_KEY or XAI_API_KEY environment variable.")
+        async with self.semaphore:
+            await self.rate_limiter.acquire()
+            if not self.api_key:
+                raise ValueError("Grok API key must be provided or set via GROK_API_KEY or XAI_API_KEY environment variable.")
+                
+            payload = {
+                "model": self.model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                **self.extra_params,
+                **kwargs
+            }
             
-        payload = {
-            "model": self.model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            **self.extra_params,
-            **kwargs
-        }
-        
-        async with httpx.AsyncClient() as client:
-            res_json = await self._send_request_with_retry(client, payload)
+            async with httpx.AsyncClient() as client:
+                res_json = await self._send_request_with_retry(client, payload)
+                
+            choices = res_json.get("choices", [])
+            content = ""
+            if choices:
+                content = choices[0].get("message", {}).get("content") or ""
+            usage_data = res_json.get("usage", {})
             
-        content = res_json["choices"][0]["message"]["content"]
-        usage_data = res_json.get("usage", {})
-        
-        response = ProviderResponse(
-            content=content,
-            usage=TokenUsage(
-                prompt_tokens=usage_data.get("prompt_tokens", 0),
-                completion_tokens=usage_data.get("completion_tokens", 0),
-                total_tokens=usage_data.get("total_tokens", 0)
+            response = ProviderResponse(
+                content=content,
+                usage=TokenUsage(
+                    prompt_tokens=usage_data.get("prompt_tokens", 0),
+                    completion_tokens=usage_data.get("completion_tokens", 0),
+                    total_tokens=usage_data.get("total_tokens", 0)
+                )
             )
-        )
-        return response.model_dump()
+            return response.model_dump()

@@ -57,12 +57,14 @@ def test_openai_provider_retry_on_500():
             request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
         )
         
-        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post, \
+             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             mock_post.side_effect = [response_500, response_200]
             
             response = await provider.send_prompt("Test prompt")
             assert response["content"] == "Recovered!"
             assert mock_post.call_count == 2
+            assert mock_sleep.called
             
     asyncio.run(run_test())
 

@@ -13,3 +13,11 @@ scanner:
     - "venv/"
     - ".venv/"
     - ".pytest_cache/"
+
+services:
+  grok_researcher: "http://localhost:8001"
+  claude_architect: "http://localhost:8002"
+  codex_reviewer: "http://localhost:8003"
+  tester_agent: "http://localhost:8004"
+  security_agent: "http://localhost:8005"
+  devops_agent: "http://localhost:8006"
