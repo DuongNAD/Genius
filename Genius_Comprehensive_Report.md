@@ -213,7 +213,27 @@ Schema này áp đặt việc **Tách biệt giữa Lên kế hoạch và Triể
 
 ---
 
-### 3.2 Vòng lặp Tự phục hồi của Codex & Tester
+### 3.2 Cơ chế Tích hợp & Giao tiếp Đa phương thức (CLI & Web)
+
+Để loại bỏ hoàn toàn sự phụ thuộc vào mạng internet và các API Keys, Genius (Antigravity 2.0) tương tác với các model thông qua hai phương thức song song: **Local CLI Wrappers** (cho Claude, Grok) và **Headless Browser Automation** (cho Codex). Cách thức kết nối và truyền dữ liệu diễn ra như sau:
+
+1. **Sinh Payload (Payload Generation)**: `PromptBuilder` biên dịch SPO thành hai thành phần văn bản riêng biệt: System Prompt và User Prompt.
+
+2. **Truyền Dữ liệu qua Local CLI (Dành cho Claude, Grok)**:
+   - *Kích hoạt*: Module `providers/` sử dụng `subprocess` của Python để khởi tạo tiến trình cục bộ, gọi thẳng vào các công cụ CLI đã đăng nhập.
+   - *Input*: System Prompt và User Prompt được truyền vào thông qua luồng **Standard Input (stdin)** hoặc file `.txt` tạm thời để vượt giới hạn độ dài ký tự của command-line.
+   - *Output*: Lắng nghe **Standard Output (stdout)** để lấy mã nguồn. Lỗi được bắt qua **Standard Error (stderr)**.
+
+3. **Truyền Dữ liệu qua Desktop GUI Automation (Dành cho Codex)**:
+   - *Ngữ cảnh*: Codex được cung cấp dưới dạng một **Desktop App** chính thức (Ứng dụng máy tính) dành cho phát triển phần mềm bằng AI. Do đó, hệ thống sử dụng các thư viện tự động hóa giao diện hệ điều hành (ví dụ: `pywinauto` hoặc UI Automation) để tương tác trực tiếp với cửa sổ ứng dụng Codex đã đăng nhập tài khoản.
+   - *Input*: Script tự động xác định vùng nhập liệu trên giao diện ứng dụng (UI Elements), sau đó giả lập thao tác mô phỏng người dùng (điền text hoặc dán từ clipboard) để gửi System Prompt và User Prompt vào một luồng (thread) hoặc dự án mới trên Codex.
+   - *Output*: Hệ thống giám sát trạng thái UI của ứng dụng. Khi Codex hoàn thành việc sinh mã hoặc thực thi agent, script sẽ tự động trích xuất (extract) nội dung text từ giao diện trả về hoặc đọc trực tiếp các thay đổi mà ứng dụng vừa ghi xuống thư mục làm việc cục bộ (worktree) để báo cáo lại cho Orchestrator.
+
+4. **Dọn dẹp An toàn**: Mọi tệp tin tạm chứa prompt hoặc các luồng thread tạm thời sinh ra trên giao diện Desktop App sẽ được script tự động đóng và dọn dẹp sạch sẽ sau mỗi chu kỳ.
+
+---
+
+### 3.3 Vòng lặp Tự phục hồi của Codex & Tester
 
 Genius tích hợp các vòng lặp tự phục hồi ở cả cấp độ pipeline và cấp độ từng tác tử độc lập:
 
@@ -239,7 +259,7 @@ Khi thực thi chỉ thị `/unit-test`:
 
 ---
 
-### 3.3 Tính ổn định Hạ tầng & Khắc phục Rò rỉ Tài nguyên
+### 3.4 Tính ổn định Hạ tầng & Khắc phục Rò rỉ Tài nguyên
 
 Để hỗ trợ độ ổn định cấp độ production và tính đồng thời cao, một số nâng cấp ổn định đã được triển khai:
 

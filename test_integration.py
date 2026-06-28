@@ -53,18 +53,26 @@ def mock_subprocess(request):
     elif "test_tester_api_server" in test_name:
         content = "def test_api(): pass"
         
-    res_json = {
-        "result": content,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens
+    if "codex" in test_name or "tester" in test_name:
+        line1 = json.dumps({"event": "agent_message", "item": {"text": content}})
+        line2 = json.dumps({"event": "turn.completed", "turn.completed": {"usage": {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": input_tokens + output_tokens}}})
+        jsonl_output = f"{line1}\n{line2}\n"
+        mock_process.communicate.return_value = (
+            jsonl_output.encode("utf-8"),
+            b""
+        )
+    else:
+        res_json = {
+            "result": content,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens
+            }
         }
-    }
-    
-    mock_process.communicate.return_value = (
-        json.dumps(res_json).encode("utf-8"),
-        b""
-    )
+        mock_process.communicate.return_value = (
+            json.dumps(res_json).encode("utf-8"),
+            b""
+        )
     
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
