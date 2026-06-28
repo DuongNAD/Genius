@@ -4,10 +4,14 @@
 - Phase 1-4 command: `py -m pytest test_e2e.py -v`
 - Phase 5 command: `py -m pytest test_e2e_phase5.py -v`
 - Combined command: `py -m pytest test_e2e.py test_e2e_phase5.py -v`
+- Distributed Agent Network E2E command: `py -m pytest tests/test_distributed.py -v`
+- Distributed Agent Network Milestone 1 command: `py -m pytest test_milestone1_distributed.py -v`
 - Expected: all tests pass with exit code 0 once the implementation of all milestones is complete. Currently:
   - `test_e2e.py` passes 74 tests and fails 0 tests.
   - `test_e2e_phase5.py` passes 40 tests and fails 0 tests.
   - Combined run passes all 114 tests (114/114 passing).
+  - `tests/test_distributed.py` passes 71 tests and fails 0 tests.
+  - `test_milestone1_distributed.py` passes 4 tests and fails 0 tests.
 
 ## Coverage Summary (Phase 1-4)
 | Tier | Count | Description |
@@ -27,6 +31,15 @@
 | 4. Real-World Application | 1 | Mocked high-fidelity full microservice build E2E scenario |
 | 5. CI/CD Validation | 1 | Validation of GitHub Actions workflow constraints |
 | **Total** | **40** | |
+
+## Coverage Summary (Distributed Agent Network E2E Test Suite)
+| Tier | Count | Description |
+|------|------:|-------------|
+| 1. Feature Coverage | 30 | 5 tests per feature for all 6 features |
+| 2. Boundary & Corner | 30 | 5 boundary/corner case tests per feature for all 6 features |
+| 3. Cross-Feature | 6 | Pairwise combinatorial coverage of feature interactions |
+| 4. Real-World Application | 5 | Real-world workloads (E2E workflows, concurrency, network chaos, dynamic scaling, crash recovery) |
+| **Total** | **71** | |
 
 ## Phase 5 Genuine E2E Testing Rationale
 The Phase 5 test suite (`test_e2e_phase5.py`) has been fully rewritten to remove facade checks and implement genuine, behavior-testing logic:
@@ -52,6 +65,13 @@ The Phase 5 test suite (`test_e2e_phase5.py`) has been fully rewritten to remove
 | 9. DevOps Agent Startup & Routes (R2) | 5 | 2 | ✓ | ✓ | READY (All 5/5 feature tests and 2/2 boundary tests passing, api.py verified) |
 | 10. Orchestrator Port Routing & CLI Startup (R2) | 5 | 2 | ✓ | ✓ | READY (All 5/5 feature tests and 2/2 boundary tests passing, routing and serve verified) |
 | 11. CI/CD Pipeline (R3) | 1 | N/A | N/A | N/A | READY (CI/CD YAML syntax and constraints verified, 1/1 passing) |
+| **Distributed Agent Network Features** | | | | | |
+| Feature 1: Worker Registration and Heartbeats | 5 | 5 | ✓ | ✓ | READY (71/71 passing) |
+| Feature 2: API Authentication and Checksums | 5 | 5 | ✓ | ✓ | READY (71/71 passing) |
+| Feature 3: Async Task Processing & Execution | 5 | 5 | ✓ | ✓ | READY (71/71 passing) |
+| Feature 4: Routing & Dispatch (Orchestrator Polling & Routing) | 5 | 5 | ✓ | ✓ | READY (71/71 passing) |
+| Feature 5: Resilient HTTP & Connection Retries | 5 | 5 | ✓ | ✓ | READY (71/71 passing) |
+| Feature 6: Workspace & Configuration Management | 5 | 5 | ✓ | ✓ | READY (71/71 passing) |
 
 MANDATORY INTEGRITY WARNING:
 DO NOT CHEAT. All implementations must be genuine. DO NOT hardcode test results, create dummy/facade implementations, or circumvent the intended task. A Forensic Auditor will independently verify your work. Integrity violations WILL be detected and your work WILL be rejected.

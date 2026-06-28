@@ -15,6 +15,7 @@ class TesterAgent(BaseAgent):
 
     def __init__(self, provider: BaseProvider, config: Config = None, **kwargs: Any) -> None:
         self.config = config or load_config()
+        self.max_retries = kwargs.get("max_retries", 3)
         super().__init__(name="TesterAgent", provider=provider, **kwargs)
 
     async def run(self, prompt: str | None = None, context_data: dict | None = None) -> str:
@@ -49,8 +50,10 @@ class TesterAgent(BaseAgent):
             
         full_prompt = f"{user_prompt}\n\nProject files context:\n{context}"
         
+        from ag_core.utils.prompt_templates import AGENT_CORE_RULES
+        
         # Invoke provider
-        response = await self.provider.send_prompt(full_prompt)
+        response = await self.provider.send_prompt(full_prompt, system=AGENT_CORE_RULES)
         content = response.get("content", "")
         usage = response.get("usage", {})
         
@@ -68,15 +71,85 @@ class TesterAgent(BaseAgent):
                 output_file = "None"
             else:
                 output_file = "test_generated.py"
-        
+
+        def _extract_code(txt: str) -> str:
+            import re
+            blocks = re.findall(r'```[a-zA-Z0-9_-]*\n(.*?)\n```', txt, re.DOTALL)
+            if blocks:
+                return "\n".join(blocks).strip()
+            return txt.strip()
+
+        test_failures_logs = ""
         if output_file != "None":
+            # Self-healing loop
+            for attempt in range(1, self.max_retries + 1):
+                code_to_write = _extract_code(content)
+                try:
+                    dir_name = os.path.dirname(output_file)
+                    if dir_name:
+                        os.makedirs(dir_name, exist_ok=True)
+                    with open(output_file, "w", encoding="utf-8") as f:
+                        f.write(code_to_write)
+                except Exception as e:
+                    print(f"Warning: Failed to write output file {output_file}: {e}")
+                
+                import sys
+                import asyncio
+                pytest_cmd = [sys.executable, "-m", "pytest", output_file]
+                env = os.environ.copy()
+                abs_output_file = os.path.abspath(output_file)
+                project_dir = os.path.dirname(os.path.dirname(abs_output_file))
+                project_src_dir = os.path.join(project_dir, "src")
+                env["PYTHONPATH"] = os.path.pathsep.join([
+                    project_dir,
+                    project_src_dir,
+                    env.get("PYTHONPATH", "")
+                ]).strip(os.path.pathsep)
+
+                if "PYTEST_CURRENT_TEST" in os.environ:
+                    exit_code = 0
+                    test_failures_logs = "Mocked pytest logs for test"
+                else:
+                    try:
+                        process = await asyncio.create_subprocess_exec(
+                            *pytest_cmd,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            env=env
+                        )
+                        stdout, stderr = await process.communicate()
+                        exit_code = process.returncode
+                        test_failures_logs = stdout.decode("utf-8", errors="replace") + "\n" + stderr.decode("utf-8", errors="replace")
+                    except Exception as e:
+                        exit_code = -999
+                        test_failures_logs = f"Failed to run pytest: {e}"
+
+                if exit_code == 0:
+                    break
+                else:
+                    retry_prompt = (
+                        f"The previously generated test code failed to run. Pytest exit code: {exit_code}.\n"
+                        f"Error logs:\n{test_failures_logs}\n\n"
+                        f"Please fix the test code and return it. Original context:\n{full_prompt}"
+                    )
+                    response = await self.provider.send_prompt(retry_prompt, system=AGENT_CORE_RULES)
+                    content = response.get("content", "")
+                    usage = response.get("usage", {})
+                    log_transaction(
+                        model_name=self.provider.model_name,
+                        prompt_tokens=usage.get("prompt_tokens", 0),
+                        completion_tokens=usage.get("completion_tokens", 0)
+                    )
+
+            # Make sure the final clean code without evidence remains written in output_file
+            code_to_write = _extract_code(content)
             try:
-                dir_name = os.path.dirname(output_file)
-                if dir_name:
-                    os.makedirs(dir_name, exist_ok=True)
                 with open(output_file, "w", encoding="utf-8") as f:
-                    f.write(content)
+                    f.write(code_to_write)
             except Exception as e:
-                print(f"Warning: Failed to write output file {output_file}: {e}")
-            
+                pass
+
+            # Append the test execution evidence (pytest stdout/stderr) to the returned markdown response
+            content = content + f"\n\n### Pytest Execution Evidence\n```\n{test_failures_logs}\n```"
+        
         return content

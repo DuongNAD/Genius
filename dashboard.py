@@ -54,13 +54,76 @@ def check_agent_busy(agent_name: str) -> str:
         pass
     return "idle"
 
+IS_DISTRIBUTED = "--distributed" in sys.argv or "GENIUS_DISTRIBUTED" in os.environ
+
+def get_distributed_workers() -> dict:
+    registry = None
+    if 'serve' in sys.modules:
+        registry = getattr(sys.modules['serve'], 'worker_registry', None)
+    if not registry:
+        try:
+            import serve
+            registry = getattr(serve, 'worker_registry', None)
+        except Exception:
+            pass
+            
+    if registry:
+        try:
+            workers = {}
+            for w_id, w_info in registry.workers.items():
+                workers[w_id] = {
+                    "roles": w_info.get("roles"),
+                    "status": w_info.get("status"),
+                    "online": True
+                }
+            return workers
+        except Exception:
+            pass
+
+    hub_port = 8000
+    for arg in sys.argv:
+        if arg.startswith("--hub-port="):
+            try:
+                hub_port = int(arg.split("=")[1])
+            except Exception:
+                pass
+    try:
+        import httpx
+        import hashlib
+        import json
+        payload = {}
+        serialized = json.dumps(payload, sort_keys=True).encode('utf-8')
+        checksum = hashlib.sha256(serialized).hexdigest()
+        headers = {
+            "X-API-Key": "valid-api-key",
+            "X-Payload-SHA256": checksum,
+            "Content-Type": "application/json"
+        }
+        response = httpx.post(f"http://127.0.0.1:{hub_port}/workers", json=payload, headers=headers, timeout=1.0)
+        if response.status_code == 200:
+            workers_data = response.json()
+            workers = {}
+            for w_id, w_info in workers_data.items():
+                workers[w_id] = {
+                    "roles": w_info.get("roles"),
+                    "status": w_info.get("status"),
+                    "online": True
+                }
+            return workers
+    except Exception as e:
+        print(f"Fallback HTTP request to hub failed: {e}")
+    return {}
+
 @app.get("/api/status")
 def get_status():
+    if IS_DISTRIBUTED:
+        return get_distributed_workers()
+        
     agents = {
-        "grok": {"port": 8001, "db_name": "grok"},
-        "claude": {"port": 8002, "db_name": "claude"},
-        "codex": {"port": 8003, "db_name": "codex"},
-        "tester": {"port": 8004, "db_name": "tester"}
+        "grok": {"port": 8001, "db_name": "grok", "roles": ["grok"]},
+        "claude": {"port": 8002, "db_name": "claude", "roles": ["claude"]},
+        "codex": {"port": 8003, "db_name": "codex", "roles": ["codex"]},
+        "tester": {"port": 8004, "db_name": "tester", "roles": ["tester"]}
     }
     
     result = {}
@@ -70,7 +133,8 @@ def get_status():
         result[name] = {
             "port": info["port"],
             "online": online,
-            "status": status
+            "status": status,
+            "roles": info["roles"]
         }
     return result
 
@@ -143,90 +207,8 @@ def get_index():
     <main class="flex-grow p-6 space-y-8 max-w-7xl mx-auto w-full">
         <section>
             <h2 class="text-xl font-semibold mb-4 text-gray-300">Agent Server Statuses</h2>
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                <!-- Grok -->
-                <div class="bg-gray-800 p-5 rounded-lg border border-gray-700 shadow flex flex-col justify-between h-40">
-                    <div>
-                        <div class="flex items-center justify-between">
-                            <h3 class="text-lg font-bold text-teal-400">Grok Researcher</h3>
-                            <span class="text-xs text-gray-500 font-mono">8001</span>
-                        </div>
-                        <p class="text-xs text-gray-400 mt-1">Deep search & evidence lookup</p>
-                    </div>
-                    <div class="space-y-2 mt-4">
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-gray-400">Connection:</span>
-                            <span id="conn-grok" class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700 text-gray-400">Checking...</span>
-                        </div>
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-gray-400">Activity:</span>
-                            <span id="act-grok" class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700 text-gray-400">Checking...</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Claude -->
-                <div class="bg-gray-800 p-5 rounded-lg border border-gray-700 shadow flex flex-col justify-between h-40">
-                    <div>
-                        <div class="flex items-center justify-between">
-                            <h3 class="text-lg font-bold text-teal-400">Claude Architect</h3>
-                            <span class="text-xs text-gray-500 font-mono">8002</span>
-                        </div>
-                        <p class="text-xs text-gray-400 mt-1">Architecture & structural layout</p>
-                    </div>
-                    <div class="space-y-2 mt-4">
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-gray-400">Connection:</span>
-                            <span id="conn-claude" class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700 text-gray-400">Checking...</span>
-                        </div>
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-gray-400">Activity:</span>
-                            <span id="act-claude" class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700 text-gray-400">Checking...</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Codex -->
-                <div class="bg-gray-800 p-5 rounded-lg border border-gray-700 shadow flex flex-col justify-between h-40">
-                    <div>
-                        <div class="flex items-center justify-between">
-                            <h3 class="text-lg font-bold text-teal-400">Codex Reviewer</h3>
-                            <span class="text-xs text-gray-500 font-mono">8003</span>
-                        </div>
-                        <p class="text-xs text-gray-400 mt-1">Code review & safety scanner</p>
-                    </div>
-                    <div class="space-y-2 mt-4">
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-gray-400">Connection:</span>
-                            <span id="conn-codex" class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700 text-gray-400">Checking...</span>
-                        </div>
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-gray-400">Activity:</span>
-                            <span id="act-codex" class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700 text-gray-400">Checking...</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Tester -->
-                <div class="bg-gray-800 p-5 rounded-lg border border-gray-700 shadow flex flex-col justify-between h-40">
-                    <div>
-                        <div class="flex items-center justify-between">
-                            <h3 class="text-lg font-bold text-teal-400">Tester Agent</h3>
-                            <span class="text-xs text-gray-500 font-mono">8004</span>
-                        </div>
-                        <p class="text-xs text-gray-400 mt-1">Unit/Integration test runner</p>
-                    </div>
-                    <div class="space-y-2 mt-4">
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-gray-400">Connection:</span>
-                            <span id="conn-tester" class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700 text-gray-400">Checking...</span>
-                        </div>
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-gray-400">Activity:</span>
-                            <span id="act-tester" class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700 text-gray-400">Checking...</span>
-                        </div>
-                    </div>
-                </div>
+            <div id="worker-cards-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+                <!-- Cards will be dynamically inserted here -->
             </div>
         </section>
 
@@ -315,29 +297,58 @@ def get_index():
             try {
                 const response = await fetch('/api/status');
                 const data = await response.json();
-                const agents = ['grok', 'claude', 'codex', 'tester'];
-                agents.forEach(agent => {
-                    const info = data[agent];
-                    const connSpan = document.getElementById(`conn-${agent}`);
-                    const actSpan = document.getElementById(`act-${agent}`);
-                    if (info) {
-                        if (info.online) {
-                            connSpan.textContent = 'Online';
-                            connSpan.className = 'px-2.5 py-0.5 rounded-full text-xs font-semibold bg-green-500/20 text-green-400 border border-green-500/30';
-                        } else {
-                            connSpan.textContent = 'Offline';
-                            connSpan.className = 'px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-500/20 text-red-400 border border-red-500/30';
-                        }
-                        
-                        if (info.status === 'busy') {
-                            actSpan.textContent = 'Busy';
-                            actSpan.className = 'px-2.5 py-0.5 rounded-full text-xs font-semibold bg-yellow-500/20 text-yellow-400 border border-yellow-500/30';
-                        } else {
-                            actSpan.textContent = 'Idle';
-                            actSpan.className = 'px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700/50 text-gray-400 border border-gray-600';
-                        }
+                const container = document.getElementById('worker-cards-container');
+                if (!container) return;
+                
+                const keys = Object.keys(data);
+                if (keys.length === 0) {
+                    container.innerHTML = '<div class="col-span-full text-center text-gray-500 text-sm py-8 bg-gray-800 rounded border border-gray-700">No registered workers found</div>';
+                    return;
+                }
+                
+                let html = '';
+                keys.forEach(key => {
+                    const info = data[key];
+                    const roles = info.roles || [key];
+                    const rolesStr = roles.join(', ');
+                    const portInfo = info.port ? `Port ${info.port}` : '';
+                    
+                    let connBadge = '';
+                    if (info.online) {
+                        connBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-green-500/20 text-green-400 border border-green-500/30">Online</span>';
+                    } else {
+                        connBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-500/20 text-red-400 border border-red-500/30">Offline</span>';
                     }
+                    
+                    let actBadge = '';
+                    if (info.status === 'busy') {
+                        actBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">Busy</span>';
+                    } else {
+                        actBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700/50 text-gray-400 border border-gray-600">Idle</span>';
+                    }
+                    
+                    html += `
+                    <div class="bg-gray-800 p-5 rounded-lg border border-gray-700 shadow flex flex-col justify-between h-40">
+                        <div>
+                            <div class="flex items-center justify-between">
+                                <h3 class="text-lg font-bold text-teal-400 capitalize">${escapeHtml(key)}</h3>
+                                <span class="text-xs text-gray-500 font-mono">${escapeHtml(portInfo)}</span>
+                            </div>
+                            <p class="text-xs text-gray-400 mt-1">Roles: ${escapeHtml(rolesStr)}</p>
+                        </div>
+                        <div class="space-y-2 mt-4">
+                            <div class="flex justify-between items-center text-sm">
+                                <span class="text-gray-400">Connection:</span>
+                                <span>${connBadge}</span>
+                            </div>
+                            <div class="flex justify-between items-center text-sm">
+                                <span class="text-gray-400">Activity:</span>
+                                <span>${actBadge}</span>
+                            </div>
+                        </div>
+                    </div>`;
                 });
+                container.innerHTML = html;
             } catch (e) {
                 console.error("Error updating status:", e);
             }

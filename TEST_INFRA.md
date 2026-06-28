@@ -1,43 +1,38 @@
-# E2E Test Infra: Antigravity 2.0 Enterprise Core Framework (Distributed Microservices Edition)
+# Distributed Agent Network E2E Test Suite Infrastructure
 
-## Test Philosophy
-- **Opaque-box, requirement-driven**: Tests verify the distributed microservices features, the unified startup menu (`serve.py`), the async task status polling, payload checksum verifications, tenacity connection retries, and the httpx orchestrator based on external specifications and requirements without relying on internal implementation details.
-- **Methodology**: Apply Category-Partition (EP), Boundary Value Analysis (BVA), Pairwise Combinatorial Testing, and Real-World Workload Testing across 4 tiers.
+## 1. Test Philosophy
+The test suite utilizes a comprehensive, multi-tiered testing strategy designed to verify behavior under both normal operations and edge conditions without relying on implementation details of the specific underlying LLMs.
+- **Opaque-box, requirement-driven**: The tests evaluate the system based purely on its inputs, outputs, states, and protocol expectations.
+- **Category-Partition**: Features are partitioned into logical input and behavior domains (e.g., valid keys vs. missing keys, valid checksums vs. corrupted payloads).
+- **Boundary Value Analysis (BVA)**: Focuses on boundary limits such as maximum connection capacities, timeouts, zero/negative config bounds, empty IDs, and extreme payload sizes.
+- **Pairwise Combinatorial Testing**: Evaluates interactions between orthogonal features (e.g., authentication failures during task execution, network drops during results reporting, configuration changes during active worker routing).
+- **Workload Testing**: Exercises the system under high concurrency, cascading transient failures, dynamic scale-up/down, and end-to-end multi-stage pipeline workloads.
 
-## Feature Inventory
-| # | Feature | Source (requirement) | Tier 1 (Feature Coverage) | Tier 2 (Boundary & Corner) | Tier 3 (Cross-Feature) |
-|---|---------|---------------------|:------:|:------:|:------:|
-| 1 | FastAPI Web Server Setup & Unified Startup | ORIGINAL_REQUEST Follow-up §R1 & §R2 | 5 | 5 | ✓ |
-| 2 | API Authentication (X-API-Key) | ORIGINAL_REQUEST Follow-up §R1 | 5 | 5 | ✓ |
-| 3 | Async Task Processing, Checksums & Payload | ORIGINAL_REQUEST Follow-up §R1, §R2 & R7 | 5 | 5 | ✓ |
-| 4 | Orchestrator HTTP Polling & Routing | ORIGINAL_REQUEST Follow-up §R3 & R7 | 5 | 5 | ✓ |
-| 5 | Resilient HTTP & Connection Retries | ORIGINAL_REQUEST Follow-up §R4 & R7 | 5 | 5 | ✓ |
-| 6 | Configuration & Workspace Management | ORIGINAL_REQUEST Follow-up & PROJECT.md | 5 | 5 | ✓ |
+## 2. Feature Inventory
+The E2E Test Suite targets six core features of the Distributed Agent Network:
+1. **Worker Registration and Heartbeats**: Establishing connections, maintaining active worker pools, and periodic heartbeat checks to detect node liveness.
+2. **API Authentication and Checksums**: Verifying message authenticity using `X-API-Key` headers and payload integrity using `X-Payload-SHA256` SHA-256 signatures.
+3. **Async Task Processing & Execution**: Spawning asynchronous tasks, executing operations, and handling result reporting with appropriate state changes.
+4. **Routing & Dispatch (Orchestrator Polling & Routing)**: Finding matching workers based on requested capability roles, managing queues when workers are busy, and polling statuses.
+5. **Resilient HTTP & Connection Retries**: Mitigating network latency, transient errors (HTTP 429/503), drops, and backoff retry mechanisms.
+6. **Workspace & Configuration Management**: Updating limits dynamically, worker deregistration, cleanup of dead nodes, and configuration boundary safety.
 
-## Test Architecture
-- **Test Runner**: Pytest. Run using the command: `py -m pytest test_e2e.py -v`.
-- **Test Case Format**: Pytest test functions utilizing standard Python assertions, async/await features for asyncio operations, mock APIs (FastAPI TestClient or unittest.mock / respx for httpx calls).
-- **Directory Layout**:
-  - `test_e2e.py` is written at the project root to integrate natively with pytest discovery rules.
-  - `serve.py` launches the API servers and is verified by the test suite.
+## 3. Test Architecture
+The test infrastructure uses:
+- **Pytest & Pytest-asyncio**: The standard asynchronous Python testing framework.
+- **Production ClientWorker (`ag_core/distributed/worker.py`)**: The actual production class implementing the worker loop, heartbeat task, and task execution logic. Imported directly into tests and production scripts.
+- **Production CentralHub (`ag_core/distributed/hub.py`)**: The actual production coordinator class managing workers, task queues, routing, API auth, payload checksums, and the background sweeper loop.
+- **MockNetworkProtocol (`tests/test_distributed.py`)**: Simulates the transport layer, allowing precise injection of latency, dropped packets, and HTTP error statuses (like 429/503/401/400).
 
-## Real-World Application Scenarios (Tier 4)
-| # | Scenario | Features Exercised | Complexity |
-|---|----------|--------------------|------------|
-| 1 | Successful Microservices Pipeline Execution | F3, F4, F6 | Medium |
-| 2 | Network Jitter & 429 Recovery | F5, F6 | High |
-| 3 | Empty Design Payload Aborts Pipeline | F3, F4 | Medium |
-| 4 | Unauthorized Agent Response Aborts Pipeline | F2, F4 | Medium |
-| 5 | Invalid YAML Configuration Handling | F4, F6 | High |
+The business logic of `CentralHub` and `ClientWorker` executes exactly as it does in production, but is routed via the mock network protocol in tests to enable deterministic fault injection and timing controls without binding physical sockets.
 
-## Coverage Thresholds
-- **Tier 1 (Feature Coverage)**: ≥5 test cases per feature (Total: 30 test cases)
-- **Tier 2 (Boundary & Corner Cases)**: ≥5 test cases per feature (Total: 30 test cases)
-- **Tier 3 (Cross-Feature Combinations)**: Pairwise coverage of feature interactions (Total: 6 test cases)
-- **Tier 4 (Real-World Application Scenarios)**: High-fidelity end-to-end integration workflows (Total: 5 test cases)
-- **Total test cases**: 71 (satisfies threshold of $11 \times N + \max(5, N/2) = 11 \times 6 + 5 = 71$)
+## 4. Coverage Thresholds
+The suite executes exactly **71 test cases** divided across 4 tiers:
+- **Tier 1 (Feature Coverage)**: 30 tests (5 tests per feature for all 6 features)
+- **Tier 2 (Boundary & Corner Cases)**: 30 tests (5 tests per feature for all 6 features)
+- **Tier 3 (Cross-Feature Combinations)**: 6 tests (Pairwise interaction scenarios)
+- **Tier 4 (Real-World Workloads)**: 5 tests (E2E workflows, concurrency, network chaos, dynamic scaling, crash recovery)
 
-MANDATORY INTEGRITY WARNING:
-DO NOT CHEAT. All implementations must be genuine. DO NOT hardcode test results, create dummy/facade implementations, or circumvent the intended task. A Forensic Auditor will independently verify your work. Integrity violations WILL be detected and your work WILL be rejected.
-
-Once written, confirm that the file has been successfully saved at `e:\Project\Genius\TEST_INFRA.md` and report back.
+---
+*MANDATORY INTEGRITY WARNING:*
+*DO NOT CHEAT. All implementations must be genuine. DO NOT hardcode test results, create dummy/facade implementations, or circumvent the intended task. A Forensic Auditor will independently verify your work.*

@@ -47,6 +47,9 @@ class BaseAgent(abc.ABC):
                 db_path=db_path,
                 chroma_persist_dir=chroma_persist_dir
             )
+        
+        from ag_core.utils.git import GitManager
+        self.git = GitManager()
 
     def store_memory(self, text: str, metadata: dict | None = None) -> None:
         if self.memory:

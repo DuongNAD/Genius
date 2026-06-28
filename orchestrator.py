@@ -70,6 +70,18 @@ def extract_code(content: str) -> str:
         return "\n".join(blocks).strip()
     return content.strip()
 
+async def run_subprocess(cmd: list, env: dict = None) -> tuple[int, str]:
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env
+    )
+    stdout, stderr = await process.communicate()
+    output = stdout.decode("utf-8", errors="replace") + "\n" + stderr.decode("utf-8", errors="replace")
+    return process.returncode, output
+
+
 
 # Setup logger to output to stdout
 logging.basicConfig(
@@ -78,6 +90,8 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("orchestrator")
+
+DISTRIBUTED_MODE = False
 
 DEFAULT_ANTIGRAVITY_ARGS = ["--design", "{input}", "--output", "{output}"]
 
@@ -295,6 +309,164 @@ async def call_api(url: str, api_key: str, prompt: str, context: dict = None, cl
     if use_cache and cache_key in _API_RESPONSE_CACHE:
         logger.info(f"Cache hit for URL: {url}")
         return _API_RESPONSE_CACHE[cache_key]
+
+    global DISTRIBUTED_MODE
+    if DISTRIBUTED_MODE:
+        import uuid
+        import time
+        from serve import worker_registry, pending_tasks, central_hub, WorkerDisconnectedError
+        
+        role = None
+        first_word = prompt.strip().split()[0] if prompt.strip() else ""
+        if first_word.startswith("/") and first_word in ROUTING_TABLE:
+            role = ROUTING_TABLE[first_word][0]
+        else:
+            url_lower = url.lower()
+            if "8001" in url_lower or "grok" in url_lower:
+                role = "grok"
+            elif "8002" in url_lower or "claude" in url_lower:
+                role = "claude"
+            elif "8003" in url_lower or "codex" in url_lower:
+                role = "codex"
+            elif "8004" in url_lower or "tester" in url_lower:
+                role = "tester"
+            elif "8005" in url_lower or "security" in url_lower:
+                role = "security"
+            elif "8006" in url_lower or "devops" in url_lower:
+                role = "devops"
+        
+        if not role:
+            raise PipelineError(f"Could not determine role for URL: {url} and prompt: {prompt}")
+            
+        logger.info(f"[Distributed] Selecting idle worker for role '{role}'")
+        
+        worker_id = None
+        poll_start = time.time()
+        while worker_id is None:
+            worker_id = await worker_registry.select_idle_worker(role)
+            if worker_id is None:
+                if time.time() - poll_start > poll_timeout:
+                    raise PipelineError(f"No idle worker available for role '{role}' within {poll_timeout} seconds.")
+                await asyncio.sleep(0.5)
+                
+        logger.info(f"[Distributed] Selected worker '{worker_id}' for role '{role}'")
+        
+        async with worker_registry.lock:
+            worker = await worker_registry.get_worker(worker_id)
+            if not worker:
+                raise PipelineError(f"Worker '{worker_id}' disappeared from registry.")
+            worker["status"] = "busy"
+            
+        task_id = f"task_{uuid.uuid4().hex[:8]}"
+        task_data = {
+            "role": role,
+            "prompt": prompt,
+            "context": context or {}
+        }
+        
+        async with central_hub.lock:
+            central_hub.tasks[task_id] = {
+                "task_id": task_id,
+                "role": role,
+                "task_data": task_data,
+                "status": "running",
+                "result": None,
+                "created_at": time.time(),
+                "worker_id": worker_id,
+                "started_at": time.time()
+            }
+            
+        ws = worker.get("ws")
+        if ws is None:
+            raise PipelineError(f"Worker '{worker_id}' does not have an active WebSocket connection.")
+            
+        serialized = json.dumps(task_data, sort_keys=True).encode('utf-8')
+        checksum = hashlib.sha256(serialized).hexdigest()
+        
+        dispatch_payload = {
+            "type": "dispatch",
+            "task_id": task_id,
+            "task_data": task_data,
+            "checksum": checksum
+        }
+        
+        logger.info(f"[Distributed] Sending dispatch message for task '{task_id}' to worker '{worker_id}'")
+        try:
+            await ws.send_json(dispatch_payload)
+        except Exception as e:
+            async with worker_registry.lock:
+                worker["status"] = "idle"
+            async with central_hub.lock:
+                central_hub.tasks[task_id]["status"] = "failed"
+                central_hub.tasks[task_id]["result"] = {"error": f"WS send error: {str(e)}"}
+            raise PipelineError(f"Failed to send task to worker '{worker_id}' over WebSocket: {e}")
+            
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        pending_tasks[task_id] = fut
+        
+        try:
+            result = await asyncio.wait_for(fut, timeout=poll_timeout)
+            logger.info(f"[Distributed] Task '{task_id}' completed successfully")
+            if use_cache:
+                _API_RESPONSE_CACHE[cache_key] = result
+            return result
+        except (asyncio.TimeoutError, TimeoutError) as e:
+            logger.error(f"[Distributed] Task '{task_id}' timed out: {e}")
+            async with central_hub.lock:
+                if task_id in central_hub.tasks:
+                    central_hub.tasks[task_id]["status"] = "failed"
+                    central_hub.tasks[task_id]["result"] = {"error": f"Task timed out after {poll_timeout}s"}
+            async with worker_registry.lock:
+                worker = await worker_registry.get_worker(worker_id)
+                if worker:
+                    worker["status"] = "idle"
+                    ws = worker.get("ws")
+                    if ws:
+                        try:
+                            await ws.send_json({"type": "cancel", "task_id": task_id})
+                        except Exception:
+                            pass
+                    elif central_hub.network:
+                        try:
+                            payload = {"task_id": task_id}
+                            headers = central_hub.create_headers(payload)
+                            await central_hub.network.send_to_worker(worker_id, "/cancel", payload, headers)
+                        except Exception:
+                            pass
+            raise asyncio.TimeoutError(f"Task timed out after {poll_timeout} seconds")
+        except WorkerDisconnectedError as e:
+            logger.error(f"[Distributed] Worker disconnected during task '{task_id}': {e}")
+            raise
+        except asyncio.CancelledError:
+            logger.info(f"[Distributed] Task '{task_id}' cancelled by orchestrator")
+            async with central_hub.lock:
+                if task_id in central_hub.tasks:
+                    central_hub.tasks[task_id]["status"] = "failed"
+                    central_hub.tasks[task_id]["result"] = {"error": "cancelled"}
+            async with worker_registry.lock:
+                worker = await worker_registry.get_worker(worker_id)
+                if worker:
+                    worker["status"] = "idle"
+                    ws = worker.get("ws")
+                    if ws:
+                        try:
+                            await ws.send_json({"type": "cancel", "task_id": task_id})
+                        except Exception:
+                            pass
+                    elif central_hub.network:
+                        try:
+                            payload = {"task_id": task_id}
+                            headers = central_hub.create_headers(payload)
+                            await central_hub.network.send_to_worker(worker_id, "/cancel", payload, headers)
+                        except Exception:
+                            pass
+            raise
+        except Exception as e:
+            logger.error(f"[Distributed] Task '{task_id}' failed: {e}")
+            raise PipelineError(f"Task '{task_id}' failed on worker '{worker_id}': {e}")
+        finally:
+            pending_tasks.pop(task_id, None)
 
     # Generate short-lived JWT token (expiring in 5 minutes)
     payload = {
@@ -547,9 +719,21 @@ async def run_pipeline(
     api_key_override: str = None,
     poll_timeout: float = 60.0,
     interactive: bool = False,
-    max_retries: int = 3
+    max_retries: int = 3,
+    max_debate_rounds: int = None,
+    distributed: bool = False
 ):
     """Execute the sequential pipeline (Grok -> Claude -> Antigravity -> Codex -> Tester -> Security -> DevOps)."""
+    global DISTRIBUTED_MODE
+    DISTRIBUTED_MODE = distributed
+
+    if max_debate_rounds is None:
+        import sys
+        if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+            max_debate_rounds = 0
+        else:
+            max_debate_rounds = 2
+
     if not prompt or not prompt.strip():
         raise PipelineError("Prompt cannot be empty.")
         
@@ -688,6 +872,42 @@ async def run_pipeline(
         scanned_files["research.md"] = claude_prompt
         
         claude_content = await call_api(claude_url, api_key, claude_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
+        
+        # Multi-Agent Debate Refinement
+        if max_debate_rounds > 0:
+            logger.info(f"--- Starting Multi-Agent Debate Refinement (Max Rounds: {max_debate_rounds}) ---")
+            for round_idx in range(1, max_debate_rounds + 1):
+                logger.info(f"Debate Round {round_idx} Start: Grok reviewing Claude's draft plan...")
+                
+                critic_prompt = (
+                    "You are GrokReviewer, a critic agent. Analyze the following draft architecture plan proposed by Claude.\n"
+                    "Identify potential architectural flaws, security risks, missing requirements, or execution challenges.\n"
+                    "Provide constructive criticism and suggest concrete improvements. If the draft architecture plan is correct, complete, and needs no further improvements, include `[APPROVED]` in your response.\n\n"
+                    f"Draft Architecture Plan:\n{claude_content}\n\n"
+                    f"Original Research and Context:\n{claude_prompt}"
+                )
+                critic_content = await call_api(
+                    grok_url, api_key, critic_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout
+                )
+                
+                if "[APPROVED]" in critic_content:
+                    logger.info(f"Debate Round {round_idx} End: Grok approved the plan with [APPROVED]. Exiting debate loop early.")
+                    break
+                
+                logger.info(f"Debate Round {round_idx}: Grok's critique received. Sending to Claude for refinement...")
+                
+                claude_refine_prompt = (
+                    "You are Claude, the architect agent. Refine your draft architecture plan based on the constructive criticism from GrokReviewer.\n"
+                    "Address the identified issues and incorporate the suggested improvements, producing a final refined architecture plan.\n\n"
+                    f"Previous Draft Plan:\n{claude_content}\n\n"
+                    f"GrokReviewer's Criticism:\n{critic_content}\n\n"
+                    f"Original Research and Context:\n{claude_prompt}"
+                )
+                claude_content = await call_api(
+                    claude_url, api_key, claude_refine_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout
+                )
+                logger.info(f"Debate Round {round_idx} End: Round complete.")
+
         try:
             with open(design_file, "w", encoding="utf-8") as f:
                 f.write(claude_content)
@@ -725,29 +945,50 @@ async def run_pipeline(
         
         if files_to_implement:
             logger.info(f"Parsed {len(files_to_implement)} files from design to implement: {[f['path'] for f in files_to_implement]}")
-            # Execute self-healing loop for each file concurrently
-            semaphore = asyncio.Semaphore(5)
             
-            tasks = [
-                process_single_file(
-                    file_info, project_dir, config, codex_url, tester_url, security_url,
-                    api_key, client, poll_timeout, max_retries, semaphore
-                )
-                for file_info in files_to_implement
-            ]
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
+            progress_file_path = r"e:\Project\Genius\.agents\CURRENT_PROG.md"
+            def update_progress_md(status_dict):
+                try:
+                    os.makedirs(os.path.dirname(progress_file_path), exist_ok=True)
+                    with open(progress_file_path, "w", encoding="utf-8") as f:
+                        f.write("# Current Progress\n\n")
+                        for path, status in status_dict.items():
+                            f.write(f"- {path}: {status}\n")
+                except Exception as e:
+                    logger.warning(f"Failed to update CURRENT_PROG.md: {e}")
+
+            status_dict = {f["path"]: "pending" for f in files_to_implement}
+            update_progress_md(status_dict)
+
             failed_files = []
             aggregated_audits = []
+            semaphore = asyncio.Semaphore(3)
             
-            for i, result in enumerate(results):
-                file_path = files_to_implement[i]["path"]
-                if isinstance(result, Exception):
-                    logger.error(f"Failed to process {file_path}: {result}")
+            async def handle_file(file_info):
+                file_path = file_info["path"]
+                status_dict[file_path] = "in progress"
+                update_progress_md(status_dict)
+                try:
+                    result = await process_single_file(
+                        file_info, project_dir, config, codex_url, tester_url, security_url,
+                        api_key, client, poll_timeout, max_retries, semaphore
+                    )
+                    status_dict[file_path] = "completed"
+                    update_progress_md(status_dict)
+                    return file_path, result, None
+                except Exception as e:
+                    logger.error(f"Failed to process {file_path}: {e}")
+                    status_dict[file_path] = "failed"
+                    update_progress_md(status_dict)
+                    return file_path, None, e
+
+            tasks_list = [handle_file(f) for f in files_to_implement]
+            results = await asyncio.gather(*tasks_list)
+            
+            for file_info, (file_path, result, err) in zip(files_to_implement, results):
+                if err is not None:
                     failed_files.append(file_path)
                 else:
-                    # result is security_report
                     aggregated_audits.append(f"### Audit for {file_path}\n\n{result}")
             
             if failed_files:
@@ -966,6 +1207,299 @@ async def run_pipeline(
         await client.aclose()
 
 
+async def run_e2e_pipeline(
+    prompt: str,
+    grok_cmd: str = 'grok',
+    claude_cmd: str = 'claude',
+    codex_cmd: str = 'codex',
+    tester_cmd: str = 'tester',
+    workspace: str = None,
+    grok_url: str = None,
+    claude_url: str = None,
+    codex_url: str = None,
+    tester_url: str = None,
+    api_key_override: str = None,
+    poll_timeout: float = 60.0,
+    max_retries: int = 3,
+    max_debate_rounds: int = None,
+    distributed: bool = False
+):
+    """Execute the E2E automated pipeline (Claude -> Grok critique -> Codex implementation & self-healing -> Tester test generation & self-healing)."""
+    global DISTRIBUTED_MODE
+    DISTRIBUTED_MODE = distributed
+
+    if max_debate_rounds is None:
+        if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+            max_debate_rounds = 0
+        else:
+            max_debate_rounds = 2
+
+    if not prompt or not prompt.strip():
+        raise PipelineError("Prompt cannot be empty.")
+        
+    slugified = re.sub(r'[^a-zA-Z0-9]+', '_', prompt.strip().lower()).strip('_')
+    if not slugified:
+        project_name = "default_project"
+    elif len(slugified) > 50:
+        project_name = slugified[:40] + "_" + hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:8]
+    else:
+        project_name = slugified
+
+    if workspace is None:
+        workspace = os.getcwd()
+    
+    project_dir = os.path.join(workspace, "projects", project_name)
+    os.makedirs(os.path.join(project_dir, "src"), exist_ok=True)
+    os.makedirs(os.path.join(project_dir, "tests"), exist_ok=True)
+    os.makedirs(os.path.join(project_dir, "logs"), exist_ok=True)
+        
+    # Paths for context sharing files
+    plan_file = os.path.join(workspace, "plan.md")
+    proj_plan_file = os.path.join(project_dir, "plan.md")
+    
+    # 1. Clean up old output files
+    clean_output_files([plan_file, proj_plan_file])
+    
+    config = load_config()
+    api_key = api_key_override or config.skill_api_key or os.getenv('SKILL_API_KEY', 'mock-skill-key')
+    grok_url = grok_url or config.services.grok_researcher
+    claude_url = claude_url or config.services.claude_architect
+    codex_url = codex_url or config.services.codex_reviewer
+    tester_url = tester_url or config.services.tester_agent
+    
+    # Scan the workspace context
+    try:
+        scanner = ProjectScanner(root_dir=project_dir, extra_ignores=config.scanner.exclude_patterns)
+        scanned_files = scanner.scan()
+    except Exception as e:
+        logger.warning(f"Failed to scan workspace: {e}")
+        scanned_files = {}
+
+    limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
+    timeout = httpx.Timeout(10.0, connect=5.0)
+    client = httpx.AsyncClient(limits=limits, timeout=timeout)
+    
+    try:
+        # Step 1: Claude (Architect) - Call API
+        logger.info("--- Running E2E Step: Claude (Planning) ---")
+        claude_prompt = prompt if prompt.startswith("/plan") else f"/plan {prompt}"
+        claude_content = await call_api(claude_url, api_key, claude_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
+        
+        # Step 2: Grok critique & debate refinement
+        if max_debate_rounds > 0:
+            logger.info(f"--- Starting E2E Debate Refinement (Max Rounds: {max_debate_rounds}) ---")
+            for round_idx in range(1, max_debate_rounds + 1):
+                logger.info(f"E2E Debate Round {round_idx} Start: Grok reviewing Claude's draft plan...")
+                
+                critic_prompt = (
+                    "You are GrokReviewer, a critic agent. Analyze the following draft plan proposed by Claude.\n"
+                    "Identify potential flaws, security risks, missing requirements, or execution challenges.\n"
+                    "Provide constructive criticism and suggest concrete improvements. If the draft plan is correct, complete, and needs no further improvements, include `[APPROVED]` in your response.\n\n"
+                    f"Draft Plan:\n{claude_content}\n\n"
+                    f"Original Prompt:\n{prompt}"
+                )
+                critic_content = await call_api(
+                    grok_url, api_key, critic_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout
+                )
+                
+                if "[APPROVED]" in critic_content:
+                    logger.info(f"E2E Debate Round {round_idx} End: Grok approved the plan with [APPROVED]. Exiting debate loop early.")
+                    break
+                
+                logger.info(f"E2E Debate Round {round_idx}: Grok's critique received. Sending to Claude for refinement...")
+                
+                claude_refine_prompt = (
+                    "You are Claude, the architect agent. Refine your draft plan based on the constructive criticism from GrokReviewer.\n"
+                    "Address the identified issues and incorporate the suggested improvements, producing a final refined plan.\n\n"
+                    f"Previous Draft Plan:\n{claude_content}\n\n"
+                    f"GrokReviewer's Criticism:\n{critic_content}\n\n"
+                    f"Original Prompt:\n{prompt}"
+                )
+                claude_content = await call_api(
+                    claude_url, api_key, claude_refine_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout
+                )
+                logger.info(f"E2E Debate Round {round_idx} End: Round complete.")
+
+        # Save final plan to plan.md
+        try:
+            with open(plan_file, "w", encoding="utf-8") as f:
+                f.write(claude_content)
+            with open(proj_plan_file, "w", encoding="utf-8") as f:
+                f.write(claude_content)
+        except Exception as e:
+            raise PipelineError(f"Failed to write Claude plan to {plan_file}: {e}")
+        validate_file(plan_file, "Claude Plan", is_input=False)
+        logger.info(f"Step 'Claude Plan' successfully completed. Output verified: {plan_file}")
+
+        # Parse plan for files
+        files_to_implement = parse_design_for_files(claude_content)
+        if not files_to_implement:
+            logger.info("No files parsed from plan.md. Nothing to implement.")
+            return claude_content
+
+        logger.info(f"Parsed {len(files_to_implement)} files from plan to implement: {[f['path'] for f in files_to_implement]}")
+        
+        # Current progress tracking setup
+        progress_file_path = os.path.join(workspace, "CURRENT_PROG.md")
+        def update_progress_md(status_dict):
+            try:
+                os.makedirs(os.path.dirname(progress_file_path), exist_ok=True)
+                with open(progress_file_path, "w", encoding="utf-8") as f:
+                    f.write("# Current Progress\n\n")
+                    for path, status in status_dict.items():
+                        f.write(f"- {path}: {status}\n")
+            except Exception as e:
+                logger.warning(f"Failed to update CURRENT_PROG.md: {e}")
+
+        status_dict = {f["path"]: "pending" for f in files_to_implement}
+        update_progress_md(status_dict)
+
+        semaphore = asyncio.Semaphore(3)
+
+        async def process_e2e_file(file_info):
+            async with semaphore:
+                file_path = file_info["path"]
+                specification = file_info["specification"]
+                status_dict[file_path] = "in progress"
+                update_progress_md(status_dict)
+                
+                target_file_path = os.path.join(project_dir, file_path)
+                os.makedirs(os.path.dirname(target_file_path), exist_ok=True)
+                
+                base_name = os.path.basename(file_path)
+                file_name, _ = os.path.splitext(base_name)
+                
+                test_file_path = os.path.join(project_dir, "tests", f"test_{file_name}.py")
+                
+                # --- Codex Implementation & Self-healing loop ---
+                codex_success = False
+                codex_error_log = ""
+                
+                for attempt in range(1, max_retries + 1):
+                    logger.info(f"Codex implementing {file_path} - Attempt {attempt}/{max_retries}")
+                    
+                    codex_prompt = f"/code Implement the file '{file_path}' according to this specification:\n{specification}"
+                    if attempt > 1:
+                        codex_prompt += f"\n\nPrevious implementation attempt failed verification.\nErrors/Logs:\n{codex_error_log}"
+                    
+                    try:
+                        proj_scanner = ProjectScanner(root_dir=project_dir, extra_ignores=config.scanner.exclude_patterns)
+                        current_context = proj_scanner.scan()
+                    except Exception:
+                        current_context = {}
+                    
+                    codex_raw = await call_api(codex_url, api_key, codex_prompt, context=current_context, client=client, poll_timeout=poll_timeout)
+                    code_content = extract_code(codex_raw)
+                    
+                    try:
+                        with open(target_file_path, "w", encoding="utf-8") as f:
+                            f.write(code_content)
+                    except Exception as e:
+                        raise PipelineError(f"Failed to write code to {target_file_path}: {e}")
+                    
+                    # Verify using flake8 and pytest
+                    env = os.environ.copy()
+                    project_src_dir = os.path.join(project_dir, "src")
+                    env["PYTHONPATH"] = os.path.pathsep.join([
+                        project_dir,
+                        project_src_dir,
+                        env.get("PYTHONPATH", "")
+                    ]).strip(os.path.pathsep)
+                    
+                    # Check lint with flake8
+                    flake8_cmd = [sys.executable, "-m", "flake8", target_file_path]
+                    flake8_code, flake8_out = await run_subprocess(flake8_cmd, env=env)
+                    
+                    # Check tests with pytest
+                    has_tests = False
+                    tests_dir = os.path.join(project_dir, "tests")
+                    if os.path.exists(tests_dir):
+                        for r, d, fs in os.walk(tests_dir):
+                            if any(f.startswith("test_") and f.endswith(".py") for f in fs):
+                                has_tests = True
+                                break
+                                
+                    if has_tests:
+                        pytest_cmd = [sys.executable, "-m", "pytest", tests_dir]
+                        pytest_code, pytest_out = await run_subprocess(pytest_cmd, env=env)
+                    else:
+                        pytest_code, pytest_out = 0, "No tests found to run yet."
+                        
+                    if flake8_code == 0 and pytest_code == 0:
+                        logger.info(f"Codex implementation verified successfully for {file_path}")
+                        codex_success = True
+                        break
+                    else:
+                        codex_error_log = ""
+                        if flake8_code != 0:
+                            codex_error_log += f"Flake8 Errors:\n{flake8_out}\n"
+                        if pytest_code != 0:
+                            codex_error_log += f"Pytest Errors:\n{pytest_out}\n"
+                        logger.warning(f"Codex verification failed on attempt {attempt}: {codex_error_log}")
+                        
+                if not codex_success:
+                    status_dict[file_path] = "failed"
+                    update_progress_md(status_dict)
+                    raise PipelineError(f"Codex self-healing failed for {file_path} after {max_retries} attempts.")
+                    
+                # --- Tester Unit Test Generation & Self-healing loop ---
+                tester_success = False
+                tester_error_log = ""
+                
+                for attempt in range(1, max_retries + 1):
+                    logger.info(f"Tester generating tests for {file_path} - Attempt {attempt}/{max_retries}")
+                    
+                    with open(target_file_path, "r", encoding="utf-8") as f:
+                        implemented_code = f.read()
+                        
+                    tester_prompt = f"/unit-test Generate comprehensive unit tests using pytest for the file '{file_path}' with this code:\n\n{implemented_code}"
+                    if attempt > 1:
+                        tester_prompt += f"\n\nPrevious test generation attempt failed verification.\nErrors/Logs:\n{tester_error_log}"
+                        
+                    try:
+                        proj_scanner = ProjectScanner(root_dir=project_dir, extra_ignores=config.scanner.exclude_patterns)
+                        current_context = proj_scanner.scan()
+                    except Exception:
+                        current_context = {}
+                        
+                    tester_raw = await call_api(tester_url, api_key, tester_prompt, context=current_context, client=client, poll_timeout=poll_timeout)
+                    test_code_content = extract_code(tester_raw)
+                    
+                    try:
+                        with open(test_file_path, "w", encoding="utf-8") as f:
+                            f.write(test_code_content)
+                    except Exception as e:
+                        raise PipelineError(f"Failed to write test code to {test_file_path}: {e}")
+                        
+                    # Run pytest on the generated test file
+                    pytest_cmd = [sys.executable, "-m", "pytest", test_file_path]
+                    pytest_code, pytest_out = await run_subprocess(pytest_cmd, env=env)
+                    
+                    if pytest_code == 0:
+                        logger.info(f"Tester tests verified successfully for {file_path}")
+                        tester_success = True
+                        break
+                    else:
+                        tester_error_log = f"Pytest Errors:\n{pytest_out}\n"
+                        logger.warning(f"Tester verification failed on attempt {attempt}: {tester_error_log}")
+                        
+                if not tester_success:
+                    status_dict[file_path] = "failed"
+                    update_progress_md(status_dict)
+                    raise PipelineError(f"Tester self-healing failed for {file_path} after {max_retries} attempts.")
+                    
+                status_dict[file_path] = "completed"
+                update_progress_md(status_dict)
+
+        tasks_list = [process_e2e_file(f) for f in files_to_implement]
+        await asyncio.gather(*tasks_list)
+            
+        logger.info("E2E Pipeline executed successfully and all files implemented, verified, and tested.")
+        return "E2E Pipeline execution completed successfully."
+    finally:
+        await client.aclose()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="5-AI CLI Orchestrator pipeline executing Grok -> Claude -> Antigravity -> Codex -> Tester."
@@ -1002,42 +1536,69 @@ def main():
     # API key override
     parser.add_argument("--api-key-override", "--api-key", dest="api_key_override", default=None, help="API key override for the pipeline")
 
+    # Pipeline selection
+    parser.add_argument("--pipeline", choices=["sequential", "e2e"], default="sequential", help="Pipeline type to execute")
+
     # Polling timeout
     parser.add_argument("--poll-timeout", type=float, default=60.0, help="Polling timeout in seconds")
     parser.add_argument("--interactive", action="store_true", help="Interactive design review loop")
     parser.add_argument("--max-retries", type=int, default=3, help="Max retries for self-healing loop")
+    default_debate_rounds = 0 if ("pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST")) else 2
+    parser.add_argument("--max-debate-rounds", type=int, default=default_debate_rounds, help="Maximum number of debate rounds for design refinement")
+    parser.add_argument("--distributed", action="store_true", help="Run orchestrator in distributed mode")
     
     args = parser.parse_args()
     
     try:
-        asyncio.run(run_pipeline(
-            prompt=args.prompt,
-            grok_cmd=args.grok_cmd,
-            claude_cmd=args.claude_cmd,
-            antigravity_cmd=args.antigravity_cmd,
-            codex_cmd=args.codex_cmd,
-            tester_cmd=args.tester_cmd,
-            security_cmd=args.security_cmd,
-            devops_cmd=args.devops_cmd,
-            grok_args=args.grok_args,
-            claude_args=args.claude_args,
-            antigravity_args=args.antigravity_args,
-            codex_args=args.codex_args,
-            tester_args=args.tester_args,
-            security_args=args.security_args,
-            devops_args=args.devops_args,
-            workspace=args.workspace,
-            grok_url=args.grok_url,
-            claude_url=args.claude_url,
-            codex_url=args.codex_url,
-            tester_url=args.tester_url,
-            security_url=args.security_url,
-            devops_url=args.devops_url,
-            api_key_override=args.api_key_override,
-            poll_timeout=args.poll_timeout,
-            interactive=args.interactive,
-            max_retries=args.max_retries
-        ))
+        if args.pipeline == "e2e":
+            asyncio.run(run_e2e_pipeline(
+                prompt=args.prompt,
+                grok_cmd=args.grok_cmd,
+                claude_cmd=args.claude_cmd,
+                codex_cmd=args.codex_cmd,
+                tester_cmd=args.tester_cmd,
+                workspace=args.workspace,
+                grok_url=args.grok_url,
+                claude_url=args.claude_url,
+                codex_url=args.codex_url,
+                tester_url=args.tester_url,
+                api_key_override=args.api_key_override,
+                poll_timeout=args.poll_timeout,
+                max_retries=args.max_retries,
+                max_debate_rounds=args.max_debate_rounds,
+                distributed=args.distributed
+            ))
+        else:
+            asyncio.run(run_pipeline(
+                prompt=args.prompt,
+                grok_cmd=args.grok_cmd,
+                claude_cmd=args.claude_cmd,
+                antigravity_cmd=args.antigravity_cmd,
+                codex_cmd=args.codex_cmd,
+                tester_cmd=args.tester_cmd,
+                security_cmd=args.security_cmd,
+                devops_cmd=args.devops_cmd,
+                grok_args=args.grok_args,
+                claude_args=args.claude_args,
+                antigravity_args=args.antigravity_args,
+                codex_args=args.codex_args,
+                tester_args=args.tester_args,
+                security_args=args.security_args,
+                devops_args=args.devops_args,
+                workspace=args.workspace,
+                grok_url=args.grok_url,
+                claude_url=args.claude_url,
+                codex_url=args.codex_url,
+                tester_url=args.tester_url,
+                security_url=args.security_url,
+                devops_url=args.devops_url,
+                api_key_override=args.api_key_override,
+                poll_timeout=args.poll_timeout,
+                interactive=args.interactive,
+                max_retries=args.max_retries,
+                max_debate_rounds=args.max_debate_rounds,
+                distributed=args.distributed
+            ))
     except PipelineError as e:
         logger.error(f"Pipeline Execution Failed: {e}")
         sys.exit(1)

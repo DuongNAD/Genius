@@ -412,11 +412,8 @@ def test_t2_security_checksum_mismatch_400():
     app = get_security_agent_app()
     client = TestClient(app)
     
-    import time
-    from ag_core.utils.jwt import encode_jwt
-    api_key = "test-key"
-    payload = {"sub": "orchestrator", "exp": time.time() + 300}
-    jwt_token = encode_jwt(payload, api_key)
+    from test_e2e import get_valid_api_key
+    jwt_token = get_valid_api_key()
     
     headers = {
         "X-API-Key": jwt_token,
@@ -437,11 +434,8 @@ def test_t2_devops_checksum_mismatch_400():
     app = get_devops_agent_app()
     client = TestClient(app)
     
-    import time
-    from ag_core.utils.jwt import encode_jwt
-    api_key = "test-key"
-    payload = {"sub": "orchestrator", "exp": time.time() + 300}
-    jwt_token = encode_jwt(payload, api_key)
+    from test_e2e import get_valid_api_key
+    jwt_token = get_valid_api_key()
     
     headers = {
         "X-API-Key": jwt_token,

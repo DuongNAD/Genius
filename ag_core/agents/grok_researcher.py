@@ -5,6 +5,7 @@ from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.scanner.project_scanner import ProjectScanner
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
+from ag_core.utils.prompt_templates import AGENT_CORE_RULES
 
 class GrokResearcherAgent(BaseAgent):
     """
@@ -50,7 +51,7 @@ class GrokResearcherAgent(BaseAgent):
         full_prompt = f"{user_prompt}\n\nProject files context:\n{context}"
         
         # Invoke provider
-        response = await self.provider.send_prompt(full_prompt)
+        response = await self.provider.send_prompt(full_prompt, system=AGENT_CORE_RULES)
         content = response.get("content", "")
         usage = response.get("usage", {})
         

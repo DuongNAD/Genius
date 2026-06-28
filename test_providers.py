@@ -1,6 +1,7 @@
 import pytest
-import httpx
 import asyncio
+import json
+import shutil
 from unittest.mock import AsyncMock, patch
 from ag_core.providers.openai_provider import OpenAIProvider
 from ag_core.providers.anthropic_provider import AnthropicProvider
@@ -8,148 +9,177 @@ from ag_core.providers.grok_provider import GrokProvider
 
 def test_openai_provider_success():
     async def run_test():
-        provider = OpenAIProvider(api_key="test-key")
+        provider = OpenAIProvider()
         
-        mock_response = httpx.Response(
-            status_code=200,
-            json={
-                "choices": [{"message": {"content": "Hello world!"}}],
+        mock_process = AsyncMock()
+        mock_process.communicate.return_value = (
+            json.dumps({
+                "result": "Hello from OpenAI CLI!",
                 "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 5,
-                    "total_tokens": 15
+                    "input_tokens": 10,
+                    "output_tokens": 5
                 }
-            },
-            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+            }).encode("utf-8"),
+            b""
         )
         
-        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = mock_response
+        with patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_process
             
-            response = await provider.send_prompt("Test prompt", temperature=0.7)
+            response = await provider.send_prompt("Test prompt", system="You are helpful")
             
-            assert response["content"] == "Hello world!"
+            assert response["content"] == "Hello from OpenAI CLI!"
             assert response["usage"]["prompt_tokens"] == 10
             assert response["usage"]["completion_tokens"] == 5
             assert response["usage"]["total_tokens"] == 15
             
-            # Verify post parameters
-            mock_post.assert_called_once()
-            args, kwargs = mock_post.call_args
-            assert kwargs["headers"]["Authorization"] == "Bearer test-key"
-            assert kwargs["json"]["model"] == "gpt-4o"
-            assert kwargs["json"]["temperature"] == 0.7
-            assert kwargs["json"]["messages"] == [{"role": "user", "content": "Test prompt"}]
+            mock_exec.assert_called_once()
+            args, kwargs = mock_exec.call_args
+            assert args[0] == "/usr/local/bin/claude"
+            assert args[1:] == (
+                "-p", "Test prompt",
+                "--bare",
+                "--tools", '""',
+                "--output-format", "json",
+                "--system-prompt", "You are helpful"
+            )
+            assert kwargs["stdin"] == asyncio.subprocess.DEVNULL
+            assert kwargs["stdout"] == asyncio.subprocess.PIPE
+            assert kwargs["stderr"] == asyncio.subprocess.PIPE
+            
+            mock_process.communicate.assert_called_once_with()
             
     asyncio.run(run_test())
 
-def test_openai_provider_retry_on_500():
+def test_openai_provider_fallback_path():
     async def run_test():
-        provider = OpenAIProvider(api_key="test-key")
+        provider = OpenAIProvider()
         
-        response_500 = httpx.Response(status_code=500, request=httpx.Request("POST", "url"))
-        response_200 = httpx.Response(
-            status_code=200,
-            json={
-                "choices": [{"message": {"content": "Recovered!"}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-            },
-            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        mock_process = AsyncMock()
+        mock_process.communicate.return_value = (
+            json.dumps({
+                "result": "Fallback test",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1
+                }
+            }).encode("utf-8"),
+            b""
         )
         
-        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post, \
-             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            mock_post.side_effect = [response_500, response_200]
+        with patch("shutil.which", return_value=None), \
+             patch("os.getenv", side_effect=lambda key: r"C:\Users\FakeUser\AppData\Roaming" if key == "APPDATA" else None), \
+             patch("os.path.exists", return_value=True), \
+             patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_process
             
             response = await provider.send_prompt("Test prompt")
-            assert response["content"] == "Recovered!"
-            assert mock_post.call_count == 2
-            assert mock_sleep.called
+            
+            assert response["content"] == "Fallback test"
+            mock_exec.assert_called_once()
+            args, kwargs = mock_exec.call_args
+            assert args[0] == r"C:\Users\FakeUser\AppData\Roaming\npm\claude.cmd"
             
     asyncio.run(run_test())
 
-def test_openai_provider_no_retry_on_401():
+def test_openai_provider_invalid_json():
     async def run_test():
-        provider = OpenAIProvider(api_key="test-key")
+        provider = OpenAIProvider()
         
-        response_401 = httpx.Response(status_code=401, request=httpx.Request("POST", "url"))
+        mock_process = AsyncMock()
+        mock_process.communicate.return_value = (
+            b"not a valid json",
+            b""
+        )
         
-        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = response_401
+        with patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_process
             
-            with pytest.raises(httpx.HTTPStatusError) as exc_info:
-                await provider.send_prompt("Test prompt")
-                
-            assert exc_info.value.response.status_code == 401
-            assert mock_post.call_count == 1  # No retries for 401
+            response = await provider.send_prompt("Test prompt")
+            
+            assert response["content"] == ""
+            assert response["usage"]["prompt_tokens"] == 0
+            assert response["usage"]["completion_tokens"] == 0
+            assert response["usage"]["total_tokens"] == 0
             
     asyncio.run(run_test())
 
 def test_anthropic_provider_success():
     async def run_test():
-        provider = AnthropicProvider(api_key="test-anthropic-key")
+        provider = AnthropicProvider()
         
-        mock_response = httpx.Response(
-            status_code=200,
-            json={
-                "content": [{"text": "Hello from Claude"}],
+        mock_process = AsyncMock()
+        mock_process.communicate.return_value = (
+            json.dumps({
+                "result": "Hello from Claude CLI!",
                 "usage": {
                     "input_tokens": 12,
                     "output_tokens": 8
                 }
-            },
-            request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+            }).encode("utf-8"),
+            b""
         )
         
-        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = mock_response
+        with patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_process
             
-            response = await provider.send_prompt("Test prompt", max_tokens=2000)
+            response = await provider.send_prompt("Test prompt")
             
-            assert response["content"] == "Hello from Claude"
+            assert response["content"] == "Hello from Claude CLI!"
             assert response["usage"]["prompt_tokens"] == 12
             assert response["usage"]["completion_tokens"] == 8
             assert response["usage"]["total_tokens"] == 20
             
-            mock_post.assert_called_once()
-            args, kwargs = mock_post.call_args
-            assert kwargs["headers"]["x-api-key"] == "test-anthropic-key"
-            assert kwargs["headers"]["anthropic-version"] == "2023-06-01"
-            assert kwargs["json"]["model"] == "claude-3-5-sonnet-20241022"
-            assert kwargs["json"]["max_tokens"] == 2000
+            mock_exec.assert_called_once()
+            args, kwargs = mock_exec.call_args
+            assert args[0] == "/usr/local/bin/claude"
+            assert args[1:] == (
+                "-p", "Test prompt",
+                "--bare",
+                "--tools", '""',
+                "--output-format", "json"
+            )
             
     asyncio.run(run_test())
 
 def test_grok_provider_success():
     async def run_test():
-        provider = GrokProvider(api_key="test-grok-key")
+        provider = GrokProvider()
         
-        mock_response = httpx.Response(
-            status_code=200,
-            json={
-                "choices": [{"message": {"content": "Hello from Grok"}}],
+        mock_process = AsyncMock()
+        mock_process.communicate.return_value = (
+            json.dumps({
+                "result": "Hello from Grok CLI!",
                 "usage": {
-                    "prompt_tokens": 20,
-                    "completion_tokens": 10,
-                    "total_tokens": 30
+                    "input_tokens": 20,
+                    "output_tokens": 10
                 }
-            },
-            request=httpx.Request("POST", "https://api.x.ai/v1/chat/completions")
+            }).encode("utf-8"),
+            b""
         )
         
-        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = mock_response
+        with patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_process
             
             response = await provider.send_prompt("Test prompt")
             
-            assert response["content"] == "Hello from Grok"
+            assert response["content"] == "Hello from Grok CLI!"
             assert response["usage"]["prompt_tokens"] == 20
             assert response["usage"]["completion_tokens"] == 10
             assert response["usage"]["total_tokens"] == 30
             
-            mock_post.assert_called_once()
-            args, kwargs = mock_post.call_args
-            assert kwargs["headers"]["Authorization"] == "Bearer test-grok-key"
-            assert kwargs["json"]["model"] == "grok-2-1212"
+            mock_exec.assert_called_once()
+            args, kwargs = mock_exec.call_args
+            assert args[0] == "/usr/local/bin/claude"
+            assert args[1:] == (
+                "-p", "Test prompt",
+                "--bare",
+                "--tools", '""',
+                "--output-format", "json"
+            )
             
     asyncio.run(run_test())

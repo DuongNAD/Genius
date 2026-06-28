@@ -4,14 +4,283 @@ import asyncio
 import importlib.util
 import os
 import sys
+import time
 import uvicorn
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from ag_core.utils.jwt import decode_jwt
 
 # Add project root to sys.path
 root_dir = os.path.dirname(os.path.abspath(__file__))
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
-from orchestrator import run_pipeline
+from orchestrator import run_pipeline, run_e2e_pipeline
+
+from ag_core.distributed.hub import CentralHub
+from fastapi import Request, Response
+import json
+
+central_hub = CentralHub()
+
+pending_tasks = {}
+
+class WorkerDisconnectedError(Exception):
+    pass
+
+class WorkerRegistry:
+    def __init__(self):
+        pass
+
+    @property
+    def workers(self):
+        return central_hub.workers
+
+    @property
+    def lock(self):
+        if not hasattr(self, "_lock"):
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    async def select_idle_worker(self, role: str):
+        async with self.lock:
+            now = time.time()
+            timeout = central_hub.config.get("heartbeat_timeout", 30.0)
+            for worker_id, info in list(self.workers.items()):
+                worker_roles = [r.lower() for r in info.get("roles", [])]
+                role_matched = False
+                for r in worker_roles:
+                    if r == role.lower() or (role.lower() == "grok" and "grok" in r) or (role.lower() == "claude" and "claude" in r) or (role.lower() == "codex" and "codex" in r) or (role.lower() == "tester" and "tester" in r) or (role.lower() == "security" and "security" in r) or (role.lower() == "devops" and "devops" in r):
+                        role_matched = True
+                        break
+                if role_matched and info.get("status") == "idle":
+                    if now - info.get("last_heartbeat", 0) < timeout:
+                        info["status"] = "busy"
+                        return worker_id
+            return None
+
+    async def register(self, worker_id: str, roles: list, ws, status: str = "idle"):
+        current_status = status
+        if worker_id in central_hub.workers:
+            if central_hub.workers[worker_id].get("status") == "busy":
+                current_status = "busy"
+        for t_info in central_hub.tasks.values():
+            if t_info.get("worker_id") == worker_id and t_info.get("status") == "running":
+                current_status = "busy"
+                break
+
+        payload = {
+            "worker_id": worker_id,
+            "roles": roles
+        }
+        headers = central_hub.create_headers(payload)
+        await central_hub.handle_request("/register", payload, headers)
+        if worker_id in central_hub.workers:
+            central_hub.workers[worker_id]["ws"] = ws
+            central_hub.workers[worker_id]["status"] = current_status
+
+    async def unregister(self, worker_id: str, ws=None):
+        worker = await self.get_worker(worker_id)
+        if worker and (ws is None or worker.get("ws") == ws):
+            active_tasks = []
+            for t_id, t_info in list(central_hub.tasks.items()):
+                if t_info.get("worker_id") == worker_id and t_info.get("status") == "running":
+                    active_tasks.append(t_id)
+
+            payload = {
+                "worker_id": worker_id
+            }
+            headers = central_hub.create_headers(payload)
+            await central_hub.handle_request("/deregister", payload, headers)
+
+            for t_id in active_tasks:
+                if t_id in central_hub.tasks:
+                    central_hub.tasks[t_id]["status"] = "failed"
+                    central_hub.tasks[t_id]["result"] = {"error": "Worker disconnected"}
+                fut = pending_tasks.get(t_id)
+                if fut and not fut.done():
+                    fut.set_exception(WorkerDisconnectedError("Worker disconnected"))
+
+    async def update_heartbeat(self, worker_id: str):
+        payload = {
+            "worker_id": worker_id
+        }
+        headers = central_hub.create_headers(payload)
+        await central_hub.handle_request("/heartbeat", payload, headers)
+
+    async def get_worker(self, worker_id: str):
+        return central_hub.workers.get(worker_id)
+
+worker_registry = WorkerRegistry()
+
+async def prune_stale_workers(timeout_sec: float = 30.0, check_interval: float = 5.0):
+    try:
+        central_hub.config["heartbeat_timeout"] = timeout_sec
+        while True:
+            await asyncio.sleep(check_interval)
+            await central_hub.sweep()
+            for task_id, fut in list(pending_tasks.items()):
+                if task_id in central_hub.tasks:
+                    task_info = central_hub.tasks[task_id]
+                    if task_info.get("status") == "failed":
+                        if fut and not fut.done():
+                            result = task_info.get("result") or {}
+                            error_msg = result.get("error", "Task timed out or failed on worker") if isinstance(result, dict) else str(result)
+                            if "timed out" in error_msg.lower() or "timeout" in error_msg.lower():
+                                fut.set_exception(asyncio.TimeoutError(error_msg))
+                            elif "disconnect" in error_msg.lower() or "offline" in error_msg.lower() or "disappeared" in error_msg.lower():
+                                fut.set_exception(WorkerDisconnectedError(error_msg))
+                            else:
+                                fut.set_exception(ValueError(error_msg))
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    central_hub.start_sweeper()
+    prune_task = asyncio.create_task(prune_stale_workers())
+    yield
+    central_hub.stop_sweeper()
+    prune_task.cancel()
+    try:
+        await prune_task
+    except asyncio.CancelledError:
+        pass
+
+app = FastAPI(title="Genius Central Hub", lifespan=lifespan)
+
+@app.post("/{path:path}")
+async def hub_http_route(path: str, request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    headers = dict(request.headers)
+    status_code, body, resp_headers = await central_hub.handle_request("/" + path, payload, headers)
+    return Response(content=json.dumps(body), status_code=status_code, media_type="application/json", headers=resp_headers)
+
+@app.websocket("/ws/connect")
+async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
+    secret = os.getenv("SKILL_API_KEY", "mock-skill-key")
+    try:
+        payload = decode_jwt(token, secret)
+        worker_id_from_jwt = payload.get("sub") or payload.get("worker_id")
+    except Exception:
+        await websocket.accept()
+        await websocket.close(code=4001)
+        return
+
+    await websocket.accept()
+    registered_worker_id = None
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            msg_type = data.get("type")
+            
+            if msg_type == "register":
+                payload_worker_id = data.get("worker_id")
+                if payload_worker_id and payload_worker_id != worker_id_from_jwt:
+                    await websocket.send_json({"type": "error", "error": "Identity spoofing detected"})
+                    await websocket.close(code=4003)
+                    return
+                worker_id = worker_id_from_jwt
+                roles = data.get("roles") or data.get("role") or []
+                if isinstance(roles, str):
+                    roles = [r.strip() for r in roles.split(",") if r.strip()]
+                
+                registered_worker_id = worker_id
+                await worker_registry.register(worker_id, roles, websocket, status="idle")
+                await websocket.send_json({"type": "registered", "status": "success"})
+                
+            elif msg_type == "heartbeat":
+                payload_worker_id = data.get("worker_id")
+                if payload_worker_id and payload_worker_id != registered_worker_id:
+                    await websocket.send_json({"type": "error", "error": "Identity spoofing detected"})
+                    await websocket.close(code=4003)
+                    return
+                worker_id = payload_worker_id or registered_worker_id
+                if not worker_id or worker_id not in worker_registry.workers:
+                    await websocket.send_json({"type": "error", "error": "not_registered"})
+                else:
+                    await worker_registry.update_heartbeat(worker_id)
+                    await websocket.send_json({"type": "pong"})
+                    
+            elif msg_type in ("report_result", "result"):
+                import hashlib
+                task_id = data.get("task_id")
+                payload_worker_id = data.get("worker_id")
+                if payload_worker_id and payload_worker_id != registered_worker_id:
+                    await websocket.send_json({"type": "error", "error": "Identity spoofing detected"})
+                    await websocket.close(code=4003)
+                    return
+                worker_id = payload_worker_id or registered_worker_id
+                status = data.get("status")
+                result = data.get("result")
+                checksum = data.get("checksum")
+                if not checksum:
+                    print(f"[Hub] Missing result checksum from worker!")
+                    if worker_id and worker_id in worker_registry.workers:
+                        worker_registry.workers[worker_id]["status"] = "idle"
+                    if task_id and task_id in central_hub.tasks:
+                        central_hub.tasks[task_id]["status"] = "failed"
+                        central_hub.tasks[task_id]["result"] = {"error": "Missing result checksum"}
+                    fut = pending_tasks.get(task_id)
+                    if fut and not fut.done():
+                        fut.set_exception(ValueError("Missing result checksum"))
+                    continue
+
+                serialized = json.dumps(result, sort_keys=True).encode('utf-8')
+                computed = hashlib.sha256(serialized).hexdigest()
+                if computed != checksum:
+                    print(f"[Hub] Result checksum mismatch! Expected {checksum}, got {computed}")
+                    if worker_id and worker_id in worker_registry.workers:
+                        worker_registry.workers[worker_id]["status"] = "idle"
+                    if task_id and task_id in central_hub.tasks:
+                        central_hub.tasks[task_id]["status"] = "failed"
+                        central_hub.tasks[task_id]["result"] = {"error": "Result checksum validation failed"}
+                    fut = pending_tasks.get(task_id)
+                    if fut and not fut.done():
+                        fut.set_exception(ValueError("Result checksum validation failed"))
+                    continue
+                
+                if task_id and worker_id:
+                    payload = {
+                        "task_id": task_id,
+                        "worker_id": worker_id,
+                        "status": status,
+                        "result": result
+                    }
+                    headers = central_hub.create_headers(payload)
+                    await central_hub.handle_request("/report_result", payload, headers)
+                    
+                    if worker_id in worker_registry.workers:
+                        worker_registry.workers[worker_id]["status"] = "idle"
+                    
+                    fut = pending_tasks.get(task_id)
+                    if fut and not fut.done():
+                        if status == "completed":
+                            output = result.get("output", result) if isinstance(result, dict) else result
+                            fut.set_result(output)
+                        else:
+                            error_msg = result.get("error", "Unknown worker error") if isinstance(result, dict) else str(result)
+                            fut.set_exception(Exception(error_msg))
+                    
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        if registered_worker_id:
+            await worker_registry.unregister(registered_worker_id, websocket)
+
+async def start_hub_server(port: int):
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
+
 
 ROUTING_TABLE = {
     "/research": ("grok", 8001),
@@ -105,10 +374,14 @@ async def main_async():
     parser.add_argument("--prompt", default=None, help="Prompt for orchestrator role")
     parser.add_argument("--interactive", action="store_true", help="Interactive design review loop")
     parser.add_argument("--auto-pilot", action="store_true", help="Auto-pilot: start all servers and run pipeline")
+    parser.add_argument("--pipeline", choices=["sequential", "e2e"], default="sequential", help="Pipeline type to execute")
+    parser.add_argument("--distributed", action="store_true", help="Start the central hub service")
+    parser.add_argument("--hub-port", type=int, default=8000, help="Port to run the central hub service on")
     args = parser.parse_args()
 
     auto_pilot = getattr(args, "auto_pilot", False) is True
     interactive = getattr(args, "interactive", False) is True
+    distributed = getattr(args, "distributed", False) is True
 
     if auto_pilot:
         selected_roles = ["grok", "claude", "codex", "tester", "security", "devops", "dashboard", "orchestrator"]
@@ -116,6 +389,8 @@ async def main_async():
         selected_roles = normalize_roles(args.roles)
     elif args.prompt is not None:
         selected_roles = ["orchestrator"]
+    elif distributed:
+        selected_roles = []
     else:
         selected_roles = interactive_prompt()
 
@@ -129,13 +404,17 @@ async def main_async():
                 selected_roles.append(target_role)
                 print(f"Automatically adding agent role '{target_role}' for command routing of '{first_word}'")
 
-    if not selected_roles:
+    if not selected_roles and not distributed:
         print("No valid roles selected. Exiting.")
         return
 
     print(f"Starting selected roles: {selected_roles}")
 
     server_tasks = []
+    if distributed:
+        print(f"Starting central hub on port {args.hub_port}")
+        server_tasks.append(asyncio.create_task(start_hub_server(args.hub_port)))
+
     # Start requested API servers
     if "grok" in selected_roles:
         server_tasks.append(asyncio.create_task(start_server("grok", 8001)))
@@ -178,10 +457,19 @@ async def main_async():
 
         try:
             print(f"Launching orchestrator pipeline with prompt: '{prompt}'")
+            pipeline_kwargs = {}
             if interactive or auto_pilot:
-                await run_pipeline(prompt, interactive=interactive)
+                pipeline_kwargs["interactive"] = interactive
+            if distributed:
+                pipeline_kwargs["distributed"] = True
+            
+            if getattr(args, "pipeline", "sequential") == "e2e":
+                e2e_kwargs = {}
+                if distributed:
+                    e2e_kwargs["distributed"] = True
+                await run_e2e_pipeline(prompt, **e2e_kwargs)
             else:
-                await run_pipeline(prompt)
+                await run_pipeline(prompt, **pipeline_kwargs)
             print("Orchestrator pipeline completed successfully.")
         except Exception as e:
             print(f"Orchestrator pipeline failed: {e}")

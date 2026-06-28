@@ -1,74 +1,74 @@
 import os
+import shutil
+import json
+import asyncio
 from typing import Any, Dict
-import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 
-from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage, wait_retry_after
-
-def _is_retriable(exception: BaseException) -> bool:
-    if isinstance(exception, httpx.TimeoutException):
-        return True
-    if isinstance(exception, httpx.HTTPStatusError):
-        # Do not retry on client authentication or validation errors (e.g. 400, 401, 403, 404)
-        # But do retry on 429 (Rate Limit) and 5xx (Server Errors)
-        return exception.response.status_code == 429 or exception.response.status_code >= 500
-    return False
+from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
 
 class GrokProvider(BaseProvider):
     """
-    Grok API (xAI) provider implementation. Grok uses an OpenAI-compatible payload and response structure.
+    Grok API (xAI) provider implementation using the local claude CLI.
     """
     def __init__(self, model_name: str = "grok-2-1212", api_key: str | None = None, base_url: str | None = None, **kwargs: Any) -> None:
         api_key = api_key or os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY")
         base_url = base_url or os.getenv("GROK_BASE_URL") or "https://api.x.ai/v1"
         super().__init__(model_name=model_name, api_key=api_key, base_url=base_url, **kwargs)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_retry_after(fallback=wait_exponential(multiplier=1, min=2, max=10)),
-        retry=retry_if_exception(_is_retriable),
-        reraise=True
-    )
-    async def _send_request_with_retry(self, client: httpx.AsyncClient, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Performs async POST request with Tenacity backoff retries."""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        url = f"{self.base_url.rstrip('/')}/chat/completions"
-        
-        response = await client.post(url, json=payload, headers=headers, timeout=30.0)
-        response.raise_for_status()
-        return response.json()
-
-    async def send_prompt(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    async def send_prompt(self, prompt: str, system: str | None = None, **kwargs: Any) -> Dict[str, Any]:
         async with self.semaphore:
             await self.rate_limiter.acquire()
-            if not self.api_key:
-                raise ValueError("Grok API key must be provided or set via GROK_API_KEY or XAI_API_KEY environment variable.")
                 
-            payload = {
-                "model": self.model_name,
-                "messages": [{"role": "user", "content": prompt}],
-                **self.extra_params,
-                **kwargs
-            }
+            extra = self.extra_params.copy()
+            extra.update(kwargs)
+            sys_prompt = extra.pop("system", None) or system
             
-            async with httpx.AsyncClient() as client:
-                res_json = await self._send_request_with_retry(client, payload)
+            cli_path = shutil.which("claude")
+            if not cli_path:
+                appdata = os.getenv("APPDATA")
+                if appdata:
+                    fallback = os.path.join(appdata, "npm", "claude.cmd")
+                    if os.path.exists(fallback):
+                        cli_path = fallback
+            if not cli_path:
+                userprofile = os.getenv("USERPROFILE")
+                if userprofile:
+                    fallback = os.path.join(userprofile, "AppData", "Roaming", "npm", "claude.cmd")
+                    if os.path.exists(fallback):
+                        cli_path = fallback
+            if not cli_path:
+                cli_path = "claude"
+
+            cmd = [cli_path, "-p", prompt, "--bare", "--tools", '""', "--output-format", "json"]
+            if sys_prompt:
+                cmd.extend(["--system-prompt", sys_prompt])
                 
-            choices = res_json.get("choices", [])
-            content = ""
-            if choices:
-                content = choices[0].get("message", {}).get("content") or ""
-            usage_data = res_json.get("usage", {})
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            stdout_str = stdout.decode("utf-8", errors="ignore").strip()
+            try:
+                res_json = json.loads(stdout_str)
+            except json.JSONDecodeError:
+                res_json = {}
+                
+            content = res_json.get("result", "")
+            prompt_tokens = res_json.get("usage", {}).get("input_tokens", 0)
+            completion_tokens = res_json.get("usage", {}).get("output_tokens", 0)
+            total_tokens = prompt_tokens + completion_tokens
             
             response = ProviderResponse(
                 content=content,
                 usage=TokenUsage(
-                    prompt_tokens=usage_data.get("prompt_tokens", 0),
-                    completion_tokens=usage_data.get("completion_tokens", 0),
-                    total_tokens=usage_data.get("total_tokens", 0)
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens
                 )
             )
             return response.model_dump()
+

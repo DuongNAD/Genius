@@ -102,6 +102,8 @@ class Config(BaseModel):
     openai_api_key: str = Field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
     anthropic_api_key: str = Field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
     grok_api_key: str = Field(default_factory=lambda: os.getenv("GROK_API_KEY", ""))
+    git_username: str = Field(default_factory=lambda: os.getenv("GIT_USERNAME", ""))
+    git_token: str = Field(default_factory=lambda: os.getenv("GIT_TOKEN", ""))
 
 def load_config(config_path: str = "config.yaml") -> Config:
     """Reads YAML config and binds it alongside environmental secrets into Pydantic models."""
@@ -138,7 +140,9 @@ def load_config(config_path: str = "config.yaml") -> Config:
         "openai_api_key": "OPENAI_API_KEY",
         "anthropic_api_key": "ANTHROPIC_API_KEY",
         "grok_api_key": "GROK_API_KEY",
-        "skill_api_key": "SKILL_API_KEY"
+        "skill_api_key": "SKILL_API_KEY",
+        "git_username": "GIT_USERNAME",
+        "git_token": "GIT_TOKEN"
     }
     for field_name, env_var in env_keys.items():
         val = os.getenv(env_var)

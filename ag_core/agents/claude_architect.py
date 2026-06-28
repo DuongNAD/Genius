@@ -5,6 +5,7 @@ from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.scanner.project_scanner import ProjectScanner
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
+from ag_core.utils.prompt_templates import AGENT_CORE_RULES
 
 class ClaudeArchitectAgent(BaseAgent):
     """
@@ -61,7 +62,8 @@ class ClaudeArchitectAgent(BaseAgent):
         full_prompt += f"\nProject files context:\n{context}"
         
         # Invoke provider
-        response = await self.provider.send_prompt(full_prompt)
+        sys_prompt = AGENT_CORE_RULES + "\nTách plan và implement (Separate plan and implement). Ép Agent này chỉ lên kiến trúc (plan), tuyệt đối không tự ý viết code implement."
+        response = await self.provider.send_prompt(full_prompt, system=sys_prompt)
         content = response.get("content", "")
         usage = response.get("usage", {})
         
