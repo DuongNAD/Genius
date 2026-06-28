@@ -213,23 +213,26 @@ Schema này áp đặt việc **Tách biệt giữa Lên kế hoạch và Triể
 
 ---
 
-### 3.2 Cơ chế Tích hợp & Giao tiếp Đa phương thức (CLI & Web)
+### 3.2 Cơ chế Tích hợp & Giao tiếp với Local CLI
 
-Để loại bỏ hoàn toàn sự phụ thuộc vào mạng internet và các API Keys, Genius (Antigravity 2.0) tương tác với các model thông qua hai phương thức song song: **Local CLI Wrappers** (cho Claude, Grok) và **Headless Browser Automation** (cho Codex). Cách thức kết nối và truyền dữ liệu diễn ra như sau:
+Để loại bỏ hoàn toàn sự phụ thuộc vào mạng internet và các API Keys, Genius (Antigravity 2.0) tương tác với các model 100% thông qua các **Local CLI Wrappers** (Grok CLI, Claude CLI, Codex CLI). Mặc dù Codex được biết đến như một Desktop App, hệ thống vẫn khai thác thành công tệp thực thi CLI ẩn nằm sâu bên trong cấu trúc cài đặt của nó để giao tiếp bằng dòng lệnh thay vì điều khiển GUI rườm rà.
+
+Cách thức kết nối và truyền dữ liệu diễn ra như sau:
 
 1. **Sinh Payload (Payload Generation)**: `PromptBuilder` biên dịch SPO thành hai thành phần văn bản riêng biệt: System Prompt và User Prompt.
 
-2. **Truyền Dữ liệu qua Local CLI (Dành cho Claude, Grok)**:
-   - *Kích hoạt*: Module `providers/` sử dụng `subprocess` của Python để khởi tạo tiến trình cục bộ, gọi thẳng vào các công cụ CLI đã đăng nhập.
-   - *Input*: System Prompt và User Prompt được truyền vào thông qua luồng **Standard Input (stdin)** hoặc file `.txt` tạm thời để vượt giới hạn độ dài ký tự của command-line.
-   - *Output*: Lắng nghe **Standard Output (stdout)** để lấy mã nguồn. Lỗi được bắt qua **Standard Error (stderr)**.
+2. **Truyền Dữ liệu qua Local CLI (Claude, Grok, Codex)**:
+   - *Định vị & Kích hoạt*: Module `providers/` sử dụng `subprocess` của Python để gọi thẳng vào các tệp thực thi CLI cục bộ. Đối với Codex Desktop, hệ thống tự động dò tìm đường dẫn của tệp `codex.exe` ẩn trong thư mục `%LocalAppData%\OpenAI\Codex\bin` hoặc `WindowsApps`.
+   - *Input*: Prompt được nối lại và truyền trực tiếp vào lệnh thực thi. Nhằm chống hiện tượng treo tiến trình chờ thao tác người dùng, hệ thống đóng băng hoàn toàn luồng **Standard Input** (`stdin=DEVNULL`).
+   - *Bypass Sandbox*: Kích hoạt các cờ an toàn nội bộ (điển hình như cờ `--dangerously-bypass-approvals-and-sandbox` của Codex) để buộc CLI xử lý im lặng dưới nền thay vì bật các popup xác nhận trên màn hình Desktop.
 
-3. **Truyền Dữ liệu qua Desktop GUI Automation (Dành cho Codex)**:
-   - *Ngữ cảnh*: Codex được cung cấp dưới dạng một **Desktop App** chính thức (Ứng dụng máy tính) dành cho phát triển phần mềm bằng AI. Do đó, hệ thống sử dụng các thư viện tự động hóa giao diện hệ điều hành (ví dụ: `pywinauto` hoặc UI Automation) để tương tác trực tiếp với cửa sổ ứng dụng Codex đã đăng nhập tài khoản.
-   - *Input*: Script tự động xác định vùng nhập liệu trên giao diện ứng dụng (UI Elements), sau đó giả lập thao tác mô phỏng người dùng (điền text hoặc dán từ clipboard) để gửi System Prompt và User Prompt vào một luồng (thread) hoặc dự án mới trên Codex.
-   - *Output*: Hệ thống giám sát trạng thái UI của ứng dụng. Khi Codex hoàn thành việc sinh mã hoặc thực thi agent, script sẽ tự động trích xuất (extract) nội dung text từ giao diện trả về hoặc đọc trực tiếp các thay đổi mà ứng dụng vừa ghi xuống thư mục làm việc cục bộ (worktree) để báo cáo lại cho Orchestrator.
+3. **Thu thập Kết quả (Output Capture & JSONL Parsing)**:
+   Hệ thống lắng nghe luồng **Standard Output (stdout)** được xuất ra dưới định dạng luồng sự kiện **JSON Lines (JSONL)**. Một trình phân tích dữ liệu (Robust Parser) được thiết lập để bóc tách:
+   - Mã nguồn/văn bản trả về từ các gói tin có `item.type == "agent_message"`.
+   - Các thông số giám sát (input_tokens, output_tokens) từ gói tin `turn.completed`.
+   Mọi sự cố CLI được hứng qua **Standard Error (stderr)** và lập tức bắn về vòng lặp tự phục hồi.
 
-4. **Dọn dẹp An toàn**: Mọi tệp tin tạm chứa prompt hoặc các luồng thread tạm thời sinh ra trên giao diện Desktop App sẽ được script tự động đóng và dọn dẹp sạch sẽ sau mỗi chu kỳ.
+4. **Dọn dẹp An toàn**: Mọi tiến trình CLI phụ (subprocess) được đóng một cách "sạch sẽ" ngay khi trích xuất đủ kết quả, không để lại bất kỳ tiến trình mồ côi (zombie process) hay tệp rác nào trên hệ thống lưu trữ.
 
 ---
 
