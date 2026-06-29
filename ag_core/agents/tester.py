@@ -81,9 +81,9 @@ class TesterAgent(BaseAgent):
 
         def _extract_code(txt: str) -> str:
             import re
-            blocks = re.findall(r'```[a-zA-Z0-9_-]*\n(.*?)\n```', txt, re.DOTALL)
+            blocks = re.findall(r'```[a-zA-Z0-9_+.\-]*[ \t]*\r?\n(.*?)\r?\n?```', txt, re.DOTALL)
             if blocks:
-                return "\n".join(blocks).strip()
+                return max((b.strip() for b in blocks), key=len)
             return txt.strip()
 
         test_failures_logs = ""

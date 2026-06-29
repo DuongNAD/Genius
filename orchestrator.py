@@ -58,9 +58,13 @@ def parse_design_for_files(design_content: str) -> list:
     return files
 
 def extract_code(content: str) -> str:
-    blocks = re.findall(r'```[a-zA-Z0-9_-]*\n(.*?)\n```', content, re.DOTALL)
+    # Tolerate a missing trailing newline before the closing fence and extra
+    # language-tag characters. Return the single LARGEST block instead of
+    # concatenating every block — joining example/usage/shell blocks together
+    # produces a syntactically broken source file.
+    blocks = re.findall(r'```[a-zA-Z0-9_+.\-]*[ \t]*\r?\n(.*?)\r?\n?```', content, re.DOTALL)
     if blocks:
-        return "\n".join(blocks).strip()
+        return max((b.strip() for b in blocks), key=len)
     return content.strip()
 
 def safe_join(base_dir: str, rel_path: str) -> str:
