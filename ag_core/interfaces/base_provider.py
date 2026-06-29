@@ -24,20 +24,12 @@ class TokenBucket:
         self.rate = rate
         self.capacity = capacity
         self.tokens = capacity
-        try:
-            loop = asyncio.get_running_loop()
-            self.last_refill = loop.time()
-        except RuntimeError:
-            import time
-            self.last_refill = time.time()
+        import time
+        self.last_refill = time.monotonic()
 
     def _refill(self):
-        try:
-            loop = asyncio.get_running_loop()
-            now = loop.time()
-        except RuntimeError:
-            import time
-            now = time.time()
+        import time
+        now = time.monotonic()
         elapsed = now - self.last_refill
         if elapsed < 0:
             elapsed = 0
@@ -71,7 +63,18 @@ class wait_retry_after:
                     except ValueError as e:
                         if "Retry-After delay too large" in str(e):
                             raise
-                        pass
+                        import email.utils
+                        from datetime import datetime, timezone
+                        try:
+                            dt = email.utils.parsedate_to_datetime(retry_after)
+                            delay = (dt - datetime.now(timezone.utc)).total_seconds()
+                            if delay < 0:
+                                delay = 0.0
+                            if delay > 10.0:
+                                raise ValueError(f"Retry-After delay too large: {delay}s")
+                            return delay
+                        except Exception:
+                            pass
         return self.fallback(retry_state)
 
 

@@ -47,7 +47,7 @@ async def execute_agent(agent_name: str, prompt: str, context: Dict[str, str] = 
         provider = OpenAIProvider(api_key=config.openai_api_key, model_name=config.models.openai)
         agent = SecurityAgent(provider=provider, config=config, output_file="None")
     elif agent_name == "deploy":
-        provider = OpenAIProvider(api_key=config.openai_api_key, model_name=config.models.openai)
+        provider = AnthropicProvider(api_key=config.anthropic_api_key, model_name=config.models.anthropic)
         agent = DevOpsAgent(provider=provider, config=config, output_file="None")
     else:
         raise ValueError(f"Unknown agent: {agent_name}")
@@ -149,17 +149,34 @@ async def call_tool(req: CallToolRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 async def run_stdio_mcp():
-    loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+    import logging
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO)
     
+    real_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    
+    loop = asyncio.get_running_loop()
+    
+    if sys.platform != "win32":
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+        
     while True:
-        line_bytes = await reader.readline()
-        if not line_bytes:
-            break
+        if sys.platform == "win32":
+            line = await loop.run_in_executor(None, sys.stdin.readline)
+            if not line:
+                break
+            line_str = line
+        else:
+            line_bytes = await reader.readline()
+            if not line_bytes:
+                break
+            line_str = line_bytes.decode('utf-8')
         try:
-            req = json.loads(line_bytes.decode('utf-8'))
+            req = json.loads(line_str)
             req_id = req.get("id")
             method = req.get("method")
             params = req.get("params", {})
@@ -179,8 +196,8 @@ async def run_stdio_mcp():
             else:
                 res = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": "Method not found"}}
                 
-            sys.stdout.write(json.dumps(res) + "\n")
-            sys.stdout.flush()
+            real_stdout.write(json.dumps(res) + "\n")
+            real_stdout.flush()
         except Exception as e:
             sys.stderr.write(f"Error handling request: {e}\n")
             sys.stderr.flush()

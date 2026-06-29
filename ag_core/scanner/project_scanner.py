@@ -103,14 +103,24 @@ class ProjectChunker:
         self.encoding = self._get_encoding()
 
     def _get_encoding(self):
-        """Loads specific model encoding or falls back to cl100k_base."""
+        """Loads specific model encoding or falls back to cl100k_base. Returns None if it fails."""
         try:
             return tiktoken.encoding_for_model(self.model_name)
         except Exception:
-            return tiktoken.get_encoding("cl100k_base")
+            try:
+                return tiktoken.get_encoding("cl100k_base")
+            except Exception:
+                from ag_core.utils.logger import logger
+                logger.warning("Failed to initialize tiktoken encoding, using fallback token estimator.")
+                return None
 
     def count_tokens(self, text: str) -> int:
-        return len(self.encoding.encode(text))
+        if self.encoding is None:
+            return len(text) // 4
+        try:
+            return len(self.encoding.encode(text))
+        except Exception:
+            return len(text) // 4
 
     def format_file_payload(self, filepath: str, content: str) -> str:
         """Formats file information using distinct header delimiters."""

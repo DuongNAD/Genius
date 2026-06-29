@@ -25,6 +25,7 @@ def test_openai_provider_success():
         fake_path = r"C:\fake_localappdata\OpenAI\Codex\bin\v1.0.0\codex.exe"
         with patch.dict("os.environ", {"LOCALAPPDATA": r"C:\fake_localappdata"}), \
              patch("glob.glob", return_value=[fake_path]), \
+             patch("shutil.which", return_value=None), \
              patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = mock_process
             
@@ -77,6 +78,7 @@ def test_openai_provider_codex_cli_format():
         with (
             env_patch,
             patch("glob.glob", return_value=[fake_path]),
+            patch("shutil.which", return_value=None),
             patch(
                 "asyncio.create_subprocess_exec", new_callable=AsyncMock
             ) as mock_exec,
@@ -114,6 +116,7 @@ def test_openai_provider_fallback_path():
         # Test fallback to "codex.exe" when all paths are missing
         with patch.dict("os.environ", {}), \
              patch("glob.glob", return_value=[]), \
+             patch("shutil.which", return_value=None), \
              patch("os.path.exists", return_value=False), \
              patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = mock_process

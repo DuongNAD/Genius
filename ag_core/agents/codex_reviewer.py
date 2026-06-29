@@ -188,6 +188,12 @@ class CodexReviewerAgent(BaseAgent):
                 if target_file:
                     abs_target_path = os.path.abspath(os.path.join(root_dir, target_file))
                     try:
+                        abs_root = os.path.abspath(root_dir)
+                        if os.path.commonpath([abs_root, abs_target_path]) != abs_root:
+                            raise ValueError("Path traversal detected: target path is outside root directory")
+                    except ValueError as e:
+                        raise ValueError(f"Path traversal detected: {e}")
+                    try:
                         os.makedirs(os.path.dirname(abs_target_path), exist_ok=True)
                         with open(abs_target_path, "w", encoding="utf-8") as f:
                             f.write(code_to_write)

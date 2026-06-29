@@ -14,11 +14,16 @@ os.environ.setdefault("GROK_API_KEY", "mock-key")
 @pytest.fixture(autouse=True, scope="function")
 def configure_test_keys(request):
     test_file = request.node.fspath.basename
-    # If the test is test_distributed or test_challenger_distributed, we default to valid-api-key
-    if "test_distributed" in test_file or "test_challenger_distributed" in test_file:
+    # If the test is test_distributed, test_challenger_distributed, robustness, or milestone3_adversarial, we default to valid-api-key
+    if "test_distributed" in test_file or "test_challenger_distributed" in test_file or "robustness" in test_file or "milestone3_adversarial" in test_file:
         os.environ["SKILL_API_KEY"] = "valid-api-key"
     else:
         os.environ["SKILL_API_KEY"] = "mock-skill-key"
+    try:
+        import serve
+        serve.central_hub.api_key = os.environ["SKILL_API_KEY"]
+    except Exception:
+        pass
     yield
 
 # Monkeypatch verify_checksum and verify_raw_body_checksum in conftest.py

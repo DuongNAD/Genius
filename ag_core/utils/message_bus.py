@@ -104,28 +104,29 @@ class MessageBus:
                     if artifact.content_type == "json" or isinstance(artifact.content, (dict, list))
                     else str(artifact.content)
                 )
-                conn = self._get_connection()
-                conn.execute("BEGIN IMMEDIATE")
-                try:
+                from ag_core.utils.db import enqueue_db_write
+                
+                def _publish_artifact_impl(conn, artifact_id, name, serialized_content, content_type, created_by, timestamp, parent_id, metadata_json):
                     conn.execute(
                         "INSERT OR REPLACE INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            artifact.artifact_id,
-                            artifact.name,
-                            serialized_content,
-                            artifact.content_type,
-                            artifact.created_by,
-                            artifact.timestamp,
-                            artifact.parent_id,
-                            json.dumps(artifact.metadata)
-                        )
+                        (artifact_id, name, serialized_content, content_type, created_by, timestamp, parent_id, metadata_json)
                     )
                     conn.commit()
+
+                try:
+                    enqueue_db_write(
+                        _publish_artifact_impl,
+                        artifact.artifact_id,
+                        artifact.name,
+                        serialized_content,
+                        artifact.content_type,
+                        artifact.created_by,
+                        artifact.timestamp,
+                        artifact.parent_id,
+                        json.dumps(artifact.metadata),
+                        db_path=self.db_path
+                    )
                 except Exception:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
                     raise
         return artifact.artifact_id
 
@@ -163,10 +164,12 @@ class MessageBus:
     def retrieve_latest_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Retrieves latest artifact matching a specific key name (e.g. 'design_plan')."""
         with self.lock:
+            in_mem_latest = None
             matches = [a for a in self.in_memory_store.values() if a["name"] == name]
             if matches:
-                return max(matches, key=lambda x: x["timestamp"])
+                in_mem_latest = max(matches, key=lambda x: x["timestamp"])
 
+            db_latest = None
             if self.db_path:
                 conn = self._get_connection()
                 conn.row_factory = sqlite3.Row
@@ -183,7 +186,7 @@ class MessageBus:
                             content = json.loads(content)
                         except Exception:
                             pass
-                    return {
+                    db_latest = {
                         "artifact_id": row["artifact_id"],
                         "name": row["name"],
                         "content": content,
@@ -193,4 +196,11 @@ class MessageBus:
                         "parent_id": row["parent_id"],
                         "metadata": json.loads(row["metadata"]) if row["metadata"] else {}
                     }
+
+            if in_mem_latest and db_latest:
+                if in_mem_latest["timestamp"] >= db_latest["timestamp"]:
+                    return in_mem_latest
+                else:
+                    return db_latest
+            return in_mem_latest or db_latest
         return None

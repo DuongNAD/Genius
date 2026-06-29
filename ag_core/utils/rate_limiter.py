@@ -20,7 +20,12 @@ class TokenBucketRateLimiter:
             loop = None
         with self.lock:
             if not hasattr(self, "_async_locks"):
-                self._async_locks = {}
+                import weakref
+                self._async_locks = weakref.WeakKeyDictionary()
+            if loop is None:
+                if not hasattr(self, "_none_lock"):
+                    self._none_lock = asyncio.Lock()
+                return self._none_lock
             if loop not in self._async_locks:
                 self._async_locks[loop] = asyncio.Lock()
             return self._async_locks[loop]

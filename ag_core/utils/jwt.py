@@ -20,11 +20,14 @@ import threading
 
 _seen_jtis = {}
 _jtis_lock = threading.Lock()
+_cleaned_expired_jtis = False
 
 def encode_jwt(payload: dict, secret: str) -> str:
     """
     Encode a JWT token with HS256 algorithm.
     """
+    if not secret:
+        raise ValueError("JWT secret key must be non-empty")
     payload = dict(payload)
     if "jti" not in payload:
         payload["jti"] = str(uuid.uuid4())
@@ -49,6 +52,8 @@ def decode_jwt(token: str, secret: str) -> dict:
     Decode and verify a JWT token with HS256 algorithm.
     Raises ValueError on any parsing, verification or expiration error.
     """
+    if not secret:
+        raise ValueError("JWT secret key must be non-empty")
     parts = token.split('.')
     if len(parts) != 3:
         raise ValueError("Invalid token format")
@@ -90,39 +95,29 @@ def decode_jwt(token: str, secret: str) -> dict:
     if not jti:
         raise ValueError("Missing jti claim")
         
-    from ag_core.config import load_config
-    import sqlite3
-    import os
+    from ag_core.utils.db import enqueue_db_write
     
-    config = load_config()
-    db_path = config.memory.db_path
-    db_dir = os.path.dirname(db_path)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-        
-    with _jtis_lock:
-        conn = sqlite3.connect(db_path, timeout=10)
-        try:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS seen_jtis (
-                    jti TEXT PRIMARY KEY,
-                    exp REAL
-                )
-            """)
-            conn.commit()
-            
+    def _verify_and_save_jti_impl(conn, jti_str: str, exp_val: float | None):
+        global _cleaned_expired_jtis
+        if not _cleaned_expired_jtis:
             now = time.time()
             conn.execute("DELETE FROM seen_jtis WHERE exp IS NOT NULL AND ? > exp", (now,))
             conn.commit()
+            _cleaned_expired_jtis = True
             
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM seen_jtis WHERE jti = ?", (jti,))
-            if cursor.fetchone():
-                raise ValueError("Token replay detected")
-                
-            conn.execute("INSERT INTO seen_jtis (jti, exp) VALUES (?, ?)", (jti, payload.get("exp")))
-            conn.commit()
-        finally:
-            conn.close()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM seen_jtis WHERE jti = ?", (jti_str,))
+        if cursor.fetchone():
+            raise ValueError("Token replay detected")
+            
+        conn.execute("INSERT INTO seen_jtis (jti, exp) VALUES (?, ?)", (jti_str, exp_val))
+        conn.commit()
+
+    try:
+        enqueue_db_write(_verify_and_save_jti_impl, jti, payload.get("exp"))
+    except ValueError as ve:
+        raise ve
+    except Exception as e:
+        raise ValueError(f"Database error verifying token: {e}")
             
     return payload

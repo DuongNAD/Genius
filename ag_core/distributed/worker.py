@@ -10,7 +10,7 @@ class ClientWorker:
     def __init__(self, worker_id: str, roles: List[str], api_key: Optional[str] = None):
         self.worker_id = worker_id
         self.roles = roles
-        self.api_key = api_key if api_key is not None else os.getenv("SKILL_API_KEY", "")
+        self._api_key_override = api_key
         self.active_tasks = set()
         self._status = "idle"
         self._current_task = None
@@ -23,6 +23,20 @@ class ClientWorker:
         self.tasks_failed = 0
         self.ws = None
         self.running_tasks = {}
+
+    @property
+    def api_key(self) -> str:
+        if self._api_key_override is not None:
+            return self._api_key_override
+        from ag_core.config import load_config
+        try:
+            config = load_config()
+            val = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
+            if val:
+                return val
+        except Exception:
+            pass
+        return os.getenv("SKILL_API_KEY", "")
 
     @property
     def status(self) -> str:

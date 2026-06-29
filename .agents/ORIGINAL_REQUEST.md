@@ -684,3 +684,34 @@ Integrity mode: development
 - [ ] An independent auditor verifies that `security.py` now enforces strict HMAC validation.
 - [ ] An independent auditor verifies that `docker-compose.yml` and `openai_provider.py` are corrected and `requirements.txt` contains the missing dependencies.
 - [ ] Running a basic test or syntax check (`pytest` or `python -m py_compile`) confirms no syntax errors were introduced.
+
+## 2026-06-29T05:53:02Z
+
+# Teamwork Project Prompt — Draft
+
+> Status: Launched
+> Goal: Craft prompt → get user approval → delegate to teamwork_preview
+
+Phân tích toàn bộ dự án hiện tại để tìm kiếm lỗi (logic, runtime, bảo mật), tự động sửa đổi code và tự viết test để xác minh các bản vá.
+
+Working directory: e:\Project\Genius
+Integrity mode: development
+
+## Requirements
+
+### R1. Quét và phân tích lỗi
+Phân tích mã nguồn toàn bộ dự án để tìm ra các lỗi logic, lỗi runtime tiềm ẩn, code smell hoặc các lỗ hổng bảo mật.
+
+### R2. Tự động sửa đổi mã nguồn
+Thực hiện việc sửa đổi mã nguồn trực tiếp cho những lỗi được tìm thấy. Đảm bảo cấu trúc chung của dự án và các module khác không bị ảnh hưởng (no breaking changes).
+
+### R3. Tự viết Test để kiểm chứng (Verify)
+Do không có sẵn test spec hay bộ test hoàn chỉnh làm thước đo, bạn (agent team) phải tự suy luận mục đích của module, sau đó viết thêm các bài test (unit tests/integration tests) để tự kiểm chứng rằng các bản sửa lỗi của bạn là chính xác và hoạt động đúng.
+
+## Acceptance Criteria
+
+### Tiêu chuẩn nghiệm thu
+- [ ] Tất cả các file bị chỉnh sửa/vá lỗi đều phải có test cases mới hoặc được cập nhật đi kèm.
+- [ ] Chạy script test (ví dụ: pytest) và đảm bảo toàn bộ test case (đặc biệt là các bài test mới viết) đều PASS.
+- [ ] Phải tạo một file báo cáo markdown tổng hợp danh sách các lỗi đã phát hiện, các phần code đã sửa đổi, và các test đã thêm.
+

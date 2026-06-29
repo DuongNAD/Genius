@@ -54,22 +54,62 @@ class OpenAIProvider(BaseProvider):
             if sys_prompt:
                 prompt = f"{sys_prompt}\n\n{prompt}"
 
-            cmd = [
-                cli_path,
-                "exec",
-                prompt,
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--json"
-            ]
+            import tempfile
+            import sys
+            
+            temp_file_path = None
+            try:
+                if len(prompt) > 1000:
+                    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+                        f.write(prompt)
+                        temp_file_path = f.name
+                    cmd = [
+                        cli_path,
+                        "exec",
+                        temp_file_path,
+                        "--dangerously-bypass-approvals-and-sandbox",
+                        "--json"
+                    ]
+                else:
+                    cmd = [
+                        cli_path,
+                        "exec",
+                        prompt,
+                        "--dangerously-bypass-approvals-and-sandbox",
+                        "--json"
+                    ]
                 
-            # Redirect stdin to DEVNULL to prevent CLI hang
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
+                actual_cmd = cmd
+                if sys.platform == "win32":
+                    resolved_cli = shutil.which(cli_path) or cli_path
+                    if resolved_cli.lower().endswith((".cmd", ".bat")):
+                        actual_cmd = ["cmd.exe", "/c"] + cmd
+                        
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        *actual_cmd,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                except OSError:
+                    if sys.platform == "win32" and actual_cmd == cmd:
+                        actual_cmd = ["cmd.exe", "/c"] + cmd
+                        process = await asyncio.create_subprocess_exec(
+                            *actual_cmd,
+                            stdin=asyncio.subprocess.DEVNULL,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                    else:
+                        raise
+                stdout, stderr = await process.communicate()
+            finally:
+                if temp_file_path and os.path.exists(temp_file_path):
+                    try:
+                        os.remove(temp_file_path)
+                    except Exception:
+                        pass
             
             if isinstance(process.returncode, int) and process.returncode != 0:
                 stderr_str = stderr.decode("utf-8", errors="ignore").strip()

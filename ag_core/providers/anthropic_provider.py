@@ -39,17 +39,54 @@ class AnthropicProvider(BaseProvider):
             if not cli_path:
                 cli_path = "claude"
 
-            cmd = [cli_path, "-p", prompt, "--bare", "--tools", '""', "--output-format", "json"]
-            if sys_prompt:
-                cmd.extend(["--system-prompt", sys_prompt])
+            import tempfile
+            import sys
+            
+            temp_file_path = None
+            try:
+                if len(prompt) > 1000:
+                    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+                        f.write(prompt)
+                        temp_file_path = f.name
+                    cmd = [cli_path, "--input", temp_file_path, "--bare", "--tools", '""', "--output-format", "json"]
+                else:
+                    cmd = [cli_path, "-p", prompt, "--bare", "--tools", '""', "--output-format", "json"]
                 
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
+                if sys_prompt:
+                    cmd.extend(["--system-prompt", sys_prompt])
+                    
+                actual_cmd = cmd
+                if sys.platform == "win32":
+                    resolved_cli = shutil.which(cli_path) or cli_path
+                    if resolved_cli.lower().endswith((".cmd", ".bat")):
+                        actual_cmd = ["cmd.exe", "/c"] + cmd
+                        
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        *actual_cmd,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                except OSError:
+                    if sys.platform == "win32" and actual_cmd == cmd:
+                        actual_cmd = ["cmd.exe", "/c"] + cmd
+                        process = await asyncio.create_subprocess_exec(
+                            *actual_cmd,
+                            stdin=asyncio.subprocess.DEVNULL,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                    else:
+                        raise
+                        
+                stdout, stderr = await process.communicate()
+            finally:
+                if temp_file_path and os.path.exists(temp_file_path):
+                    try:
+                        os.remove(temp_file_path)
+                    except Exception:
+                        pass
             
             stdout_str = stdout.decode("utf-8", errors="ignore").strip()
             try:

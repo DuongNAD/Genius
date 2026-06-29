@@ -42,7 +42,7 @@ class BoundedTasks(dict):
 
 class CentralHub:
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key if api_key is not None else os.getenv("SKILL_API_KEY", "")
+        self._api_key_override = api_key
         self.workers: Dict[str, Dict[str, Any]] = {}
         self.tasks = BoundedTasks()
         self.network = None
@@ -56,6 +56,24 @@ class CentralHub:
         self._sweeper_task: Optional[asyncio.Task] = None
         self._sweeper_running = False
         self.lock = asyncio.Lock()
+
+    @property
+    def api_key(self) -> str:
+        if self._api_key_override is not None:
+            return self._api_key_override
+        from ag_core.config import load_config
+        try:
+            config = load_config()
+            val = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
+            if val:
+                return val
+        except Exception:
+            pass
+        return os.getenv("SKILL_API_KEY", "")
+
+    @api_key.setter
+    def api_key(self, value: str):
+        self._api_key_override = value
 
     def start_sweeper(self):
         if not self._sweeper_running:
@@ -336,6 +354,9 @@ class CentralHub:
                         "last_heartbeat": w_info.get("last_heartbeat")
                     }
                 return 200, serialized_workers, {}
+
+            elif endpoint == "/tasks":
+                return 200, dict(self.tasks), {}
 
             elif endpoint == "/write_workspace_file":
                 path = payload.get("path")

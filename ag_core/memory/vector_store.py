@@ -61,17 +61,26 @@ if CHROMA_AVAILABLE:
         def __call__(self, input: Documents) -> Embeddings:
             return self.vector_memory.get_embeddings(input)
 
+_cached_sentence_transformer = None
+_sentence_transformer_failed = False
+
 class VectorMemory:
     def __init__(self, collection_name: str, use_chroma: bool = False, db_path: str = None, chroma_persist_dir: str = None):
         self.collection_name = collection_name
         self.embedder = SimpleTFIDFEmbedding()
         
         self.sentence_transformer_model = None
-        if SENTENCE_TRANSFORMERS_AVAILABLE:
-            try:
-                self.sentence_transformer_model = SentenceTransformer('all-MiniLM-L6-v2')
-            except Exception as e:
-                print(f"Warning: Failed to load SentenceTransformer ({e}). Falling back to TF-IDF.")
+        global _cached_sentence_transformer, _sentence_transformer_failed
+        if SENTENCE_TRANSFORMERS_AVAILABLE and not _sentence_transformer_failed:
+            if _cached_sentence_transformer is not None:
+                self.sentence_transformer_model = _cached_sentence_transformer
+            else:
+                try:
+                    _cached_sentence_transformer = SentenceTransformer('all-MiniLM-L6-v2')
+                    self.sentence_transformer_model = _cached_sentence_transformer
+                except Exception as e:
+                    print(f"Warning: Failed to load SentenceTransformer ({e}). Falling back to TF-IDF.")
+                    _sentence_transformer_failed = True
                 
         self.db_path = db_path or os.environ.get("GENIUS_MEMORY_DB_PATH") or os.environ.get("GENIUS_DB_PATH") or os.path.join(_ROOT_DIR, "genius.db")
         
@@ -157,22 +166,27 @@ class VectorMemory:
             )
         else:
             embedding = self.get_embeddings([text])[0]
-            conn = self._get_connection()
-            try:
-                conn.execute("BEGIN IMMEDIATE")
+            from ag_core.utils.db import enqueue_db_write
+            
+            def _add_vector_impl(conn, doc_id, collection_name, text, metadata_json, embedding_json):
                 conn.execute(
                     "INSERT OR REPLACE INTO agent_vector_memory_fallback (id, collection_name, text, metadata, embedding) VALUES (?, ?, ?, ?, ?)",
-                    (doc_id, self.collection_name, text, json.dumps(metadata), json.dumps(embedding))
+                    (doc_id, collection_name, text, metadata_json, embedding_json)
                 )
                 conn.commit()
+                
+            try:
+                enqueue_db_write(
+                    _add_vector_impl,
+                    doc_id,
+                    self.collection_name,
+                    text,
+                    json.dumps(metadata),
+                    json.dumps(embedding),
+                    db_path=self.db_path
+                )
             except Exception:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
                 raise
-            finally:
-                conn.close()
         return doc_id
 
     def query(self, query_text: str, n_results: int = 5) -> List[Dict[str, Any]]:

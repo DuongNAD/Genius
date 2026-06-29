@@ -43,6 +43,12 @@ def init_db():
                 error TEXT
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS seen_jtis (
+                jti TEXT PRIMARY KEY,
+                exp REAL
+            )
+        """)
         conn.commit()
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
@@ -67,10 +73,11 @@ _db_write_queue = queue.Queue()
 _db_writer_thread = None
 
 class WriteTask:
-    def __init__(self, func, args, kwargs):
+    def __init__(self, func, args, kwargs, db_path=None):
         self.func = func
         self.args = args
         self.kwargs = kwargs
+        self.db_path = db_path
         self.event = threading.Event()
         self.exception = None
         self.result = None
@@ -89,7 +96,7 @@ def _db_writer_worker():
                     pass
             break
             
-        db_path = get_db_path()
+        db_path = task.db_path or get_db_path()
         if conn is None or db_path != current_conn_path:
             if conn:
                 try:
@@ -101,6 +108,8 @@ def _db_writer_worker():
                 conn.execute("PRAGMA journal_mode=WAL;")
                 current_conn_path = db_path
             except Exception as e:
+                conn = None
+                current_conn_path = None
                 task.exception = e
                 task.event.set()
                 _db_write_queue.task_done()
@@ -110,6 +119,13 @@ def _db_writer_worker():
             task.result = task.func(conn, *task.args, **task.kwargs)
         except Exception as e:
             task.exception = e
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            conn = None
+            current_conn_path = None
         finally:
             task.event.set()
             _db_write_queue.task_done()
@@ -120,9 +136,19 @@ def _start_writer_thread():
         _db_writer_thread = threading.Thread(target=_db_writer_worker, daemon=True, name="SQLiteWriterThread")
         _db_writer_thread.start()
 
+def stop_writer_thread():
+    global _db_writer_thread
+    if _db_writer_thread and _db_writer_thread.is_alive():
+        _db_write_queue.put(None)
+        _db_writer_thread.join(timeout=2.0)
+        _db_writer_thread = None
+
+
+
 def _submit_write(func, *args, **kwargs):
+    db_path = kwargs.pop("db_path", None)
     _start_writer_thread()
-    task = WriteTask(func, args, kwargs)
+    task = WriteTask(func, args, kwargs, db_path=db_path)
     _db_write_queue.put(task)
     task.event.wait()
     if task.exception:
@@ -174,6 +200,10 @@ def _log_conversation_impl(conn, prompt: str, result: str):
     conn.commit()
 
 # --- Public API Functions ---
+
+def enqueue_db_write(func, *args, **kwargs):
+    """Enqueues a database write function to be run by the writer thread."""
+    return _submit_write(func, *args, **kwargs)
 
 def log_agent_start(task_id: str, agent_name: str, prompt: str):
     """Logs the start of an agent execution."""

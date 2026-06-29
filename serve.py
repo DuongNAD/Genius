@@ -20,6 +20,8 @@ from orchestrator import run_pipeline, run_e2e_pipeline
 from ag_core.distributed.hub import CentralHub
 from fastapi import Request, Response
 import json
+from ag_core.utils.db import init_db
+init_db()
 
 central_hub = CentralHub()
 
@@ -31,7 +33,9 @@ class BoundedPendingTasks(dict):
                     self.pop(t_id, None)
             while len(self) >= 10000:
                 first_key = next(iter(self))
-                self.pop(first_key, None)
+                fut = self.pop(first_key, None)
+                if fut and not fut.done():
+                    fut.cancel()
         super().__setitem__(key, value)
 
 pending_tasks = BoundedPendingTasks()

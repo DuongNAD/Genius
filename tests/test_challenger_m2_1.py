@@ -5,9 +5,7 @@ sys.modules["peft"] = None
 sys.modules["torch"] = None
 sys.modules["tensorflow"] = None
 
-if sys.platform == "win32":
-    import asyncio
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 
 
 
@@ -28,7 +26,7 @@ from orchestrator import call_api, DISTRIBUTED_MODE, PipelineError
 from ag_core.distributed.worker import ClientWorker
 from ag_core.utils.jwt import encode_jwt
 
-JWT_SECRET = "mock-skill-key"
+JWT_SECRET = os.getenv("SKILL_API_KEY", "mock-skill-key")
 HOST = "127.0.0.1"
 PORT = 8020
 WS_URL = f"ws://{HOST}:{PORT}/ws/connect"

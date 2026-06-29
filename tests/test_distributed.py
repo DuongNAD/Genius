@@ -764,7 +764,10 @@ async def test_t2_f4_multiple_identical_tasks_routing(network, hub):
         headers = hub.create_headers(payload)
         await network.send_to_hub("/dispatch", payload, headers)
     
-    await asyncio.sleep(0.1)
+    for _ in range(40):
+        if w1.tasks_completed == 5:
+            break
+        await asyncio.sleep(0.05)
     assert w1.tasks_completed == 5
 
 @pytest.mark.asyncio
@@ -1016,7 +1019,7 @@ async def test_t3_comb_4_heartbeat_failure_during_network_instability(network, h
     
     # Inject network drops for heartbeats
     network.drop_rate = 1.0
-    await asyncio.sleep(0.06)
+    await asyncio.sleep(0.2)
     
     # Hub checks liveness, should fail task_1 since heartbeat missed
     await hub.sweep()

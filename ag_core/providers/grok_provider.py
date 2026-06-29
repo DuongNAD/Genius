@@ -1,4 +1,5 @@
 import os
+import sys
 import shutil
 import json
 import asyncio
@@ -41,32 +42,84 @@ class GrokProvider(BaseProvider):
 
             if not self.api_key:
                 try:
-                    login_process = await asyncio.create_subprocess_exec(
-                        cli_path, "login",
-                        stdin=asyncio.subprocess.DEVNULL,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
+                    login_cmd = [cli_path, "login"]
+                    if sys.platform == "win32":
+                        resolved_cli = shutil.which(cli_path) or cli_path
+                        if resolved_cli.lower().endswith((".cmd", ".bat")):
+                            login_cmd = ["cmd.exe", "/c"] + login_cmd
+                    try:
+                        login_process = await asyncio.create_subprocess_exec(
+                            *login_cmd,
+                            stdin=asyncio.subprocess.DEVNULL,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                    except OSError:
+                        if sys.platform == "win32" and login_cmd[0] != "cmd.exe":
+                            login_cmd = ["cmd.exe", "/c"] + login_cmd
+                            login_process = await asyncio.create_subprocess_exec(
+                                *login_cmd,
+                                                stdin=asyncio.subprocess.DEVNULL,
+                                                stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.PIPE
+                            )
+                        else:
+                            raise
                     await login_process.communicate()
                 except Exception:
                     pass
 
-            cmd = [cli_path, "-p", prompt, "--output-format", "json", "--no-auto-update"]
+            import tempfile
             
-            session_id = extra.pop("session_id", None) or kwargs.get("session_id") or self.extra_params.get("session_id")
-            if session_id:
-                cmd.extend(["--session-id", str(session_id)])
+            temp_file_path = None
+            try:
+                if len(prompt) > 1000:
+                    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+                        f.write(prompt)
+                        temp_file_path = f.name
+                    cmd = [cli_path, "--prompt", temp_file_path, "--output-format", "json", "--no-auto-update"]
+                else:
+                    cmd = [cli_path, "-p", prompt, "--output-format", "json", "--no-auto-update"]
                 
-            if sys_prompt:
-                cmd.extend(["--system-prompt", sys_prompt])
-                
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
+                session_id = extra.pop("session_id", None) or kwargs.get("session_id") or self.extra_params.get("session_id")
+                if session_id:
+                    cmd.extend(["--session-id", str(session_id)])
+                    
+                if sys_prompt:
+                    cmd.extend(["--system-prompt", sys_prompt])
+                    
+                actual_cmd = cmd
+                if sys.platform == "win32":
+                    resolved_cli = shutil.which(cli_path) or cli_path
+                    if resolved_cli.lower().endswith((".cmd", ".bat")):
+                        actual_cmd = ["cmd.exe", "/c"] + cmd
+                        
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        *actual_cmd,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                except OSError:
+                    if sys.platform == "win32" and actual_cmd == cmd:
+                        actual_cmd = ["cmd.exe", "/c"] + cmd
+                        process = await asyncio.create_subprocess_exec(
+                            *actual_cmd,
+                            stdin=asyncio.subprocess.DEVNULL,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                    else:
+                        raise
+                        
+                stdout, stderr = await process.communicate()
+            finally:
+                if temp_file_path and os.path.exists(temp_file_path):
+                    try:
+                        os.remove(temp_file_path)
+                    except Exception:
+                        pass
             
             stdout_str = stdout.decode("utf-8", errors="ignore").strip()
             try:
