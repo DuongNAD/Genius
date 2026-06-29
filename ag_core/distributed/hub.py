@@ -2,6 +2,7 @@ import asyncio
 import time
 import json
 import hashlib
+import os
 from typing import Dict, List, Optional, Any
 
 class TaskQueue(list):
@@ -40,12 +41,13 @@ class BoundedTasks(dict):
         super().__setitem__(key, value)
 
 class CentralHub:
-    def __init__(self, api_key: str = "valid-api-key"):
-        self.api_key = api_key
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key if api_key is not None else os.getenv("SKILL_API_KEY", "")
         self.workers: Dict[str, Dict[str, Any]] = {}
         self.tasks = BoundedTasks()
         self.network = None
         self.task_queue = TaskQueue()
+        self.task_counter = 0
         self.config = {
             "max_workers": 10,
             "heartbeat_timeout": 0.5,
@@ -239,7 +241,8 @@ class CentralHub:
                 return 200, {"status": "alive"}, {}
 
             elif endpoint == "/dispatch":
-                task_id = f"task_{len(self.tasks) + 1}"
+                self.task_counter += 1
+                task_id = f"task_{self.task_counter}"
                 role = payload.get("role")
                 task_data = payload.get("task_data")
                 if not role or task_data is None:
@@ -336,8 +339,18 @@ class CentralHub:
 
             elif endpoint == "/write_workspace_file":
                 path = payload.get("path")
+                content = payload.get("content", "")
                 if not path or ".." in path or path.startswith("/") or ":" in path:
                     return 400, {"error": "Path traversal detected"}, {}
+                import os
+                dirname = os.path.dirname(path)
+                if dirname:
+                    os.makedirs(dirname, exist_ok=True)
+                try:
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                except Exception as e:
+                    return 500, {"error": f"Failed to write file: {str(e)}"}, {}
                 return 200, {"status": "file_written"}, {}
 
         return 404, {"error": "Endpoint not found"}, {}

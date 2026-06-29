@@ -9,3 +9,7 @@ python-dotenv>=1.0.1
 fastapi>=0.115.0
 uvicorn>=0.30.0
 flake8>=7.0.0
+websockets
+requests
+pytest-asyncio
+

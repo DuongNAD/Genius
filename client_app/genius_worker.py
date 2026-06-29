@@ -19,7 +19,8 @@ from ag_core.distributed.worker import ClientWorker
 
 def generate_jwt(worker_id: str) -> str:
     # Kept for backward compatibility or direct imports if needed
-    secret = os.getenv("SKILL_API_KEY", "mock-skill-key")
+    import sys
+    secret = os.getenv("SKILL_API_KEY", "" if ("pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST")) else "")
     payload = {
         "sub": worker_id,
         "exp": int(time.time() + 300)

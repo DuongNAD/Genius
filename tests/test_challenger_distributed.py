@@ -112,7 +112,7 @@ def test_jwt_identity_spoofing_bypass():
     is rejected and disconnected if they send a register request for worker-B.
     """
     client = TestClient(app)
-    token = encode_jwt({"sub": "worker-A", "exp": time.time() + 60}, JWT_SECRET)
+    token = encode_jwt({"sub": "worker-A", "exp": time.time() + 60}, os.getenv("SKILL_API_KEY", "mock-skill-key"))
 
     # Clear registry
     worker_registry.workers.clear()
@@ -181,7 +181,7 @@ async def test_busy_worker_reregistration_race(network, hub):
     await w1.register()
 
     # Dispatch first task
-    payload = {"role": "grok", "task_data": "task_1"}
+    payload = {"role": "grok", "task_data": "task_1 sleep:0.5"}
     headers = hub.create_headers(payload)
     await network.send_to_hub("/dispatch", payload, headers)
     await asyncio.sleep(0.005)
@@ -252,7 +252,7 @@ def test_websocket_heartbeat_identity_spoofing_rejected():
     the connection is rejected and closed.
     """
     client = TestClient(app)
-    token = encode_jwt({"sub": "worker-A", "exp": time.time() + 60}, JWT_SECRET)
+    token = encode_jwt({"sub": "worker-A", "exp": time.time() + 60}, os.getenv("SKILL_API_KEY", "mock-skill-key"))
 
     # Clear registry
     worker_registry.workers.clear()
@@ -292,7 +292,7 @@ def test_websocket_result_identity_spoofing_rejected():
     the connection is rejected and closed.
     """
     client = TestClient(app)
-    token = encode_jwt({"sub": "worker-A", "exp": time.time() + 60}, JWT_SECRET)
+    token = encode_jwt({"sub": "worker-A", "exp": time.time() + 60}, os.getenv("SKILL_API_KEY", "mock-skill-key"))
 
     # Clear registry
     worker_registry.workers.clear()

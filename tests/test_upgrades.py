@@ -29,25 +29,25 @@ def test_checksum_serialization_and_hmac():
     # Verification using HMAC-SHA256
     assert verify_checksum(payload, chk, secret)
     
-    # Verify fallback to plain SHA-256 (canonical)
+    # Verify plain SHA-256 is NOT accepted anymore (canonical)
     plain_canonical_data = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
     plain_canonical_chk = hashlib.sha256(plain_canonical_data).hexdigest()
-    assert verify_checksum(payload, plain_canonical_chk, secret)
+    assert not verify_checksum(payload, plain_canonical_chk, secret)
     
-    # Verify fallback to plain SHA-256 (spaced sort_keys)
+    # Verify plain SHA-256 is NOT accepted anymore (spaced sort_keys)
     plain_spaced_data = json.dumps(payload, sort_keys=True).encode('utf-8')
     plain_spaced_chk = hashlib.sha256(plain_spaced_data).hexdigest()
-    assert verify_checksum(payload, plain_spaced_chk, secret)
+    assert not verify_checksum(payload, plain_spaced_chk, secret)
 
-    # Verify fallback to plain SHA-256 (un-sorted/no-space)
+    # Verify plain SHA-256 is NOT accepted anymore (un-sorted/no-space)
     plain_unsorted_nospace_data = json.dumps(payload, separators=(',', ':')).encode('utf-8')
     plain_unsorted_nospace_chk = hashlib.sha256(plain_unsorted_nospace_data).hexdigest()
-    assert verify_checksum(payload, plain_unsorted_nospace_chk, secret)
+    assert not verify_checksum(payload, plain_unsorted_nospace_chk, secret)
 
-    # Verify fallback to plain SHA-256 (un-sorted/spaced)
+    # Verify plain SHA-256 is NOT accepted anymore (un-sorted/spaced)
     plain_unsorted_spaced_data = json.dumps(payload).encode('utf-8')
     plain_unsorted_spaced_chk = hashlib.sha256(plain_unsorted_spaced_data).hexdigest()
-    assert verify_checksum(payload, plain_unsorted_spaced_chk, secret)
+    assert not verify_checksum(payload, plain_unsorted_spaced_chk, secret)
 
 
 def test_verify_raw_body_checksum():
@@ -61,11 +61,10 @@ def test_verify_raw_body_checksum():
     assert is_valid
     assert not is_plain
     
-    # Plain SHA-256
+    # Plain SHA-256 (should be invalid/rejected)
     plain_chk = hashlib.sha256(body).hexdigest()
     is_valid, is_plain = verify_raw_body_checksum(body, plain_chk, secret)
-    assert is_valid
-    assert is_plain
+    assert not is_valid
     
     # Invalid
     is_valid, is_plain = verify_raw_body_checksum(body, "invalid_checksum", secret)

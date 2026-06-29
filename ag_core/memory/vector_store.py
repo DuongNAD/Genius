@@ -118,25 +118,30 @@ class VectorMemory:
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
         conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
         return conn
 
     def _init_sqlite_db(self):
-        conn = self._get_connection()
+        db_dir = os.path.dirname(self.db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        import sqlite3
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         try:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS agent_vector_memory_fallback (
-                    id TEXT PRIMARY KEY,
-                    collection_name TEXT,
-                    text TEXT,
-                    metadata TEXT,
-                    embedding TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_collection ON agent_vector_memory_fallback(collection_name)")
-            conn.commit()
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA busy_timeout = 30000;")
+            with conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS agent_vector_memory_fallback (
+                        id TEXT PRIMARY KEY,
+                        collection_name TEXT,
+                        text TEXT,
+                        metadata TEXT,
+                        embedding TEXT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_collection ON agent_vector_memory_fallback(collection_name)")
         finally:
             conn.close()
 
@@ -154,11 +159,18 @@ class VectorMemory:
             embedding = self.get_embeddings([text])[0]
             conn = self._get_connection()
             try:
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     "INSERT OR REPLACE INTO agent_vector_memory_fallback (id, collection_name, text, metadata, embedding) VALUES (?, ?, ?, ?, ?)",
                     (doc_id, self.collection_name, text, json.dumps(metadata), json.dumps(embedding))
                 )
                 conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
             finally:
                 conn.close()
         return doc_id

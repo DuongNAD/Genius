@@ -23,83 +23,34 @@ def calculate_checksum(payload: Any, secret: str) -> str:
 
 def verify_checksum(payload: Any, checksum: str, secret: str) -> bool:
     """
-    Verify the checksum of a payload, supporting HMAC-SHA256 and falling back to
-    plain SHA-256 with various serialization formats for backward compatibility.
+    Verify the checksum of a payload, supporting only HMAC-SHA256.
+    Returns False if secret is missing or empty.
     """
+    if not secret:
+        return False
     if not checksum:
         return False
     
-    # 1. Try HMAC-SHA256
-    try:
-        if calculate_checksum(payload, secret) == checksum:
-            return True
-    except Exception:
-        pass
-    
-    # 2. Fall back to plain SHA-256
-    if isinstance(payload, (bytes, str)):
-        data = payload if isinstance(payload, bytes) else payload.encode("utf-8")
-        return hashlib.sha256(data).hexdigest() == checksum
-    
-    # Try various JSON serialization formats for plain SHA-256
-    # a. Canonical (sorted, no spaces)
-    try:
-        data_canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        if hashlib.sha256(data_canonical).hexdigest() == checksum:
-            return True
-    except Exception:
-        pass
-    
-    # b. Spaced sort_keys (sorted, default separators)
-    try:
-        data_spaced_sorted = json.dumps(payload, sort_keys=True).encode("utf-8")
-        if hashlib.sha256(data_spaced_sorted).hexdigest() == checksum:
-            return True
-    except Exception:
-        pass
-    
-    # c. Un-sorted, no space
-    try:
-        data_unsorted_nospace = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        if hashlib.sha256(data_unsorted_nospace).hexdigest() == checksum:
-            return True
-    except Exception:
-        pass
-    
-    # d. Un-sorted, spaced (default json.dumps)
-    try:
-        data_unsorted_spaced = json.dumps(payload).encode("utf-8")
-        if hashlib.sha256(data_unsorted_spaced).hexdigest() == checksum:
-            return True
-    except Exception:
-        pass
-        
-    return False
+    return hmac.compare_digest(calculate_checksum(payload, secret), checksum)
 
 def verify_raw_body_checksum(body: bytes, checksum: str, secret: str) -> Tuple[bool, bool]:
     """
     Verify the checksum of raw request body bytes.
     Returns (is_valid, is_plain).
     """
+    if not secret:
+        return False, False
     if not checksum:
         return False, False
     
     # 1. Try HMAC-SHA256
     try:
         computed_hmac = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-        if computed_hmac == checksum:
+        if hmac.compare_digest(computed_hmac, checksum):
             return True, False
     except Exception:
         pass
-    
-    # 2. Try plain SHA-256
-    try:
-        computed_plain = hashlib.sha256(body).hexdigest()
-        if computed_plain == checksum:
-            return True, True
-    except Exception:
-        pass
-        
+            
     return False, False
 
 # Centralized Authentication and Checksum Middleware
@@ -131,7 +82,7 @@ def verify_api_key(
             detail="Missing token"
         )
     config = load_config()
-    expected_key = config.skill_api_key or os.getenv("SKILL_API_KEY", "mock-skill-key")
+    expected_key = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
     try:
         payload = decode_jwt(token, expected_key)
     except ValueError as e:
@@ -144,7 +95,7 @@ def verify_api_key(
 async def checksum_middleware(request: Request, call_next):
     path = request.url.path
     config = load_config()
-    expected_key = config.skill_api_key or os.getenv("SKILL_API_KEY", "mock-skill-key")
+    expected_key = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
     request.state.use_plain_checksum = False
 
     if path.endswith("/run") or "/status" in path:

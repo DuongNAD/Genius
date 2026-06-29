@@ -7,10 +7,10 @@ from typing import Dict, List, Optional, Any
 from ag_core.utils.jwt import encode_jwt
 
 class ClientWorker:
-    def __init__(self, worker_id: str, roles: List[str], api_key: str = "valid-api-key"):
+    def __init__(self, worker_id: str, roles: List[str], api_key: Optional[str] = None):
         self.worker_id = worker_id
         self.roles = roles
-        self.api_key = api_key
+        self.api_key = api_key if api_key is not None else os.getenv("SKILL_API_KEY", "")
         self.active_tasks = set()
         self._status = "idle"
         self._current_task = None
@@ -175,7 +175,7 @@ class ClientWorker:
                         config = load_config()
                         
                         prefix = "grok" if "grok" in normalized_role else ("anthropic" if "claude" in normalized_role else "openai")
-                        provider_key = getattr(config, f"{prefix}_api_key", None) or os.getenv(f"{prefix.upper()}_API_KEY", "mock-key")
+                        provider_key = getattr(config, f"{prefix}_api_key", None) or os.getenv(f"{prefix.upper()}_API_KEY", "")
                         model_name = getattr(config.models, prefix, default_model)
                         
                         provider = provider_class(api_key=provider_key, model_name=model_name)
@@ -266,7 +266,8 @@ class ClientWorker:
                 print(f"[Worker] Shielded report failed: {e}")
 
     def generate_jwt(self) -> str:
-        secret = os.getenv("SKILL_API_KEY", "mock-skill-key")
+        import sys
+        secret = os.getenv("SKILL_API_KEY", "" if ("pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST")) else "")
         payload = {
             "sub": self.worker_id,
             "exp": int(time.time() + 300)

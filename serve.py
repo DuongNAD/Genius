@@ -195,7 +195,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="WebSocket not enabled in local mode")
 
-    secret = os.getenv("SKILL_API_KEY", "mock-skill-key")
+    secret = os.getenv("SKILL_API_KEY", "" if is_pytest else "")
     try:
         payload = decode_jwt(token, secret)
         worker_id_from_jwt = payload.get("sub") or payload.get("worker_id")

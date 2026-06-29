@@ -96,7 +96,7 @@ class Config(BaseModel):
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
     services: ServicesConfig = Field(default_factory=ServicesConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
-    skill_api_key: str = Field(default_factory=lambda: os.getenv("SKILL_API_KEY", "mock-skill-key"))
+    skill_api_key: str = Field(default_factory=lambda: os.getenv("SKILL_API_KEY", ""))
     
     # Credentials injected directly from OS Environment
     openai_api_key: str = Field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
@@ -158,6 +158,8 @@ def load_config(config_path: str = "config.yaml") -> Config:
         config.services.tester_agent = "http://localhost:8004/tester"
         config.services.security_agent = "http://localhost:8005/security"
         config.services.devops_agent = "http://localhost:8006/devops"
+        if not config.skill_api_key:
+            config.skill_api_key = ""
 
     import json
     registry_path = os.environ.get("GENIUS_SERVICE_REGISTRY", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".agents", "service_registry.json"))

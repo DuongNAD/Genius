@@ -229,7 +229,7 @@ def verify_response_checksum(response) -> None:
     if not expected_checksum:
         raise ChecksumMismatchError("Response is missing X-Payload-SHA256 header")
     config = load_config()
-    secret = config.skill_api_key or os.getenv("SKILL_API_KEY", "mock-skill-key")
+    secret = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
     if not verify_checksum(response.content, expected_checksum, secret):
         raise ChecksumMismatchError(f"Response checksum mismatch: expected {expected_checksum}")
 
@@ -473,7 +473,7 @@ async def call_api(url: str, api_key: str, prompt: str, context: dict = None, cl
     # Calculate checksum for POST request body
     from ag_core.utils.security import calculate_checksum
     config = load_config()
-    secret = config.skill_api_key or os.getenv("SKILL_API_KEY", "mock-skill-key")
+    secret = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
     req_checksum = calculate_checksum(req_payload, secret)
     payload_bytes = json.dumps(req_payload, sort_keys=True, separators=(',', ':')).encode("utf-8")
     
@@ -796,7 +796,7 @@ async def run_pipeline(
         clean_output_files(all_files)
     
     config = load_config()
-    api_key = api_key_override or config.skill_api_key or os.getenv('SKILL_API_KEY', 'mock-skill-key')
+    api_key = api_key_override or config.skill_api_key or os.getenv('SKILL_API_KEY', '')
     grok_url = grok_url or config.services.grok_researcher
     claude_url = claude_url or config.services.claude_architect
     codex_url = codex_url or config.services.codex_reviewer
@@ -1294,7 +1294,7 @@ async def run_e2e_pipeline(
     clean_output_files([plan_file, proj_plan_file])
     
     config = load_config()
-    api_key = api_key_override or config.skill_api_key or os.getenv('SKILL_API_KEY', 'mock-skill-key')
+    api_key = api_key_override or config.skill_api_key or os.getenv('SKILL_API_KEY', '')
     grok_url = grok_url or config.services.grok_researcher
     claude_url = claude_url or config.services.claude_architect
     codex_url = codex_url or config.services.codex_reviewer

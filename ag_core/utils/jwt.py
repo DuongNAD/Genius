@@ -90,16 +90,39 @@ def decode_jwt(token: str, secret: str) -> dict:
     if not jti:
         raise ValueError("Missing jti claim")
         
-    now = time.time()
+    from ag_core.config import load_config
+    import sqlite3
+    import os
+    
+    config = load_config()
+    db_path = config.memory.db_path
+    db_dir = os.path.dirname(db_path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+        
     with _jtis_lock:
-        # Prune expired JTIs
-        expired = [k for k, exp_val in _seen_jtis.items() if exp_val is not None and now > exp_val]
-        for k in expired:
-            del _seen_jtis[k]
+        conn = sqlite3.connect(db_path, timeout=10)
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS seen_jtis (
+                    jti TEXT PRIMARY KEY,
+                    exp REAL
+                )
+            """)
+            conn.commit()
             
-        if jti in _seen_jtis:
-            raise ValueError("Token replay detected")
+            now = time.time()
+            conn.execute("DELETE FROM seen_jtis WHERE exp IS NOT NULL AND ? > exp", (now,))
+            conn.commit()
             
-        _seen_jtis[jti] = payload.get("exp")
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM seen_jtis WHERE jti = ?", (jti,))
+            if cursor.fetchone():
+                raise ValueError("Token replay detected")
+                
+            conn.execute("INSERT INTO seen_jtis (jti, exp) VALUES (?, ?)", (jti, payload.get("exp")))
+            conn.commit()
+        finally:
+            conn.close()
             
     return payload

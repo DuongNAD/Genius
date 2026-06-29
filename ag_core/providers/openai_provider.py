@@ -23,35 +23,33 @@ class OpenAIProvider(BaseProvider):
             extra.update(kwargs)
             sys_prompt = extra.pop("system", None) or system
             
-            # Locate codex.exe prioritized in:
-            # - %LocalAppData%\OpenAI\Codex\bin\*\codex.exe
-            # - %LocalAppData%\Microsoft\WindowsApps\codex.exe
-            # - %ProgramFiles%\WindowsApps\OpenAI.Codex_*\app\resources\codex.exe
-            # - Fallback to "codex.exe"
-            cli_path = None
+            # Locate codex prioritized in PATH, then fallbacks
+            import shutil
+            cli_path = shutil.which("codex") or shutil.which("codex.exe")
             
-            localappdata = os.environ.get("LOCALAPPDATA")
-            if localappdata:
-                pattern1 = os.path.join(localappdata, "OpenAI", "Codex", "bin", "*", "codex.exe")
-                matches1 = glob.glob(pattern1)
-                if matches1:
-                    cli_path = matches1[0]
-                    
-            if not cli_path and localappdata:
-                candidate2 = os.path.join(localappdata, "Microsoft", "WindowsApps", "codex.exe")
-                if os.path.exists(candidate2):
-                    cli_path = candidate2
-                    
             if not cli_path:
-                program_files = os.environ.get("ProgramFiles")
-                if program_files:
-                    pattern3 = os.path.join(program_files, "WindowsApps", "OpenAI.Codex_*", "app", "resources", "codex.exe")
-                    matches3 = glob.glob(pattern3)
-                    if matches3:
-                        cli_path = matches3[0]
+                localappdata = os.environ.get("LOCALAPPDATA")
+                if localappdata:
+                    pattern1 = os.path.join(localappdata, "OpenAI", "Codex", "bin", "*", "codex.exe")
+                    matches1 = glob.glob(pattern1)
+                    if matches1:
+                        cli_path = matches1[0]
                         
-            if not cli_path:
-                cli_path = "codex.exe"
+                if not cli_path and localappdata:
+                    candidate2 = os.path.join(localappdata, "Microsoft", "WindowsApps", "codex.exe")
+                    if os.path.exists(candidate2):
+                        cli_path = candidate2
+                        
+                if not cli_path:
+                    program_files = os.environ.get("ProgramFiles")
+                    if program_files:
+                        pattern3 = os.path.join(program_files, "WindowsApps", "OpenAI.Codex_*", "app", "resources", "codex.exe")
+                        matches3 = glob.glob(pattern3)
+                        if matches3:
+                            cli_path = matches3[0]
+                            
+                if not cli_path:
+                    cli_path = "codex" if os.name != "nt" else "codex.exe"
 
             if sys_prompt:
                 prompt = f"{sys_prompt}\n\n{prompt}"

@@ -46,6 +46,8 @@ def test_concurrent_message_bus_operations():
     for t in threads:
         t.join()
         
+    bus.close()
+    
     print(f"\nTotal concurrency errors: {len(errors)}")
     if errors:
         print("\n--- Concurrency Errors Found ---")

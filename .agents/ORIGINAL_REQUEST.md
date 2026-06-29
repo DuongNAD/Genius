@@ -614,3 +614,73 @@ Integrity mode: development
 - [ ] Không còn bất kỳ đường dẫn hardcode Python cục bộ nào trên hệ thống.
 - [ ] Có `.gitignore` đầy đủ để tránh lộ key.
 
+
+## 2026-06-29T01:41:22Z
+
+# Teamwork Project Prompt
+
+Research the `loop-engineering` repository (https://github.com/cobusgreyling/loop-engineering.git) and deliver a comprehensive Markdown report proposing optimal development upgrades.
+
+Working directory: `e:\tool\teamwork_projects\loop_engineering`
+Integrity mode: development
+
+## Requirements
+
+### R1. Repository Analysis
+Thoroughly review the existing source code, structure, and configuration files of the `loop-engineering` repository to understand its current state.
+
+### R2. Upgrade Proposals
+Propose concrete, actionable development upgrades covering:
+- CI/CD pipelines and deployment automation
+- Code quality, linting, and testing frameworks
+- Performance optimization, system architecture, and code refactoring
+- Documentation and new developer onboarding experience
+
+### R3. Output Format
+Produce a well-structured, professional Markdown report (`analysis_and_upgrades.md`) that details the findings, proposed changes, and a prioritized implementation plan.
+
+## Acceptance Criteria
+
+### Completeness
+- [ ] The report includes an analysis of the current CI/CD, code quality, architecture, and documentation state.
+- [ ] The report provides at least one concrete, actionable recommendation for each of the four areas.
+
+### Quality and Objectivity
+- [ ] An independent auditor agent confirms the recommendations are specific to the `loop-engineering` repository (not generic advice) by citing actual files, libraries, or patterns found in the repo.
+- [ ] The report includes a prioritized roadmap for implementing the proposed changes.
+
+
+
+## 2026-06-29T02:10:45Z
+
+# Teamwork Project Prompt
+
+Fix the issues reported by Claude in the `Genius` repository, ensuring the system can develop normally without a sandbox, while addressing security, execution, and logic bugs.
+
+Working directory: `e:\tool\Genius`
+Integrity mode: development
+
+## Requirements
+
+### R1. Security & Configuration
+- Fix the HMAC validation in `ag_core/utils/security.py` so it does not fallback to unsecured SHA-256 without a secret.
+- Remove hardcoded `SKILL_API_KEY` and other mock keys from `docker-compose.yml` and the codebase.
+- **Note**: Keep the `--dangerously-bypass-approvals-and-sandbox` flag in `openai_provider.py` as the user explicitly requested to develop normally without a sandbox.
+
+### R2. Execution & Dependencies
+- Fix `docker-compose.yml` by correcting the missing `hub` role and adjusting API module paths (`.agents.skills.*.api:app`).
+- Fix `ag_core/providers/openai_provider.py` to resolve the CLI executable path cross-platform (e.g., using `shutil.which`) instead of a hardcoded Windows path.
+- Add missing dependencies (`websockets`, `requests`, `pytest-asyncio`) to `requirements.txt`.
+
+### R3. Logic Bugs & Cleanup
+- Refactor task ID generation in `ag_core/distributed/hub.py` to avoid collisions when tasks exceed 10,000 and are evicted.
+- Improve the JWT anti-replay mechanism so it doesn't just rely on volatile RAM.
+- Complete the implementation of the `/write_workspace_file` endpoint so it actually writes to the file system instead of just validating paths.
+- Clean up git tracking (remove `__pycache__/*.pyc` from git tree) and fix syntax errors in the 2 mock files inside the `projects/` directory.
+
+## Acceptance Criteria
+
+### Verification
+- [ ] An independent auditor verifies that `security.py` now enforces strict HMAC validation.
+- [ ] An independent auditor verifies that `docker-compose.yml` and `openai_provider.py` are corrected and `requirements.txt` contains the missing dependencies.
+- [ ] Running a basic test or syntax check (`pytest` or `python -m py_compile`) confirms no syntax errors were introduced.
