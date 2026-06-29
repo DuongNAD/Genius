@@ -102,7 +102,7 @@ async def test_e2e_happy_path(mock_run_subproc, mock_get, mock_post, temp_worksp
     project_dir = temp_workspace / "projects" / "write_hello_world"
     proj_plan_path = project_dir / "plan.md"
     src_file_path = project_dir / "src" / "hello.py"
-    test_file_path = project_dir / "tests" / "test_hello.py"
+    test_file_path = project_dir / "tests" / "test_src_hello.py"
     prog_file_path = temp_workspace / "CURRENT_PROG.md"
 
     assert plan_path.exists()

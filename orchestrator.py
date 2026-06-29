@@ -63,6 +63,31 @@ def extract_code(content: str) -> str:
         return "\n".join(blocks).strip()
     return content.strip()
 
+def safe_join(base_dir: str, rel_path: str) -> str:
+    """
+    Join an (untrusted, model-supplied) relative path onto base_dir, guaranteeing
+    the result stays inside base_dir. Rejects absolute paths, Windows drive-relative
+    paths, and '..' traversal so a malicious design plan cannot write outside the
+    project workspace.
+    """
+    if (not rel_path or os.path.isabs(rel_path)
+            or (len(rel_path) > 1 and rel_path[1] == ":")):
+        raise PipelineError(f"Unsafe file path rejected (absolute path not allowed): {rel_path!r}")
+    base_real = os.path.realpath(base_dir)
+    target_real = os.path.realpath(os.path.join(base_real, rel_path))
+    if target_real != base_real and not target_real.startswith(base_real + os.sep):
+        raise PipelineError(f"Unsafe file path rejected (escapes project dir): {rel_path!r}")
+    return target_real
+
+def flatten_rel_path(rel_path: str) -> str:
+    """
+    Turn a relative path like 'src/a/util.py' into a collision-free stem
+    'src_a_util' so two files with the same basename in different dirs don't
+    overwrite each other's generated test/audit/log files.
+    """
+    no_ext = os.path.splitext(rel_path)[0]
+    return re.sub(r'[\\/]+', '_', no_ext).strip('_') or "file"
+
 async def run_subprocess(cmd: list, env: dict = None) -> tuple[int, str]:
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -637,21 +662,59 @@ async def call_api(url: str, api_key: str, prompt: str, context: dict = None, cl
         _API_RESPONSE_CACHE[cache_key] = result
     return result
 
+def detect_vulnerabilities(security_report: str) -> bool:
+    """
+    Decide whether a security audit report indicates a real, actionable vulnerability.
+
+    Replaces naive case-sensitive substring matching (which produced false positives
+    on phrases like "no HIGH severity issues found" or "HIGHLY recommended") with
+    word-boundary matching plus negation-aware context checks.
+
+    Returns True only when an explicit vulnerability marker or a high/critical
+    severity term is present in a non-negated context.
+    """
+    if not security_report:
+        return False
+
+    text = security_report.lower()
+
+    # 1. Explicit machine-readable markers emitted intentionally by the audit.
+    explicit_markers = ("[vulnerability detected]", "[insecure]", "[vulnerable]")
+    if any(marker in text for marker in explicit_markers):
+        return True
+
+    # 2. Severity terms matched on word boundaries (so "highly"/"highlight" don't match).
+    severity_pattern = re.compile(r"\b(high|critical)\b(?:\s+(?:severity|risk|vulnerabilit\w+|issue\w*))?", re.IGNORECASE)
+
+    # Negation cues that flip a severity hit into a "clean" statement, e.g.
+    # "no high severity issues", "0 critical vulnerabilities", "without critical".
+    negation_pattern = re.compile(r"\b(no|none|zero|0|without|free of|not? any)\b")
+
+    for match in severity_pattern.finditer(text):
+        # Inspect the ~40 chars preceding the match for a negation cue.
+        window_start = max(0, match.start() - 40)
+        preceding = text[window_start:match.start()]
+        if negation_pattern.search(preceding):
+            continue
+        return True
+
+    return False
+
+
 async def process_single_file(file_info, project_dir, config, codex_url, tester_url, security_url, api_key, client, poll_timeout, max_retries, semaphore, message_bus, parent_art_id):
     from ag_core.utils.message_bus import Artifact
     async with semaphore:
         file_path = file_info["path"]
         specification = file_info["specification"]
         
-        target_file_path = os.path.join(project_dir, file_path)
+        target_file_path = safe_join(project_dir, file_path)
         os.makedirs(os.path.dirname(target_file_path), exist_ok=True)
-        
-        base_name = os.path.basename(file_path)
-        file_name, _ = os.path.splitext(base_name)
-        
-        test_file_path = os.path.join(project_dir, "tests", f"test_{file_name}.py")
-        audit_log_path = os.path.join(project_dir, "logs", f"audit_{file_name}.md")
-        test_log_path = os.path.join(project_dir, "logs", f"test_{file_name}.log")
+
+        flat_name = flatten_rel_path(file_path)
+
+        test_file_path = os.path.join(project_dir, "tests", f"test_{flat_name}.py")
+        audit_log_path = os.path.join(project_dir, "logs", f"audit_{flat_name}.md")
+        test_log_path = os.path.join(project_dir, "logs", f"test_{flat_name}.log")
         
         success = False
         test_failures_logs = ""
@@ -766,16 +829,14 @@ async def process_single_file(file_info, project_dir, config, codex_url, tester_
             except Exception as e:
                 logger.warning(f"Failed to write test log to {test_log_path}: {e}")
                 
-            # 7. Check if tests passed (return code 0) and security audit has no vulnerabilities
+            # 7. Check if tests passed (return code 0) and security audit has no vulnerabilities.
+            # An empty/whitespace security report means the audit stage produced no
+            # output (crash, truncation, stripped result) — fail closed rather than
+            # treating an absent audit as "clean".
             tests_passed = (pytest_exit_code == 0)
-            has_vulnerabilities = False
-            if ("[vulnerability detected]" in security_report.lower() or 
-                "[insecure]" in security_report.lower() or 
-                "HIGH" in security_report or 
-                "CRITICAL" in security_report):
-                has_vulnerabilities = True
-                
-            if tests_passed and not has_vulnerabilities:
+            security_missing = not (security_report and security_report.strip())
+            has_vulnerabilities = detect_vulnerabilities(security_report)
+            if tests_passed and not security_missing and not has_vulnerabilities:
                 logger.info(f"Successfully implemented and verified {file_path}")
                 success = True
                 break
@@ -783,7 +844,9 @@ async def process_single_file(file_info, project_dir, config, codex_url, tester_
                 fail_reasons = []
                 if not tests_passed:
                     fail_reasons.append(f"pytest failed (exit code {pytest_exit_code})")
-                if has_vulnerabilities:
+                if security_missing:
+                    fail_reasons.append("security audit returned no report (cannot confirm code is safe)")
+                elif has_vulnerabilities:
                     fail_reasons.append("security audit detected vulnerabilities/high warnings")
                 logger.warning(f"Verification failed for {file_path}: {', '.join(fail_reasons)}")
         
@@ -828,7 +891,6 @@ async def run_pipeline(
     DISTRIBUTED_MODE = distributed
 
     if max_debate_rounds is None:
-        import sys
         if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
             max_debate_rounds = 0
         else:
@@ -1169,7 +1231,13 @@ async def run_pipeline(
         
         a_args = antigravity_args if antigravity_args is not None else DEFAULT_ANTIGRAVITY_ARGS
         antigravity_formatted_cmd = format_cmd_args(antigravity_cmd, a_args, prompt, input_path=design_file, output_path=app_file)
-        
+
+        # On Windows, create_subprocess_exec (CreateProcess) cannot launch a
+        # .cmd/.bat directly — it must be run via cmd.exe /c (matches provider logic).
+        if (sys.platform == "win32" and antigravity_formatted_cmd
+                and str(antigravity_formatted_cmd[0]).lower().endswith((".cmd", ".bat"))):
+            antigravity_formatted_cmd = ["cmd.exe", "/c"] + antigravity_formatted_cmd
+
         logger.info(f"Command arguments: {antigravity_formatted_cmd}")
         
         if os.path.exists(app_file):
@@ -1487,13 +1555,12 @@ async def run_e2e_pipeline(
                 status_dict[file_path] = "in progress"
                 update_progress_md(status_dict)
                 
-                target_file_path = os.path.join(project_dir, file_path)
+                target_file_path = safe_join(project_dir, file_path)
                 os.makedirs(os.path.dirname(target_file_path), exist_ok=True)
-                
-                base_name = os.path.basename(file_path)
-                file_name, _ = os.path.splitext(base_name)
-                
-                test_file_path = os.path.join(project_dir, "tests", f"test_{file_name}.py")
+
+                flat_name = flatten_rel_path(file_path)
+
+                test_file_path = os.path.join(project_dir, "tests", f"test_{flat_name}.py")
                 
                 # --- Codex Implementation & Self-healing loop ---
                 codex_success = False
