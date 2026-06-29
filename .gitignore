@@ -37,11 +37,11 @@ dist/
 MANIFEST
 
 # Shared Context Pipeline outputs & Logs
-research.md
-design.md
-app.py
-review.md
-architecture.md
+/research.md
+/design.md
+/app.py
+/review.md
+/architecture.md
 *.log
 
 # OS Specific
