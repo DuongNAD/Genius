@@ -80,6 +80,17 @@ class ClaudeArchitectAgent(BaseAgent):
         sys_prompt = (
             ARCHITECT_PROMPT +
             f"\n\nThe single ```json block must conform to this DesignPlan JSON schema:\n{schema_json}"
+            "\n\nExample of a valid response (structure only — adapt to the actual request):\n"
+            "```json\n"
+            '{\n'
+            '  "project_name": "todo_api",\n'
+            '  "description": "A small FastAPI TODO service.",\n'
+            '  "files": [\n'
+            '    {"path": "src/main.py", "specification": "FastAPI app exposing GET/POST /todos backed by an in-memory store. Define a Todo model with id:int and title:str, plus list_todos() and create_todo() handlers."},\n'
+            '    {"path": "tests/test_main.py", "specification": "pytest tests using FastAPI TestClient that cover listing todos and creating a todo, asserting status codes and response bodies."}\n'
+            '  ]\n'
+            '}\n'
+            "```"
         )
         response = await self.provider.send_prompt(full_prompt, system=sys_prompt)
         content = response.get("content", "")

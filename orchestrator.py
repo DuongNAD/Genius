@@ -17,31 +17,41 @@ def parse_design_for_files(design_content: str) -> list:
     Returns a list of dicts, e.g., [{"path": "src/main.py", "specification": "..."}].
     """
     from ag_core.models import DesignPlan
-    
-    # 1. Try parsing JSON block with Pydantic
-    json_blocks = re.findall(r'[ \t]*```json\s*(\{.*?\})\s*[ \t]*```', design_content, re.DOTALL)
-    for block in json_blocks:
+
+    def _validate_obj(obj):
+        if not isinstance(obj, dict) or "files" not in obj:
+            return None
         try:
-            if hasattr(DesignPlan, "model_validate_json"):
-                plan = DesignPlan.model_validate_json(block)
+            if hasattr(DesignPlan, "model_validate"):
+                plan = DesignPlan.model_validate(obj)
             else:
-                plan = DesignPlan.parse_raw(block)
+                plan = DesignPlan.parse_obj(obj)
             return [{"path": f.path, "specification": f.specification} for f in plan.files]
         except Exception:
-            pass
-            
-    try:
-        start = design_content.find('{')
-        end = design_content.rfind('}')
-        if start != -1 and end != -1 and end > start:
-            block = design_content[start:end+1]
-            if hasattr(DesignPlan, "model_validate_json"):
-                plan = DesignPlan.model_validate_json(block)
-            else:
-                plan = DesignPlan.parse_raw(block)
-            return [{"path": f.path, "specification": f.specification} for f in plan.files]
-    except Exception:
-        pass
+            return None
+
+    # 1. Look for a DesignPlan JSON object. Prefer a ```json fenced block, then the
+    #    whole document. Use a brace-aware JSON decoder (raw_decode) so a '}' inside
+    #    a specification string can't truncate the object the way the old `\{.*?\}`
+    #    / find..rfind regex did.
+    decoder = json.JSONDecoder()
+    candidates = re.findall(r'```json\s*(.*?)```', design_content, re.DOTALL | re.IGNORECASE)
+    candidates.append(design_content)
+    for text in candidates:
+        idx = 0
+        while True:
+            start = text.find('{', idx)
+            if start == -1:
+                break
+            try:
+                obj, end = decoder.raw_decode(text[start:])
+            except json.JSONDecodeError:
+                idx = start + 1
+                continue
+            result = _validate_obj(obj)
+            if result is not None:
+                return result
+            idx = start + end
 
     # 2. Fall back to regex that extracts markdown code blocks with filepath annotations
     code_blocks = re.findall(r'[ \t]*```[a-zA-Z0-9_-]*\s*\n(.*?)\n[ \t]*```', design_content, re.DOTALL)
@@ -1071,7 +1081,9 @@ async def run_pipeline(
                 
                 claude_refine_prompt = (
                     "You are Claude, the architect agent. Refine your draft architecture plan based on the constructive criticism from GrokReviewer.\n"
-                    "Address the identified issues and incorporate the suppressed improvements, producing a final refined architecture plan.\n\n"
+                    "Address the identified issues and incorporate the suggested improvements, producing a final refined architecture plan.\n"
+                    "Output the refined plan as EXACTLY ONE ```json fenced block conforming to the same DesignPlan schema "
+                    "(project_name, description, and files[] where each file has path + specification) and nothing else.\n\n"
                     f"Previous Draft Plan:\n{claude_content}\n\n"
                     f"GrokReviewer's Criticism:\n{critic_content}\n\n"
                     f"Original Research and Context:\n{claude_prompt}"
