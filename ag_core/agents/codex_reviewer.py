@@ -68,10 +68,10 @@ class CodexReviewerAgent(BaseAgent):
             full_prompt += f"{memory_context}\n"
         full_prompt += f"\nProject files context:\n{context}"
         
-        from ag_core.utils.prompt_templates import AGENT_CORE_RULES
+        from ag_core.utils.prompt_templates import CODER_PROMPT
         
         # Invoke provider
-        response = await self.provider.send_prompt(full_prompt, system=AGENT_CORE_RULES)
+        response = await self.provider.send_prompt(full_prompt, system=CODER_PROMPT)
         content = response.get("content", "")
         usage = response.get("usage", {})
         
@@ -175,7 +175,7 @@ class CodexReviewerAgent(BaseAgent):
                     f"Test logs:\n{pytest_logs}\n\n"
                     f"Please fix the bugs in the code. Original prompt: {user_prompt}"
                 )
-                response = await self.provider.send_prompt(retry_prompt, system=AGENT_CORE_RULES)
+                response = await self.provider.send_prompt(retry_prompt, system=CODER_PROMPT)
                 content = response.get("content", "")
                 usage = response.get("usage", {})
                 log_transaction(

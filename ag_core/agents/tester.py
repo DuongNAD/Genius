@@ -57,10 +57,10 @@ class TesterAgent(BaseAgent):
             
         full_prompt = f"{history_context}{user_prompt}\n\nProject files context:\n{context}"
         
-        from ag_core.utils.prompt_templates import AGENT_CORE_RULES
+        from ag_core.utils.prompt_templates import TESTER_PROMPT
         
         # Invoke provider
-        response = await self.provider.send_prompt(full_prompt, system=AGENT_CORE_RULES)
+        response = await self.provider.send_prompt(full_prompt, system=TESTER_PROMPT)
         content = response.get("content", "")
         usage = response.get("usage", {})
         
@@ -139,7 +139,7 @@ class TesterAgent(BaseAgent):
                         f"Error logs:\n{test_failures_logs}\n\n"
                         f"Please fix the test code and return it. Original context:\n{full_prompt}"
                     )
-                    response = await self.provider.send_prompt(retry_prompt, system=AGENT_CORE_RULES)
+                    response = await self.provider.send_prompt(retry_prompt, system=TESTER_PROMPT)
                     content = response.get("content", "")
                     usage = response.get("usage", {})
                     log_transaction(

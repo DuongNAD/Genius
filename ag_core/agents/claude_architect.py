@@ -5,7 +5,7 @@ from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.scanner.project_scanner import ProjectScanner
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
-from ag_core.utils.prompt_templates import AGENT_CORE_RULES
+from ag_core.utils.prompt_templates import ARCHITECT_PROMPT
 
 class ClaudeArchitectAgent(BaseAgent):
     """
@@ -78,10 +78,8 @@ class ClaudeArchitectAgent(BaseAgent):
         schema_json = json.dumps(schema_dict, indent=2)
         
         sys_prompt = (
-            AGENT_CORE_RULES + 
-            "\nTách plan và implement (Separate plan and implement). Ép Agent này chỉ lên kiến trúc (plan), tuyệt đối không tự ý viết code implement."
-            f"\n\nYou must output a JSON block conforming to the following JSON schema representation of the design plan:\n{schema_json}\n"
-            "Format the JSON within a ```json block in your output."
+            ARCHITECT_PROMPT +
+            f"\n\nThe single ```json block must conform to this DesignPlan JSON schema:\n{schema_json}"
         )
         response = await self.provider.send_prompt(full_prompt, system=sys_prompt)
         content = response.get("content", "")
