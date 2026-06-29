@@ -260,7 +260,7 @@ def verify_response_checksum(response) -> None:
 
 
 def is_transient_error(exception) -> bool:
-    logger.info(f"DEBUG_ERR: type={type(exception)} msg={exception}")
+    logger.debug(f"Retry predicate evaluating exception: type={type(exception)} msg={exception}")
     if isinstance(exception, ChecksumMismatchError):
         return True
     if isinstance(exception, httpx.HTTPStatusError):
@@ -701,7 +701,7 @@ def detect_vulnerabilities(security_report: str) -> bool:
     return False
 
 
-async def process_single_file(file_info, project_dir, config, codex_url, tester_url, security_url, api_key, client, poll_timeout, max_retries, semaphore, message_bus, parent_art_id):
+async def process_single_file(file_info, project_dir, config, codex_url, tester_url, security_url, api_key, client, poll_timeout, max_retries, semaphore, message_bus, parent_art_id, design_plan_content=""):
     from ag_core.utils.message_bus import Artifact
     async with semaphore:
         file_path = file_info["path"]
@@ -720,10 +720,11 @@ async def process_single_file(file_info, project_dir, config, codex_url, tester_
         test_failures_logs = ""
         security_report = ""
         
-        # Retrieve design plan content from the message bus
-        design_art = message_bus.retrieve(parent_art_id)
-        design_plan_content = design_art["content"] if design_art else ""
-        
+        # design_plan_content is passed in from the caller (fetched once before the
+        # fan-out) so the design context can't be evicted from the in-memory bus
+        # mid-run on large projects (>100 artifacts), which would silently strip
+        # Codex's specification.
+
         for attempt in range(1, max_retries + 1):
             logger.info(f"Implementing {file_path} - Attempt {attempt}/{max_retries}")
             
@@ -880,7 +881,7 @@ async def run_pipeline(
     security_url: str = None,
     devops_url: str = None,
     api_key_override: str = None,
-    poll_timeout: float = 60.0,
+    poll_timeout: float = 300.0,
     interactive: bool = False,
     max_retries: int = 3,
     max_debate_rounds: int = None,
@@ -1136,7 +1137,12 @@ async def run_pipeline(
             failed_files = []
             aggregated_audits = []
             semaphore = asyncio.Semaphore(3)
-            
+
+            # Fetch the design content once, before the fan-out publishes the
+            # per-file artifacts that would evict it from the in-memory bus.
+            design_art = message_bus.retrieve(claude_art_id)
+            design_plan_content = design_art["content"] if design_art else ""
+
             async def handle_file(file_info):
                 file_path = file_info["path"]
                 status_dict[file_path] = "in progress"
@@ -1144,7 +1150,8 @@ async def run_pipeline(
                 try:
                     result = await process_single_file(
                         file_info, project_dir, config, codex_url, tester_url, security_url,
-                        api_key, client, poll_timeout, max_retries, semaphore, message_bus, claude_art_id
+                        api_key, client, poll_timeout, max_retries, semaphore, message_bus, claude_art_id,
+                        design_plan_content=design_plan_content
                     )
                     status_dict[file_path] = "completed"
                     update_progress_md(status_dict)
@@ -1309,7 +1316,8 @@ async def run_pipeline(
         app_art = message_bus.retrieve(app_art_id)
         codex_prompt = app_art["content"] if app_art else ""
         
-        scanned_files["design.md"] = message_bus.retrieve(claude_art_id)["content"]
+        design_art = message_bus.retrieve(claude_art_id)
+        scanned_files["design.md"] = design_art["content"] if design_art else ""
         scanned_files["app.py"] = codex_prompt
         
         codex_content = await call_api(codex_url, api_key, codex_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
@@ -1338,7 +1346,8 @@ async def run_pipeline(
         shared_prompt = review_art["content"] if review_art else ""
             
         scanned_files["review.md"] = shared_prompt
-        scanned_files["app.py"] = message_bus.retrieve(app_art_id)["content"]
+        app_art = message_bus.retrieve(app_art_id)
+        scanned_files["app.py"] = app_art["content"] if app_art else ""
         
         # Invoke concurrently
         tester_task = call_api(tester_url, api_key, shared_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
@@ -1411,7 +1420,7 @@ async def run_e2e_pipeline(
     codex_url: str = None,
     tester_url: str = None,
     api_key_override: str = None,
-    poll_timeout: float = 60.0,
+    poll_timeout: float = 300.0,
     max_retries: int = 3,
     max_debate_rounds: int = None,
     distributed: bool = False
@@ -1600,6 +1609,11 @@ async def run_e2e_pipeline(
                     # Check lint with flake8
                     flake8_cmd = [sys.executable, "-m", "flake8", target_file_path]
                     flake8_code, flake8_out = await run_subprocess(flake8_cmd, env=env)
+                    # flake8 is only a dev dependency; if it's not installed, don't
+                    # treat its absence as a lint failure that fails every attempt.
+                    if flake8_code != 0 and "No module named flake8" in flake8_out:
+                        logger.warning("flake8 is not installed; skipping the lint gate for this file.")
+                        flake8_code, flake8_out = 0, ""
                     
                     # Check tests with pytest
                     has_tests = False
@@ -1731,7 +1745,7 @@ def main():
     parser.add_argument("--pipeline", choices=["sequential", "e2e"], default="sequential", help="Pipeline type to execute")
 
     # Polling timeout
-    parser.add_argument("--poll-timeout", type=float, default=60.0, help="Polling timeout in seconds")
+    parser.add_argument("--poll-timeout", type=float, default=300.0, help="Polling timeout in seconds")
     parser.add_argument("--interactive", action="store_true", help="Interactive design review loop")
     parser.add_argument("--max-retries", type=int, default=3, help="Max retries for self-healing loop")
     default_debate_rounds = 0 if ("pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST")) else 2
