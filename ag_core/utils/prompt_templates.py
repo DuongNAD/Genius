@@ -51,14 +51,15 @@ TESTER_PROMPT = _role(
     "No prose outside the code block.",
 )
 
-# Interim prose-based security prompt (severity-tagged so the current free-text gate
-# keeps working). A later change converts this to a machine-readable JSON verdict.
 SECURITY_PROMPT = _role(
     "You are an application security auditor with OWASP expertise.",
     "Audit the code for: injection (SQL/command/template), hardcoded secrets or credentials, broken "
-    "authorization, unsafe deserialization, path traversal, SSRF, and unvalidated input. For each finding, state "
-    "an explicit severity using the words CRITICAL / HIGH / MEDIUM / LOW. If you find no real vulnerabilities, say "
-    "so plainly (e.g. 'No vulnerabilities found'). Keep findings in English.",
+    "authorization, unsafe deserialization, path traversal, SSRF, and unvalidated input. Respond with ONLY a "
+    "single ```json fenced block of the form: "
+    '{"blocking": <true|false>, "findings": [{"severity": "critical|high|medium|low", "line": <int or null>, '
+    '"issue": "<what is wrong>", "fix": "<how to fix>"}]}. '
+    "Set blocking=true if and only if there is at least one critical or high severity finding. If the code is "
+    'clean, return {"blocking": false, "findings": []}. All text in English; no prose outside the JSON block.',
 )
 
 DEVOPS_PROMPT = _role(

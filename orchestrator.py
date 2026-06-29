@@ -715,6 +715,44 @@ def detect_vulnerabilities(security_report: str) -> bool:
     return False
 
 
+def parse_security_verdict(security_report: str):
+    """
+    Extract a structured security verdict {"blocking": bool, "findings": [...]}
+    from the audit report. Returns the dict, or None if no verdict object is present.
+    """
+    if not security_report:
+        return None
+    decoder = json.JSONDecoder()
+    fenced = re.findall(r'```json\s*(.*?)```', security_report, re.DOTALL | re.IGNORECASE)
+    for text in fenced + [security_report]:
+        idx = 0
+        while True:
+            start = text.find('{', idx)
+            if start == -1:
+                break
+            try:
+                obj, end = decoder.raw_decode(text[start:])
+            except json.JSONDecodeError:
+                idx = start + 1
+                continue
+            if isinstance(obj, dict) and "blocking" in obj:
+                return obj
+            idx = start + end
+    return None
+
+
+def security_is_blocking(security_report: str) -> bool:
+    """
+    Decide whether the security audit should block acceptance of the code.
+    Prefers a structured verdict (the security agent's machine-readable output);
+    falls back to free-text detection for legacy/prose reports.
+    """
+    verdict = parse_security_verdict(security_report)
+    if verdict is not None:
+        return bool(verdict.get("blocking"))
+    return detect_vulnerabilities(security_report)
+
+
 async def process_single_file(file_info, project_dir, config, codex_url, tester_url, security_url, api_key, client, poll_timeout, max_retries, semaphore, message_bus, parent_art_id, design_plan_content=""):
     from ag_core.utils.message_bus import Artifact
     async with semaphore:
@@ -770,7 +808,12 @@ async def process_single_file(file_info, project_dir, config, codex_url, tester_
                 raise PipelineError(f"Failed to write code to {target_file_path}: {e}")
             
             # 3. Parallel Tester & Security APIs
-            tester_req_prompt = f"/unit-test Generate comprehensive unit tests using pytest for the file '{file_path}' with this code:\n\n{code_to_write}"
+            module_path = os.path.splitext(file_path)[0].replace('/', '.').replace('\\', '.')
+            tester_req_prompt = (
+                f"/unit-test Generate comprehensive pytest unit tests for the file '{file_path}'. "
+                f"Import the code under test as the module `{module_path}` (e.g. `from {module_path} import ...`).\n\n"
+                f"Code:\n\n{code_to_write}"
+            )
             security_req_prompt = f"/audit Audit the following code for security vulnerabilities in file '{file_path}':\n\n{code_to_write}"
             
             try:
@@ -850,7 +893,7 @@ async def process_single_file(file_info, project_dir, config, codex_url, tester_
             # treating an absent audit as "clean".
             tests_passed = (pytest_exit_code == 0)
             security_missing = not (security_report and security_report.strip())
-            has_vulnerabilities = detect_vulnerabilities(security_report)
+            has_vulnerabilities = security_is_blocking(security_report)
             if tests_passed and not security_missing and not has_vulnerabilities:
                 logger.info(f"Successfully implemented and verified {file_path}")
                 success = True
@@ -1673,7 +1716,12 @@ async def run_e2e_pipeline(
                     with open(target_file_path, "r", encoding="utf-8") as f:
                         implemented_code = f.read()
                         
-                    tester_prompt = f"/unit-test Generate comprehensive unit tests using pytest for the file '{file_path}' with this code:\n\n{implemented_code}"
+                    e2e_module_path = os.path.splitext(file_path)[0].replace('/', '.').replace('\\', '.')
+                    tester_prompt = (
+                        f"/unit-test Generate comprehensive pytest unit tests for the file '{file_path}'. "
+                        f"Import the code under test as the module `{e2e_module_path}` (e.g. `from {e2e_module_path} import ...`).\n\n"
+                        f"Code:\n\n{implemented_code}"
+                    )
                     if attempt > 1:
                         tester_prompt += f"\n\nPrevious test generation attempt failed verification.\nErrors/Logs:\n{tester_error_log}"
                         
