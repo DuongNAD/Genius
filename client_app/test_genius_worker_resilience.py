@@ -80,10 +80,11 @@ async def test_network_drop_exponential_backoff():
             await run_worker("127.0.0.1", 8000, ["grok"], "test-worker-backoff")
 
     # Reconnection sleep times should double: 1.0 -> 2.0 -> 4.0 -> 8.0...
+    # (plus a random jitter between 0.0 and 1.0s)
     assert len(sleep_times) >= 3
-    assert sleep_times[0] == 1.0
-    assert sleep_times[1] == 2.0
-    assert sleep_times[2] == 4.0
+    assert 1.0 <= sleep_times[0] <= 2.0
+    assert 2.0 <= sleep_times[1] <= 3.0
+    assert 4.0 <= sleep_times[2] <= 5.0
 
 
 @pytest.mark.asyncio
@@ -128,7 +129,11 @@ async def test_network_drop_backoff_reset():
     # 1st attempt: fails -> sleeps backoff=1.0 -> backoff doubles to 2.0
     # 2nd attempt: succeeds -> resets backoff to 1.0 -> exits -> sleeps backoff=1.0 -> backoff doubles to 2.0
     # 3rd attempt: fails -> sleeps backoff=2.0 -> raises StopTestException
-    assert sleep_times == [1.0, 1.0, 2.0]
+    # (each sleep has a random jitter between 0.0 and 1.0s added)
+    assert len(sleep_times) == 3
+    assert 1.0 <= sleep_times[0] <= 2.0
+    assert 1.0 <= sleep_times[1] <= 2.0
+    assert 2.0 <= sleep_times[2] <= 3.0
 
 
 @pytest.mark.asyncio

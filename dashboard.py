@@ -2,7 +2,8 @@ import os
 import sys
 import socket
 import sqlite3
-from fastapi import FastAPI
+import asyncio
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
 # Add project root to sys.path
@@ -162,6 +163,49 @@ def get_logs():
     except Exception:
         return []
 
+@app.websocket("/ws")
+async def ws_dashboard(websocket: WebSocket):
+    await websocket.accept()
+    
+    async def send_updates():
+        status_data = get_status()
+        conversations_data = get_conversations()
+        logs_data = get_logs()
+        await websocket.send_json({
+            "status": status_data,
+            "conversations": conversations_data,
+            "logs": logs_data
+        })
+
+    try:
+        await send_updates()
+    except Exception:
+        return
+
+    async def periodic_updates():
+        try:
+            while True:
+                await asyncio.sleep(5)
+                await send_updates()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    periodic_task = asyncio.create_task(periodic_updates())
+    
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if data.get("action") == "refresh":
+                await send_updates()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        periodic_task.cancel()
+
 @app.get("/", response_class=HTMLResponse)
 def get_index():
     html_content = """<!DOCTYPE html>
@@ -293,62 +337,66 @@ def get_index():
                 .replace(/'/g, '&#039;');
         }
 
+        function renderStatusData(data) {
+            const container = document.getElementById('worker-cards-container');
+            if (!container) return;
+            
+            const keys = Object.keys(data);
+            if (keys.length === 0) {
+                container.innerHTML = '<div class="col-span-full text-center text-gray-500 text-sm py-8 bg-gray-800 rounded border border-gray-700">No registered workers found</div>';
+                return;
+            }
+            
+            let html = '';
+            keys.forEach(key => {
+                const info = data[key];
+                const roles = info.roles || [key];
+                const rolesStr = roles.join(', ');
+                const portInfo = info.port ? `Port ${info.port}` : '';
+                
+                let connBadge = '';
+                if (info.online) {
+                    connBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-green-500/20 text-green-400 border border-green-500/30">Online</span>';
+                } else {
+                    connBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-500/20 text-red-400 border border-red-500/30">Offline</span>';
+                }
+                
+                let actBadge = '';
+                if (info.status === 'busy') {
+                    actBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">Busy</span>';
+                } else {
+                    actBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700/50 text-gray-400 border border-gray-600">Idle</span>';
+                }
+                
+                html += `
+                <div class="bg-gray-800 p-5 rounded-lg border border-gray-700 shadow flex flex-col justify-between h-40">
+                    <div>
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-lg font-bold text-teal-400 capitalize">${escapeHtml(key)}</h3>
+                            <span class="text-xs text-gray-500 font-mono">${escapeHtml(portInfo)}</span>
+                        </div>
+                        <p class="text-xs text-gray-400 mt-1">Roles: ${escapeHtml(rolesStr)}</p>
+                    </div>
+                    <div class="space-y-2 mt-4">
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-gray-400">Connection:</span>
+                            <span>${connBadge}</span>
+                        </div>
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-gray-400">Activity:</span>
+                            <span>${actBadge}</span>
+                        </div>
+                    </div>
+                </div>`;
+            });
+            container.innerHTML = html;
+        }
+
         async function updateStatus() {
             try {
                 const response = await fetch('/api/status');
                 const data = await response.json();
-                const container = document.getElementById('worker-cards-container');
-                if (!container) return;
-                
-                const keys = Object.keys(data);
-                if (keys.length === 0) {
-                    container.innerHTML = '<div class="col-span-full text-center text-gray-500 text-sm py-8 bg-gray-800 rounded border border-gray-700">No registered workers found</div>';
-                    return;
-                }
-                
-                let html = '';
-                keys.forEach(key => {
-                    const info = data[key];
-                    const roles = info.roles || [key];
-                    const rolesStr = roles.join(', ');
-                    const portInfo = info.port ? `Port ${info.port}` : '';
-                    
-                    let connBadge = '';
-                    if (info.online) {
-                        connBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-green-500/20 text-green-400 border border-green-500/30">Online</span>';
-                    } else {
-                        connBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-500/20 text-red-400 border border-red-500/30">Offline</span>';
-                    }
-                    
-                    let actBadge = '';
-                    if (info.status === 'busy') {
-                        actBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">Busy</span>';
-                    } else {
-                        actBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700/50 text-gray-400 border border-gray-600">Idle</span>';
-                    }
-                    
-                    html += `
-                    <div class="bg-gray-800 p-5 rounded-lg border border-gray-700 shadow flex flex-col justify-between h-40">
-                        <div>
-                            <div class="flex items-center justify-between">
-                                <h3 class="text-lg font-bold text-teal-400 capitalize">${escapeHtml(key)}</h3>
-                                <span class="text-xs text-gray-500 font-mono">${escapeHtml(portInfo)}</span>
-                            </div>
-                            <p class="text-xs text-gray-400 mt-1">Roles: ${escapeHtml(rolesStr)}</p>
-                        </div>
-                        <div class="space-y-2 mt-4">
-                            <div class="flex justify-between items-center text-sm">
-                                <span class="text-gray-400">Connection:</span>
-                                <span>${connBadge}</span>
-                            </div>
-                            <div class="flex justify-between items-center text-sm">
-                                <span class="text-gray-400">Activity:</span>
-                                <span>${actBadge}</span>
-                            </div>
-                        </div>
-                    </div>`;
-                });
-                container.innerHTML = html;
+                renderStatusData(data);
             } catch (e) {
                 console.error("Error updating status:", e);
             }
@@ -453,15 +501,53 @@ def get_index():
             });
         }
 
-        async function refreshAll() {
-            document.getElementById('last-updated').textContent = "Updating...";
-            await Promise.all([updateStatus(), updateConversations(), updateLogs()]);
-            const now = new Date();
-            document.getElementById('last-updated').textContent = "Last updated: " + now.toLocaleTimeString();
+        let ws;
+        function connectWebSocket() {
+            const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUri = proto + '//' + window.location.host + '/ws';
+            ws = new WebSocket(wsUri);
+            
+            ws.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.status) renderStatusData(data.status);
+                    if (data.conversations) {
+                        allConversations = data.conversations;
+                        renderConversations();
+                    }
+                    if (data.logs) {
+                        allLogs = data.logs;
+                        renderLogs();
+                    }
+                    const now = new Date();
+                    document.getElementById('last-updated').textContent = "Last updated: " + now.toLocaleTimeString();
+                } catch (e) {
+                    console.error("Error processing websocket message:", e);
+                }
+            };
+            
+            ws.onclose = function() {
+                console.log("WebSocket disconnected, reconnecting in 5 seconds...");
+                setTimeout(connectWebSocket, 5000);
+            };
+            
+            ws.onerror = function(err) {
+                console.error("WebSocket error:", err);
+            };
         }
 
-        refreshAll();
-        setInterval(refreshAll, 5000);
+        async function refreshAll() {
+            document.getElementById('last-updated').textContent = "Updating...";
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({action: "refresh"}));
+            } else {
+                await Promise.all([updateStatus(), updateConversations(), updateLogs()]);
+                const now = new Date();
+                document.getElementById('last-updated').textContent = "Last updated: " + now.toLocaleTimeString();
+            }
+        }
+
+        connectWebSocket();
     </script>
 </body>
 </html>"""

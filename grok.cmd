@@ -3,13 +3,14 @@ setlocal
 :: Determine script directory
 set "DIR=%~dp0"
 
-:: Check if python is available
-where python >nul 2>nul
+:: Check if python3 or python is available
+where python3 >nul 2>nul
 if %errorlevel% equ 0 (
-    set "PYTHON_EXE=python"
+    set "PYTHON_EXE=python3"
 ) else (
-    if exist "C:\Users\Admin\AppData\Local\Programs\Python\Python311\python.exe" (
-        set "PYTHON_EXE=C:\Users\Admin\AppData\Local\Programs\Python\Python311\python.exe"
+    where python >nul 2>nul
+    if %errorlevel% equ 0 (
+        set "PYTHON_EXE=python"
     ) else (
         echo Error: Python interpreter not found on PATH. >&2
         exit /b 1

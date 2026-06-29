@@ -50,6 +50,10 @@ class BaseAgent(abc.ABC):
         
         from ag_core.utils.git import GitManager
         self.git = GitManager()
+        self.history: List[Dict[str, str]] = []
+
+    def clear_history(self) -> None:
+        self.history.clear()
 
     def store_memory(self, text: str, metadata: dict | None = None) -> None:
         if self.memory:

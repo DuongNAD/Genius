@@ -14,9 +14,16 @@ class TokenBucketRateLimiter:
 
     @property
     def async_lock(self) -> asyncio.Lock:
-        if not hasattr(self, "_async_lock"):
-            self._async_lock = asyncio.Lock()
-        return self._async_lock
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        with self.lock:
+            if not hasattr(self, "_async_locks"):
+                self._async_locks = {}
+            if loop not in self._async_locks:
+                self._async_locks[loop] = asyncio.Lock()
+            return self._async_locks[loop]
 
     def reset(self):
         with self.lock:

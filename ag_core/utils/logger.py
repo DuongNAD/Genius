@@ -41,7 +41,18 @@ def calculate_usage_cost(model_name: str, prompt_tokens: int, completion_tokens:
     output_cost = (completion_tokens / 1_000_000) * rates["output"]
     return input_cost + output_cost
 
-def log_transaction(model_name: str, prompt_tokens: int, completion_tokens: int):
+import json
+from typing import Dict, Any
+
+def log_structured(event_type: str, data: Dict[str, Any], level: int = logging.INFO) -> None:
+    """Logs an event as a structured JSON string."""
+    payload = {
+        "event_type": event_type,
+        "data": data
+    }
+    logger.log(level, json.dumps(payload))
+
+def log_transaction(model_name: str, prompt_tokens: int, completion_tokens: int) -> None:
     """Logs token consumption metrics and USD transaction costs."""
     cost = calculate_usage_cost(model_name, prompt_tokens, completion_tokens)
     total_tokens = prompt_tokens + completion_tokens
@@ -51,3 +62,15 @@ def log_transaction(model_name: str, prompt_tokens: int, completion_tokens: int)
     logger.info(f"Tokens consumed: Prompt={prompt_tokens} | Completion={completion_tokens} | Total={total_tokens}")
     logger.info(f"Estimated Cost: ${cost:.6f} USD")
     logger.info("=" * 60)
+    
+    # Write structured JSON transaction log
+    log_structured(
+        event_type="llm_transaction",
+        data={
+            "model_name": model_name,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "estimated_cost_usd": cost
+        }
+    )

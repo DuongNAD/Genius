@@ -162,10 +162,12 @@ def test_unreadable_input_file_raises_pipeline_error(temp_workspace):
     """Test that when an input file exists but is unreadable, the orchestrator raises a PipelineError."""
     research_file = temp_workspace / "research.md"
     research_file.write_text("Some research content", encoding="utf-8")
+    design_file = temp_workspace / "design.md"
+    design_file.write_text("Some design content", encoding="utf-8")
     
     original_open = open
     def mock_open(file, mode="r", *args, **kwargs):
-        if "research.md" in str(file) and "r" in mode:
+        if ("research.md" in str(file) or "design.md" in str(file)) and "r" in mode:
             raise PermissionError("Simulated read permission denied")
         return original_open(file, mode, *args, **kwargs)
         

@@ -1,6 +1,9 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import asyncio
 import time
-import os
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect

@@ -258,3 +258,162 @@ Sử dụng `asyncio.create_subprocess_exec` để gọi `codex.exe exec <prompt
 - [ ] Logic parse JSONL xử lý mượt mà, không bị crash nếu CLI trả về JSON lỗi hoặc không đúng cấu trúc mong đợi.
 - [ ] Vượt qua được bài đánh giá kiểm thử độc lập (hoặc chạy test pass).
 
+## Follow-up — 2026-06-28T14:54:47Z
+
+Fix and upgrade the Genius Antigravity 2.0 system based on the GENIUS_SYSTEM_REVIEW_REPORT.md. The goal is to address critical bugs, security vulnerabilities, and architectural gaps to ensure the system is production-ready.
+
+Working directory: e:\Project\Genius
+Integrity mode: benchmark
+
+## Requirements
+
+### R1. Resolve Critical Issues
+Implement the missing Skill Layer (`api.py` and `run.py` for all 6 agents), fix orphaned worker tasks in `execute_task` on WebSocket disconnect, standardize JSON checksum serialization across components, and resolve the `serve.py` CLI infinite hang issue.
+
+### R2. Resolve High & Medium Issues
+Upgrade payload checksums to HMAC-SHA256, add `jti` to JWT for replay protection, implement bounded caches for `pending_tasks` and `central_hub.tasks`, implement a SQLite write queue, and set up dynamic port discovery for local microservices.
+
+### R3. Resolve Low Issues
+Add jitter to exponential backoff reconnects, add proper type annotations, and implement structured logging.
+
+## Acceptance Criteria
+
+### Automated Testing
+- [ ] All existing test cases in `pytest` must pass without any regressions.
+- [ ] The missing skill layer tests (e.g., E2E Phase 5) no longer crash due to `FileNotFoundError`.
+
+### System Stability
+- [ ] Running `serve.py` locally and interacting with the orchestrator no longer hangs the process indefinitely upon exit.
+- [ ] WebSocket disconnects from workers successfully clean up all associated `running_tasks`.
+- [ ] Checksum verification succeeds consistently using the new HMAC-SHA256 standard and identical JSON serialization logic on both Hub and Worker.
+
+## 2026-06-28T15:30:56Z
+
+Refactor the inter-agent communication architecture in Genius Antigravity 2.0 based on the connection evaluation report. Replace markdown/regex contracts with structured Pydantic schemas, unify the communication paths, and implement safe parallel execution in the pipeline.
+
+Working directory: e:\Project\Genius
+Integrity mode: benchmark
+
+## Requirements
+
+### R1. Implement Pydantic Contract
+Replace the fragile markdown regex parsing (`parse_design_for_files()`) with a shared Pydantic schema contract (e.g., `DesignPlan { files: [...] }`) across all agents.
+
+### R2. Implement Message Bus
+Replace the file-based handoff mechanism (`design.md`, `audit.md`, etc. as the primary data transfer) with a lightweight message bus (passing `context` dict and `artifact_id` via memory or SQLite). Files should be retained solely as debug artifacts.
+
+### R3. Unify Network Communication
+Establish a single primary connection path: HTTP for local services and WebSocket (WS) strictly for distributed nodes. Remove any duplicated logic for checksums and authentication across these modes to create a unified implementation in `ag_core`.
+
+### R4. Parallelize Pipeline
+Optimize the pipeline bottleneck by running independent agent tasks (e.g., Tester and Security) concurrently using `asyncio.gather()` after code generation, while keeping DevOps as the final sequential step.
+
+## Acceptance Criteria
+
+### Automated Testing & Stability
+- [ ] All existing integration and E2E test cases in `pytest` must pass without regressions.
+- [ ] The orchestrator successfully parses agent outputs using Pydantic without relying on regex markdown extraction.
+- [ ] Local microservices run exclusively over HTTP, while WebSocket logic is correctly bypassed unless `--distributed` is specified.
+
+### Pipeline Efficiency
+- [ ] The execution logs demonstrate that Tester and Security audits are running concurrently, yielding a measurable reduction in pipeline latency compared to a purely sequential run.
+
+## 2026-06-28T15:35:27Z
+
+# Teamwork Project Prompt — Draft
+
+> Status: Launched.
+> Goal: Get user approval → delegate to teamwork_preview
+
+Nâng cấp và tối ưu hóa dự án `ai-devkit` (https://github.com/codeaholicguy/ai-devkit.git) thành một hệ thống đa tác vụ (multi-agent) tập trung vào các coding agent có khả năng giao tiếp, với giao diện dòng lệnh (TUI) và quy trình làm việc chuẩn mực.
+
+Working directory: ~/teamwork_projects/ai_devkit_v2
+Integrity mode: benchmark
+
+## Requirements
+
+### R1. Quản lý cấu hình và Workflow
+- Sử dụng một file cấu hình duy nhất dùng chung cho mọi AI agent (định dạng do nhóm agent tự quyết định).
+- Hỗ trợ workflow chuẩn của senior engineer: Requirements → Design → Planning → Implementation → Testing → Review.
+
+### R2. Hệ thống Agent và Giao tiếp
+- Cho phép các agent trao đổi thông tin với nhau.
+- Quản lý nhiều agent đồng thời trong cùng một dashboard TUI. Bắt buộc sử dụng thư viện **Ink** (React-based CLI) để xây dựng UI.
+
+### R3. Bộ nhớ và Kiến trúc mở rộng
+- Lưu memory cục bộ bằng SQLite để tránh mất ngữ cảnh.
+- Hệ thống Skills có thể mở rộng và tái sử dụng.
+- Kiến trúc Local-first, ưu tiên quyền riêng tư và dữ liệu nội bộ.
+
+### R4. Triển khai
+- Hỗ trợ cài đặt cực nhanh chỉ với một lệnh `npx ai-devkit init`.
+
+## Acceptance Criteria
+
+### Khởi tạo và Cấu hình
+- [ ] Chạy lệnh khởi tạo (ví dụ script `init`) thành công, sinh ra file cấu hình mặc định và tạo database SQLite.
+- [ ] Tồn tại file mô tả schema hoặc cách lưu trữ memory của agent trong SQLite.
+
+### Giao diện TUI Dashboard
+- [ ] Chạy lệnh start/dev hiển thị thành công giao diện TUI xây dựng bằng thư viện Ink.
+- [ ] Dashboard hiển thị được danh sách các agent đang hoạt động và trạng thái của chúng.
+
+### Khả năng Giao tiếp
+- [ ] Có mã nguồn minh chứng (test case hoặc logic demo) cho việc hai agent có thể gửi/nhận thông điệp qua lại.
+- [ ] Hệ thống hoạt động hoàn toàn ở môi trường local (ngoại trừ các API call tới LLM nếu cần).
+
+## 2026-06-28T16:24:53Z
+
+# Teamwork Project Prompt — Draft
+
+> Status: Launched
+> Goal: Craft prompt → get user approval → delegate to teamwork_preview
+
+Nâng cấp kiến trúc và sửa các lỗi nghiêm trọng của dự án AI Devkit (Antigravity 2.0). Đặc biệt, cấu hình lại các CLI provider (Grok, Codex) cho chuẩn xác và cải thiện luồng thực thi (parallel execution, streaming, vector memory).
+
+Working directory: e:\Project\Genius
+Integrity mode: development
+
+## Requirements
+
+### R1. Sửa lỗi GrokProvider (Bắt buộc dùng CLI)
+- Cập nhật `ag_core/providers/grok_provider.py` để sử dụng đúng `grok` CLI (hiện tại code đang tìm nhầm `claude`).
+- Cú pháp thực thi: `grok -p "prompt" --output-format json --no-auto-update`.
+- Cập nhật Model name thành: `grok-build-0.1`.
+- Thêm cờ `--session-id` để lưu session persistence.
+- Đảm bảo hỗ trợ xác thực thông qua biến môi trường hoặc bằng lệnh `grok login` như người dùng yêu cầu.
+
+### R2. Sửa lỗi parse JSONL của Codex (OpenAIProvider)
+- Parse JSONL event stream nhiều dòng thay vì 1 object JSON duy nhất.
+- Lọc event bắt buộc: `item.type == "agent_message"`.
+- Thêm cờ `--dangerously-bypass-approvals-and-sandbox` và xử lý Windows-specific stdin redirection (`NUL`).
+
+### R3. Cập nhật Cấu hình & Fix Warnings
+- Cập nhật `config.yaml` với tên model chuẩn (vd: `claude-sonnet-4-6`, `grok-build-0.1`).
+- Sửa lỗi TokenBucket rate limiter (chuyển sang dùng `asyncio.get_running_loop()`).
+- Bỏ hardcode đường dẫn Python (`C:/Users/Admin/...`) trong các script wrapper.
+- Thêm `.gitignore` chuẩn chặn các file nhạy cảm (`.env`, `config.yaml`, keys) và thiết lập pre-commit hooks.
+
+### R4. Nâng cấp Bộ nhớ và Kiến trúc
+- Nâng cấp `VectorMemory`: Thay `SimpleTFIDFEmbedding` bằng `sentence-transformers` (vd: `all-MiniLM-L6-v2`) or mô hình nhúng tương tự.
+- Tối ưu `orchestrator`: Cho phép chạy song song (parallel) các bước độc lập (như Security Audit & DevOps Check) bằng `asyncio.gather`.
+- Thêm context history cho các agent để hỗ trợ multi-turn conversation.
+
+### R5. Tính năng mở rộng (Nếu còn thời gian)
+- Hỗ trợ streaming response.
+- Chuyển đổi Dashboard sang WebSocket.
+- Implement MCP Server.
+- Dockerize toàn bộ hệ thống.
+
+## Acceptance Criteria
+
+### API Providers
+- [ ] `GrokProvider` thực thi thành công lệnh `grok` thực sự và trả về đúng dữ liệu, không bị trỏ nhầm sang `claude`.
+- [ ] `OpenAIProvider` parse chính xác JSONL output của codex cli, không gặp lỗi `JSONDecodeError`.
+
+### Code Quality & Architecture
+- [ ] Orchestrator chạy nhanh hơn nhờ cơ chế parallel.
+- [ ] File `config.yaml` có các model name chính xác.
+- [ ] Không còn bất kỳ đường dẫn hardcode Python cục bộ nào trên hệ thống.
+- [ ] Có `.gitignore` đầy đủ để tránh lộ key.
+

@@ -7,10 +7,6 @@ if command -v python3 >/dev/null 2>&1; then
     PYTHON_EXE="python3"
 elif command -v python >/dev/null 2>&1; then
     PYTHON_EXE="python"
-elif [ -f "C:/Users/Admin/AppData/Local/Programs/Python/Python311/python.exe" ]; then
-    PYTHON_EXE="C:/Users/Admin/AppData/Local/Programs/Python/Python311/python.exe"
-elif [ -f "/c/Users/Admin/AppData/Local/Programs/Python/Python311/python.exe" ]; then
-    PYTHON_EXE="/c/Users/Admin/AppData/Local/Programs/Python/Python311/python.exe"
 else
     echo "Error: Python interpreter not found." >&2
     exit 1

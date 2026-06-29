@@ -48,7 +48,14 @@ class TesterAgent(BaseAgent):
         for filepath, content in scanned_files.items():
             context += f"\n--- File: {filepath} ---\n{content}\n"
             
-        full_prompt = f"{user_prompt}\n\nProject files context:\n{context}"
+        history_context = ""
+        if self.history:
+            history_context += "Previous conversation history:\n"
+            for turn in self.history:
+                history_context += f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
+            history_context += "\n"
+            
+        full_prompt = f"{history_context}{user_prompt}\n\nProject files context:\n{context}"
         
         from ag_core.utils.prompt_templates import AGENT_CORE_RULES
         
@@ -152,4 +159,5 @@ class TesterAgent(BaseAgent):
             # Append the test execution evidence (pytest stdout/stderr) to the returned markdown response
             content = content + f"\n\n### Pytest Execution Evidence\n```\n{test_failures_logs}\n```"
         
+        self.history.append({"prompt": user_prompt, "response": content})
         return content

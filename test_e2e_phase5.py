@@ -425,8 +425,13 @@ def test_t2_security_checksum_mismatch_400():
     assert resp.status_code == 400
     
     # Invalid X-Payload-SHA256
-    headers["X-Payload-SHA256"] = "bad_checksum"
-    resp2 = client.post("/run", json={"prompt": "audit"}, headers=headers)
+    jwt_token2 = get_valid_api_key()
+    headers2 = {
+        "X-API-Key": jwt_token2,
+        "Authorization": f"Bearer {jwt_token2}",
+        "X-Payload-SHA256": "bad_checksum"
+    }
+    resp2 = client.post("/run", json={"prompt": "audit"}, headers=headers2)
     assert resp2.status_code == 400
 
 def test_t2_devops_checksum_mismatch_400():
@@ -447,8 +452,13 @@ def test_t2_devops_checksum_mismatch_400():
     assert resp.status_code == 400
     
     # Invalid X-Payload-SHA256
-    headers["X-Payload-SHA256"] = "bad_checksum"
-    resp2 = client.post("/run", json={"prompt": "deploy"}, headers=headers)
+    jwt_token2 = get_valid_api_key()
+    headers2 = {
+        "X-API-Key": jwt_token2,
+        "Authorization": f"Bearer {jwt_token2}",
+        "X-Payload-SHA256": "bad_checksum"
+    }
+    resp2 = client.post("/run", json={"prompt": "deploy"}, headers=headers2)
     assert resp2.status_code == 400
 
 @pytest.mark.asyncio
@@ -531,10 +541,15 @@ def test_t2_security_empty_prompt_400():
     assert resp.status_code in [400, 422]
     
     # Missing prompt
+    jwt_token2 = get_valid_api_key()
+    headers2 = {
+        "X-API-Key": jwt_token2,
+        "Authorization": f"Bearer {jwt_token2}"
+    }
     body_missing = {"context": {}}
     payload_bytes_missing = json.dumps(body_missing).encode("utf-8")
-    headers["X-Payload-SHA256"] = hashlib.sha256(payload_bytes_missing).hexdigest()
-    resp2 = client.post("/run", content=payload_bytes_missing, headers=headers)
+    headers2["X-Payload-SHA256"] = hashlib.sha256(payload_bytes_missing).hexdigest()
+    resp2 = client.post("/run", content=payload_bytes_missing, headers=headers2)
     assert resp2.status_code in [400, 422]
 
 def test_t2_devops_empty_prompt_400():
@@ -557,10 +572,15 @@ def test_t2_devops_empty_prompt_400():
     assert resp.status_code in [400, 422]
     
     # Missing prompt
+    jwt_token2 = get_valid_api_key()
+    headers2 = {
+        "X-API-Key": jwt_token2,
+        "Authorization": f"Bearer {jwt_token2}"
+    }
     body_missing = {"context": {}}
     payload_bytes_missing = json.dumps(body_missing).encode("utf-8")
-    headers["X-Payload-SHA256"] = hashlib.sha256(payload_bytes_missing).hexdigest()
-    resp2 = client.post("/run", content=payload_bytes_missing, headers=headers)
+    headers2["X-Payload-SHA256"] = hashlib.sha256(payload_bytes_missing).hexdigest()
+    resp2 = client.post("/run", content=payload_bytes_missing, headers=headers2)
     assert resp2.status_code in [400, 422]
 
 def test_t2_vector_memory_empty_query_sqlite(tmp_path):

@@ -51,12 +51,13 @@ class ClientWorker:
         network.register_worker(self.worker_id, self)
 
     def create_headers(self, payload: Any) -> Dict[str, str]:
-        serialized = json.dumps(payload, sort_keys=True).encode('utf-8')
-        checksum = hashlib.sha256(serialized).hexdigest()
+        from ag_core.utils.security import calculate_checksum
+        checksum = calculate_checksum(payload, self.api_key)
         return {
             "X-API-Key": self.api_key,
             "X-Payload-SHA256": checksum
         }
+
 
     async def register(self) -> tuple[int, Any]:
         payload = {"worker_id": self.worker_id, "roles": self.roles}
@@ -105,10 +106,10 @@ class ClientWorker:
             return 401, {"error": "Unauthorized"}, {}
         
         # Verify Checksum
-        serialized = json.dumps(payload, sort_keys=True).encode('utf-8')
-        computed = hashlib.sha256(serialized).hexdigest()
-        if headers.get("X-Payload-SHA256") != computed:
+        from ag_core.utils.security import verify_checksum
+        if not verify_checksum(payload, headers.get("X-Payload-SHA256"), self.api_key):
             return 400, {"error": "Bad Checksum"}, {}
+
 
         if endpoint == "/run_task":
             if self.status == "busy":
@@ -223,9 +224,9 @@ class ClientWorker:
             
             # Report result
             async def report():
+                from ag_core.utils.security import calculate_checksum
                 if self.ws is not None:
-                    serialized_res = json.dumps(result, sort_keys=True).encode('utf-8')
-                    checksum = hashlib.sha256(serialized_res).hexdigest()
+                    checksum = calculate_checksum(result, self.api_key)
                     payload = {
                         "type": "result",
                         "task_id": task_id,
@@ -239,8 +240,7 @@ class ClientWorker:
                     except Exception as e:
                         print(f"[Worker] WS Result reporting error: {e}")
                 else:
-                    serialized_res = json.dumps(result, sort_keys=True).encode('utf-8')
-                    checksum = hashlib.sha256(serialized_res).hexdigest()
+                    checksum = calculate_checksum(result, self.api_key)
                     payload = {
                         "task_id": task_id,
                         "worker_id": self.worker_id,
@@ -248,6 +248,7 @@ class ClientWorker:
                         "result": result,
                         "checksum": checksum
                     }
+
                     headers = self.create_headers(payload)
                     backoff = 0.005
                     for attempt in range(5):
@@ -328,10 +329,11 @@ class ClientWorker:
                                 task_data = data.get("task_data")
                                 checksum = data.get("checksum")
                                 
+                                from ag_core.utils.security import calculate_checksum, verify_checksum
                                 if self.status == "busy":
                                     print(f"[Worker] Worker is busy, rejecting dispatch!")
                                     err_res = {"error": "Worker is busy"}
-                                    err_chk = hashlib.sha256(json.dumps(err_res, sort_keys=True).encode('utf-8')).hexdigest()
+                                    err_chk = calculate_checksum(err_res, self.api_key)
                                     payload = {
                                         "type": "result",
                                         "task_id": task_id,
@@ -346,7 +348,7 @@ class ClientWorker:
                                 if not checksum:
                                     print(f"[Worker] Missing checksum in dispatch!")
                                     err_res = {"error": "Missing checksum validation on worker node."}
-                                    err_chk = hashlib.sha256(json.dumps(err_res, sort_keys=True).encode('utf-8')).hexdigest()
+                                    err_chk = calculate_checksum(err_res, self.api_key)
                                     payload = {
                                         "type": "result",
                                         "task_id": task_id,
@@ -358,12 +360,10 @@ class ClientWorker:
                                     await websocket.send(json.dumps(payload))
                                     continue
                                 
-                                serialized = json.dumps(task_data, sort_keys=True).encode('utf-8')
-                                computed = hashlib.sha256(serialized).hexdigest()
-                                if computed != checksum:
-                                    print(f"[Worker] Checksum mismatch! Expected {checksum}, got {computed}")
+                                if not verify_checksum(task_data, checksum, self.api_key):
+                                    print(f"[Worker] Checksum mismatch! Expected {checksum}")
                                     err_res = {"error": "Bad Checksum validation on worker node."}
-                                    err_chk = hashlib.sha256(json.dumps(err_res, sort_keys=True).encode('utf-8')).hexdigest()
+                                    err_chk = calculate_checksum(err_res, self.api_key)
                                     payload = {
                                         "type": "result",
                                         "task_id": task_id,
@@ -372,6 +372,7 @@ class ClientWorker:
                                         "result": err_res,
                                         "checksum": err_chk
                                     }
+
                                     await websocket.send(json.dumps(payload))
                                     continue
                                 
@@ -396,9 +397,17 @@ class ClientWorker:
                         read_task.cancel()
                         await asyncio.gather(hb_task, read_task, return_exceptions=True)
                         self.ws = None
+                        # Task 7: cancel running tasks and clear list on disconnect
+                        for t_id, task in list(self.running_tasks.items()):
+                            task.cancel()
+                        self.running_tasks.clear()
             except Exception as e:
                 print(f"[Worker] Connection failed: {e}")
 
-            print(f"[Worker] Reconnecting in {backoff:.1f}s...")
-            await asyncio.sleep(backoff)
+            # Task 8: add random jitter (0 to 1.0 seconds) to backoff
+            import random
+            sleep_time = backoff + random.uniform(0, 1.0)
+            print(f"[Worker] Reconnecting in {sleep_time:.1f}s...")
+            await asyncio.sleep(sleep_time)
             backoff = min(backoff * backoff_factor, max_backoff)
+

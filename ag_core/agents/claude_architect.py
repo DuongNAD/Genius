@@ -56,16 +56,38 @@ class ClaudeArchitectAgent(BaseAgent):
             for i, mem in enumerate(past_memories, 1):
                 memory_context += f"Interaction #{i}:\n{mem['text']}\n"
 
-        full_prompt = f"{user_prompt}\n"
+        history_context = ""
+        if self.history:
+            history_context += "Previous conversation history:\n"
+            for turn in self.history:
+                history_context += f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
+            history_context += "\n"
+
+        full_prompt = f"{history_context}{user_prompt}\n"
         if memory_context:
             full_prompt += f"{memory_context}\n"
         full_prompt += f"\nProject files context:\n{context}"
         
         # Invoke provider
-        sys_prompt = AGENT_CORE_RULES + "\nTách plan và implement (Separate plan and implement). Ép Agent này chỉ lên kiến trúc (plan), tuyệt đối không tự ý viết code implement."
+        from ag_core.models import DesignPlan
+        import json
+        if hasattr(DesignPlan, "model_json_schema"):
+            schema_dict = DesignPlan.model_json_schema()
+        else:
+            schema_dict = DesignPlan.schema()
+        schema_json = json.dumps(schema_dict, indent=2)
+        
+        sys_prompt = (
+            AGENT_CORE_RULES + 
+            "\nTách plan và implement (Separate plan and implement). Ép Agent này chỉ lên kiến trúc (plan), tuyệt đối không tự ý viết code implement."
+            f"\n\nYou must output a JSON block conforming to the following JSON schema representation of the design plan:\n{schema_json}\n"
+            "Format the JSON within a ```json block in your output."
+        )
         response = await self.provider.send_prompt(full_prompt, system=sys_prompt)
         content = response.get("content", "")
         usage = response.get("usage", {})
+        
+        self.history.append({"prompt": user_prompt, "response": content})
         
         # Save interaction to memory
         self.store_memory(

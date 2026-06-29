@@ -16,20 +16,17 @@ def parse_design_for_files(design_content: str) -> list:
     Parses design_content for a list of files to implement.
     Returns a list of dicts, e.g., [{"path": "src/main.py", "specification": "..."}].
     """
-    # 1. Check for JSON block
+    from ag_core.models import DesignPlan
+    
+    # 1. Try parsing JSON block with Pydantic
     json_blocks = re.findall(r'[ \t]*```json\s*(\{.*?\})\s*[ \t]*```', design_content, re.DOTALL)
     for block in json_blocks:
         try:
-            data = json.loads(block)
-            if isinstance(data, dict) and "files" in data:
-                files = data["files"]
-                if isinstance(files, list):
-                    valid_files = []
-                    for f in files:
-                        if isinstance(f, dict) and "path" in f and "specification" in f:
-                            valid_files.append(f)
-                    if valid_files:
-                        return valid_files
+            if hasattr(DesignPlan, "model_validate_json"):
+                plan = DesignPlan.model_validate_json(block)
+            else:
+                plan = DesignPlan.parse_raw(block)
+            return [{"path": f.path, "specification": f.specification} for f in plan.files]
         except Exception:
             pass
             
@@ -37,16 +34,12 @@ def parse_design_for_files(design_content: str) -> list:
         start = design_content.find('{')
         end = design_content.rfind('}')
         if start != -1 and end != -1 and end > start:
-            data = json.loads(design_content[start:end+1])
-            if isinstance(data, dict) and "files" in data:
-                files = data["files"]
-                if isinstance(files, list):
-                    valid_files = []
-                    for f in files:
-                        if isinstance(f, dict) and "path" in f and "specification" in f:
-                            valid_files.append(f)
-                    if valid_files:
-                        return valid_files
+            block = design_content[start:end+1]
+            if hasattr(DesignPlan, "model_validate_json"):
+                plan = DesignPlan.model_validate_json(block)
+            else:
+                plan = DesignPlan.parse_raw(block)
+            return [{"path": f.path, "specification": f.specification} for f in plan.files]
     except Exception:
         pass
 
@@ -228,15 +221,18 @@ def format_cmd_args(cmd_executable, args_template, prompt, input_path=None, outp
 from ag_core.config import load_config
 from ag_core.scanner.project_scanner import ProjectScanner
 from ag_core.utils.db import log_conversation
+from ag_core.utils.security import verify_checksum
 
 
 def verify_response_checksum(response) -> None:
     expected_checksum = response.headers.get("X-Payload-SHA256")
     if not expected_checksum:
         raise ChecksumMismatchError("Response is missing X-Payload-SHA256 header")
-    calculated = hashlib.sha256(response.content).hexdigest()
-    if calculated != expected_checksum:
-        raise ChecksumMismatchError(f"Response checksum mismatch: expected {expected_checksum}, calculated {calculated}")
+    config = load_config()
+    secret = config.skill_api_key or os.getenv("SKILL_API_KEY", "mock-skill-key")
+    if not verify_checksum(response.content, expected_checksum, secret):
+        raise ChecksumMismatchError(f"Response checksum mismatch: expected {expected_checksum}")
+
 
 def is_transient_error(exception) -> bool:
     logger.info(f"DEBUG_ERR: type={type(exception)} msg={exception}")
@@ -389,21 +385,22 @@ async def call_api(url: str, api_key: str, prompt: str, context: dict = None, cl
             "task_data": task_data,
             "checksum": checksum
         }
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        pending_tasks[task_id] = fut
         
         logger.info(f"[Distributed] Sending dispatch message for task '{task_id}' to worker '{worker_id}'")
         try:
             await ws.send_json(dispatch_payload)
         except Exception as e:
+            pending_tasks.pop(task_id, None)
             async with worker_registry.lock:
                 worker["status"] = "idle"
             async with central_hub.lock:
                 central_hub.tasks[task_id]["status"] = "failed"
                 central_hub.tasks[task_id]["result"] = {"error": f"WS send error: {str(e)}"}
             raise PipelineError(f"Failed to send task to worker '{worker_id}' over WebSocket: {e}")
-            
-        loop = asyncio.get_running_loop()
-        fut = loop.create_future()
-        pending_tasks[task_id] = fut
+        
         
         try:
             result = await asyncio.wait_for(fut, timeout=poll_timeout)
@@ -468,35 +465,32 @@ async def call_api(url: str, api_key: str, prompt: str, context: dict = None, cl
         finally:
             pending_tasks.pop(task_id, None)
 
-    # Generate short-lived JWT token (expiring in 5 minutes)
-    payload = {
-        "sub": "orchestrator",
-        "exp": time.time() + 300
-    }
-    jwt_token = encode_jwt(payload, api_key)
-
-    headers = {
-        "X-API-Key": jwt_token,
-        "Authorization": f"Bearer {jwt_token}"
-    }
     req_payload = {
         "prompt": prompt,
         "context": context
     }
     
     # Calculate checksum for POST request body
-    payload_bytes = json.dumps(req_payload, separators=(',', ':')).encode("utf-8")
-    req_checksum = hashlib.sha256(payload_bytes).hexdigest()
-    
-    headers["X-Payload-SHA256"] = req_checksum
-    headers["Content-Type"] = "application/json"
+    from ag_core.utils.security import calculate_checksum
+    config = load_config()
+    secret = config.skill_api_key or os.getenv("SKILL_API_KEY", "mock-skill-key")
+    req_checksum = calculate_checksum(req_payload, secret)
+    payload_bytes = json.dumps(req_payload, sort_keys=True, separators=(',', ':')).encode("utf-8")
     
     base_url = url.rstrip('/')
 
     async def _execute(c):
         try:
             # 1. Start the run
-            response = await perform_post_with_retry(c, f"{base_url}/run", payload_bytes, headers)
+            post_payload = {"sub": "orchestrator", "exp": time.time() + 300}
+            post_token = encode_jwt(post_payload, api_key)
+            post_headers = {
+                "X-API-Key": post_token,
+                "Authorization": f"Bearer {post_token}",
+                "X-Payload-SHA256": req_checksum,
+                "Content-Type": "application/json"
+            }
+            response = await perform_post_with_retry(c, f"{base_url}/run", payload_bytes, post_headers)
             res_data = response.json()
             task_id = res_data.get("task_id")
             if not task_id:
@@ -506,12 +500,7 @@ async def call_api(url: str, api_key: str, prompt: str, context: dict = None, cl
             raise PipelineError(f"HTTP request to start task at {base_url}/run failed: {e}")
 
         # GET request has empty body, so checksum is of empty bytes
-        get_checksum = hashlib.sha256(b"").hexdigest()
-        get_headers = {
-            "X-Payload-SHA256": get_checksum,
-            "X-API-Key": jwt_token,
-            "Authorization": f"Bearer {jwt_token}"
-        }
+        get_checksum = calculate_checksum(b"", secret)
         
         # 2. Poll for completion
         poll_start = time.time()
@@ -519,6 +508,13 @@ async def call_api(url: str, api_key: str, prompt: str, context: dict = None, cl
             if time.time() - poll_start > poll_timeout:
                 raise PipelineError(f"Task execution timed out. Polling exceeded poll_timeout of {poll_timeout} seconds.")
             try:
+                poll_payload = {"sub": "orchestrator", "exp": time.time() + 300}
+                poll_token = encode_jwt(poll_payload, api_key)
+                get_headers = {
+                    "X-Payload-SHA256": get_checksum,
+                    "X-API-Key": poll_token,
+                    "Authorization": f"Bearer {poll_token}"
+                }
                 status_response = await perform_get_with_retry(c, f"{base_url}/status/{task_id}", get_headers)
                 status_data = status_response.json()
                 curr_status = status_data.get("status")
@@ -550,7 +546,8 @@ async def call_api(url: str, api_key: str, prompt: str, context: dict = None, cl
         _API_RESPONSE_CACHE[cache_key] = result
     return result
 
-async def process_single_file(file_info, project_dir, config, codex_url, tester_url, security_url, api_key, client, poll_timeout, max_retries, semaphore):
+async def process_single_file(file_info, project_dir, config, codex_url, tester_url, security_url, api_key, client, poll_timeout, max_retries, semaphore, message_bus, parent_art_id):
+    from ag_core.utils.message_bus import Artifact
     async with semaphore:
         file_path = file_info["path"]
         specification = file_info["specification"]
@@ -569,6 +566,10 @@ async def process_single_file(file_info, project_dir, config, codex_url, tester_
         test_failures_logs = ""
         security_report = ""
         
+        # Retrieve design plan content from the message bus
+        design_art = message_bus.retrieve(parent_art_id)
+        design_plan_content = design_art["content"] if design_art else ""
+        
         for attempt in range(1, max_retries + 1):
             logger.info(f"Implementing {file_path} - Attempt {attempt}/{max_retries}")
             
@@ -582,9 +583,14 @@ async def process_single_file(file_info, project_dir, config, codex_url, tester_
                 current_context = proj_scanner.scan()
             except Exception:
                 current_context = {}
+            current_context["design.md"] = design_plan_content
             
             codex_code_raw = await call_api(codex_url, api_key, codex_req_prompt, context=current_context, client=client, poll_timeout=poll_timeout)
             code_to_write = extract_code(codex_code_raw)
+            
+            # Publish Codex implementation to MessageBus
+            codex_art = Artifact(name=f"code_{file_path}", content=code_to_write, created_by="codex", parent_id=parent_art_id)
+            codex_art_id = message_bus.publish(codex_art)
             
             # 2. Write code to projects/[project_name]/[file_path]
             try:
@@ -594,27 +600,8 @@ async def process_single_file(file_info, project_dir, config, codex_url, tester_
             except Exception as e:
                 raise PipelineError(f"Failed to write code to {target_file_path}: {e}")
             
-            # 3. Call Tester API /unit-test
+            # 3. Parallel Tester & Security APIs
             tester_req_prompt = f"/unit-test Generate comprehensive unit tests using pytest for the file '{file_path}' with this code:\n\n{code_to_write}"
-            
-            try:
-                proj_scanner = ProjectScanner(root_dir=project_dir, extra_ignores=config.scanner.exclude_patterns)
-                current_context = proj_scanner.scan()
-            except Exception:
-                current_context = {}
-                
-            tester_tests_raw = await call_api(tester_url, api_key, tester_req_prompt, context=current_context, client=client, poll_timeout=poll_timeout)
-            test_code_to_write = extract_code(tester_tests_raw)
-            
-            # 4. Write test code to projects/[project_name]/tests/test_[file_name].py
-            try:
-                with open(test_file_path, "w", encoding="utf-8") as f:
-                    f.write(test_code_to_write)
-                logger.info(f"Wrote generated tests to {test_file_path}")
-            except Exception as e:
-                raise PipelineError(f"Failed to write test code to {test_file_path}: {e}")
-                
-            # 5. Call Security API /audit
             security_req_prompt = f"/audit Audit the following code for security vulnerabilities in file '{file_path}':\n\n{code_to_write}"
             
             try:
@@ -622,10 +609,32 @@ async def process_single_file(file_info, project_dir, config, codex_url, tester_
                 current_context = proj_scanner.scan()
             except Exception:
                 current_context = {}
-                
-            security_report = await call_api(security_url, api_key, security_req_prompt, context=current_context, client=client, poll_timeout=poll_timeout)
+            current_context["design.md"] = design_plan_content
+            current_context[file_path] = code_to_write
             
-            # Save audit report to projects/[project_name]/logs/audit_[file_name].md
+            # Execute Tester and Security concurrently using asyncio.gather
+            tester_task = call_api(tester_url, api_key, tester_req_prompt, context=current_context, client=client, poll_timeout=poll_timeout)
+            security_task = call_api(security_url, api_key, security_req_prompt, context=current_context, client=client, poll_timeout=poll_timeout)
+            
+            tester_tests_raw, security_report = await asyncio.gather(tester_task, security_task)
+            
+            test_code_to_write = extract_code(tester_tests_raw)
+            
+            # Publish Tester and Security artifacts to MessageBus
+            tester_art = Artifact(name=f"test_{file_path}", content=test_code_to_write, created_by="tester", parent_id=codex_art_id)
+            tester_art_id = message_bus.publish(tester_art)
+            
+            security_art = Artifact(name=f"audit_{file_path}", content=security_report, created_by="security", parent_id=codex_art_id)
+            security_art_id = message_bus.publish(security_art)
+            
+            # 4. Write debug/log files to disk
+            try:
+                with open(test_file_path, "w", encoding="utf-8") as f:
+                    f.write(test_code_to_write)
+                logger.info(f"Wrote generated tests to {test_file_path}")
+            except Exception as e:
+                raise PipelineError(f"Failed to write test code to {test_file_path}: {e}")
+                
             try:
                 with open(audit_log_path, "w", encoding="utf-8") as f:
                     f.write(security_report)
@@ -848,7 +857,14 @@ async def run_pipeline(
 
         # Step 1: Grok (Research) - Call API
         logger.info("--- Running Step: Grok ---")
+        from ag_core.utils.message_bus import MessageBus, Artifact
+        message_bus = MessageBus(db_path=os.path.join(project_dir, "logs", "message_bus.db"))
+        
         grok_content = await call_api(grok_url, api_key, prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
+        
+        # Publish to MessageBus
+        grok_art_id = message_bus.publish(Artifact(name="research_data", content=grok_content, created_by="grok"))
+        
         try:
             with open(research_file, "w", encoding="utf-8") as f:
                 f.write(grok_content)
@@ -856,18 +872,17 @@ async def run_pipeline(
             with open(proj_research_file, "w", encoding="utf-8") as f:
                 f.write(grok_content)
         except Exception as e:
-            raise PipelineError(f"Failed to write Grok output to {research_file}: {e}")
+            logger.warning(f"Failed to write Grok debug output: {e}")
         validate_file(research_file, "Grok", is_input=False)
         logger.info(f"Step 'Grok' successfully completed. Output verified: {research_file}")
 
         # Step 2: Claude (Design) - Call API
         logger.info("--- Running Step: Claude ---")
         validate_file(research_file, "Claude", is_input=True)
-        try:
-            with open(research_file, "r", encoding="utf-8") as f:
-                claude_prompt = f.read()
-        except Exception as e:
-            raise PipelineError(f"Failed to read Grok output from {research_file}: {e}")
+        
+        # Retrieve research content from message bus
+        research_art = message_bus.retrieve(grok_art_id)
+        claude_prompt = research_art["content"] if research_art else grok_content
         
         scanned_files["research.md"] = claude_prompt
         
@@ -898,7 +913,7 @@ async def run_pipeline(
                 
                 claude_refine_prompt = (
                     "You are Claude, the architect agent. Refine your draft architecture plan based on the constructive criticism from GrokReviewer.\n"
-                    "Address the identified issues and incorporate the suggested improvements, producing a final refined architecture plan.\n\n"
+                    "Address the identified issues and incorporate the suppressed improvements, producing a final refined architecture plan.\n\n"
                     f"Previous Draft Plan:\n{claude_content}\n\n"
                     f"GrokReviewer's Criticism:\n{critic_content}\n\n"
                     f"Original Research and Context:\n{claude_prompt}"
@@ -908,6 +923,9 @@ async def run_pipeline(
                 )
                 logger.info(f"Debate Round {round_idx} End: Round complete.")
 
+        # Publish Claude content to MessageBus
+        claude_art_id = message_bus.publish(Artifact(name="design_plan", content=claude_content, created_by="claude", parent_id=grok_art_id))
+
         try:
             with open(design_file, "w", encoding="utf-8") as f:
                 f.write(claude_content)
@@ -915,7 +933,7 @@ async def run_pipeline(
             with open(proj_design_file, "w", encoding="utf-8") as f:
                 f.write(claude_content)
         except Exception as e:
-            raise PipelineError(f"Failed to write Claude output to {design_file}: {e}")
+            logger.warning(f"Failed to write Claude debug output: {e}")
         validate_file(design_file, "Claude", is_input=False)
         logger.info(f"Step 'Claude' successfully completed. Output verified: {design_file}")
 
@@ -930,6 +948,8 @@ async def run_pipeline(
                 claude_prompt = f"{claude_prompt}\n\n[USER FEEDBACK]:\n{feedback}"
                 scanned_files["research.md"] = claude_prompt
                 claude_content = await call_api(claude_url, api_key, claude_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
+                # Re-publish to MessageBus
+                claude_art_id = message_bus.publish(Artifact(name="design_plan", content=claude_content, created_by="claude", parent_id=grok_art_id))
                 try:
                     with open(design_file, "w", encoding="utf-8") as f:
                         f.write(claude_content)
@@ -937,7 +957,7 @@ async def run_pipeline(
                     with open(proj_design_file, "w", encoding="utf-8") as f:
                         f.write(claude_content)
                 except Exception as e:
-                    raise PipelineError(f"Failed to write Claude output to {design_file}: {e}")
+                    logger.warning(f"Failed to write Claude debug output: {e}")
                 print(f"\n[Updated Claude Design Output]\n{claude_content}\n")
 
         # Parse design.md for file implementation task queue
@@ -971,7 +991,7 @@ async def run_pipeline(
                 try:
                     result = await process_single_file(
                         file_info, project_dir, config, codex_url, tester_url, security_url,
-                        api_key, client, poll_timeout, max_retries, semaphore
+                        api_key, client, poll_timeout, max_retries, semaphore, message_bus, claude_art_id
                     )
                     status_dict[file_path] = "completed"
                     update_progress_md(status_dict)
@@ -996,6 +1016,7 @@ async def run_pipeline(
             
             # Write review.md as implementation is verified
             review_content = "All files successfully implemented and verified through self-healing loop."
+            review_art_id = message_bus.publish(Artifact(name="review_data", content=review_content, created_by="codex", parent_id=claude_art_id))
             try:
                 with open(review_file, "w", encoding="utf-8") as f:
                     f.write(review_content)
@@ -1006,6 +1027,7 @@ async def run_pipeline(
 
             # Aggregate audit report
             consolidated_audit = "\n\n---\n\n".join(aggregated_audits) if aggregated_audits else "Consolidated project implementation and testing passed."
+            consolidated_art_id = message_bus.publish(Artifact(name="consolidated_audit", content=consolidated_audit, created_by="security", parent_id=review_art_id))
             try:
                 with open(audit_file, "w", encoding="utf-8") as f:
                     f.write(consolidated_audit)
@@ -1017,12 +1039,11 @@ async def run_pipeline(
             # Run DevOps deployment (Step 7)
             logger.info("--- Running Step: DevOps ---")
             validate_file(audit_file, "DevOps", is_input=True)
-            try:
-                with open(audit_file, "r", encoding="utf-8") as f:
-                    devops_prompt = f.read()
-            except Exception as e:
-                raise PipelineError(f"Failed to read Security output: {e}")
-                
+            
+            # Retrieve from MessageBus
+            audit_art = message_bus.retrieve(consolidated_art_id)
+            devops_prompt = audit_art["content"] if audit_art else consolidated_audit
+            
             try:
                 proj_scanner = ProjectScanner(root_dir=project_dir, extra_ignores=config.scanner.exclude_patterns)
                 current_context = proj_scanner.scan()
@@ -1031,6 +1052,9 @@ async def run_pipeline(
             current_context["audit.md"] = devops_prompt
             
             devops_content = await call_api(devops_url, api_key, devops_prompt, context=current_context, client=client, poll_timeout=poll_timeout)
+            
+            # Publish DevOps to MessageBus
+            devops_art_id = message_bus.publish(Artifact(name="devops_deploy", content=devops_content, created_by="devops", parent_id=consolidated_art_id))
             try:
                 with open(deploy_file, "w", encoding="utf-8") as f:
                     f.write(devops_content)
@@ -1110,19 +1134,30 @@ async def run_pipeline(
         validate_file(app_file, "Antigravity", is_input=False)
         logger.info(f"Step 'Antigravity' successfully completed. Output verified: {app_file}")
 
+        # Publish app code to MessageBus
+        try:
+            with open(app_file, "r", encoding="utf-8") as f:
+                app_content = f.read()
+        except Exception:
+            app_content = ""
+        app_art_id = message_bus.publish(Artifact(name="app_code", content=app_content, created_by="antigravity", parent_id=claude_art_id))
+
         # Step 4: Codex (Review) - Call API
         logger.info("--- Running Step: Codex ---")
         validate_file(app_file, "Codex", is_input=True)
-        try:
-            with open(app_file, "r", encoding="utf-8") as f:
-                codex_prompt = f.read()
-        except Exception as e:
-            raise PipelineError(f"Failed to read Antigravity output from {app_file}: {e}")
-            
-        scanned_files["design.md"] = claude_content
+        
+        # Retrieve from MessageBus
+        app_art = message_bus.retrieve(app_art_id)
+        codex_prompt = app_art["content"] if app_art else ""
+        
+        scanned_files["design.md"] = message_bus.retrieve(claude_art_id)["content"]
         scanned_files["app.py"] = codex_prompt
         
         codex_content = await call_api(codex_url, api_key, codex_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
+        
+        # Publish Codex review to MessageBus
+        codex_art_id = message_bus.publish(Artifact(name="review_data", content=codex_content, created_by="codex", parent_id=app_art_id))
+        
         os.makedirs(project_dir, exist_ok=True)
         try:
             with open(review_file, "w", encoding="utf-8") as f:
@@ -1135,18 +1170,30 @@ async def run_pipeline(
         validate_file(review_file, "Codex", is_input=False)
         logger.info(f"Step 'Codex' successfully completed. Output verified: {review_file}")
         
-        # Step 5: Tester (Test generation) - Call API
-        logger.info("--- Running Step: Tester ---")
+        # Step 5, 6 & 7: Tester, Security and DevOps in parallel
+        logger.info("--- Running Steps: Tester, Security & DevOps (Parallel) ---")
         validate_file(review_file, "Tester", is_input=True)
-        try:
-            with open(review_file, "r", encoding="utf-8") as f:
-                tester_prompt = f.read()
-        except Exception as e:
-            raise PipelineError(f"Failed to read Codex output from {review_file}: {e}")
-            
-        scanned_files["review.md"] = tester_prompt
         
-        tester_content = await call_api(tester_url, api_key, tester_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
+        # Retrieve Codex output from MessageBus
+        review_art = message_bus.retrieve(codex_art_id)
+        shared_prompt = review_art["content"] if review_art else ""
+            
+        scanned_files["review.md"] = shared_prompt
+        scanned_files["app.py"] = message_bus.retrieve(app_art_id)["content"]
+        
+        # Invoke concurrently
+        tester_task = call_api(tester_url, api_key, shared_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
+        security_task = call_api(security_url, api_key, shared_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
+        devops_task = call_api(devops_url, api_key, shared_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
+        
+        tester_content, security_content, devops_content = await asyncio.gather(tester_task, security_task, devops_task)
+        
+        # Publish to MessageBus
+        tester_art_id = message_bus.publish(Artifact(name="test_code", content=tester_content, created_by="tester", parent_id=codex_art_id))
+        security_art_id = message_bus.publish(Artifact(name="security_audit", content=security_content, created_by="security", parent_id=codex_art_id))
+        devops_art_id = message_bus.publish(Artifact(name="devops_deploy", content=devops_content, created_by="devops", parent_id=codex_art_id))
+        
+        # Write Tester outputs
         os.makedirs(project_dir, exist_ok=True)
         try:
             with open(test_generated_file, "w", encoding="utf-8") as f:
@@ -1156,19 +1203,8 @@ async def run_pipeline(
                 f.write(tester_content)
         except Exception as e:
             raise PipelineError(f"Failed to write Tester output to {test_generated_file}: {e}")
-        validate_file(test_generated_file, "Tester", is_input=False)
-        logger.info(f"Step 'Tester' successfully completed. Output verified: {test_generated_file}")
-        
-        # Step 6: Security (Security Audit)
-        logger.info("--- Running Step: Security ---")
-        validate_file(test_generated_file, "Security", is_input=True)
-        try:
-            with open(test_generated_file, "r", encoding="utf-8") as f:
-                security_prompt = f.read()
-        except Exception as e:
-            raise PipelineError(f"Failed to read Tester output: {e}")
-        scanned_files["test_generated.py"] = security_prompt
-        security_content = await call_api(security_url, api_key, security_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
+            
+        # Write Security outputs
         try:
             with open(audit_file, "w", encoding="utf-8") as f:
                 f.write(security_content)
@@ -1177,19 +1213,8 @@ async def run_pipeline(
                 f.write(security_content)
         except Exception as e:
             raise PipelineError(f"Failed to write Security output to {audit_file}: {e}")
-        validate_file(audit_file, "Security", is_input=False)
-        logger.info(f"Step 'Security' successfully completed. Output verified: {audit_file}")
-
-        # Step 7: DevOps (Deployment)
-        logger.info("--- Running Step: DevOps ---")
-        validate_file(audit_file, "DevOps", is_input=True)
-        try:
-            with open(audit_file, "r", encoding="utf-8") as f:
-                devops_prompt = f.read()
-        except Exception as e:
-            raise PipelineError(f"Failed to read Security output: {e}")
-        scanned_files["audit.md"] = devops_prompt
-        devops_content = await call_api(devops_url, api_key, devops_prompt, context=scanned_files, client=client, poll_timeout=poll_timeout)
+            
+        # Write DevOps outputs
         try:
             with open(deploy_file, "w", encoding="utf-8") as f:
                 f.write(devops_content)
@@ -1198,6 +1223,14 @@ async def run_pipeline(
                 f.write(devops_content)
         except Exception as e:
             raise PipelineError(f"Failed to write DevOps output to {deploy_file}: {e}")
+            
+        # Validate outputs
+        validate_file(test_generated_file, "Tester", is_input=False)
+        logger.info(f"Step 'Tester' successfully completed. Output verified: {test_generated_file}")
+        
+        validate_file(audit_file, "Security", is_input=False)
+        logger.info(f"Step 'Security' successfully completed. Output verified: {audit_file}")
+        
         validate_file(deploy_file, "DevOps", is_input=False)
         logger.info(f"Step 'DevOps' successfully completed. Output verified: {deploy_file}")
 

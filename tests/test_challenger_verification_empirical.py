@@ -1,3 +1,14 @@
+import sys
+sys.modules["sentence_transformers"] = None
+sys.modules["transformers"] = None
+sys.modules["peft"] = None
+sys.modules["torch"] = None
+sys.modules["tensorflow"] = None
+
+if sys.platform == "win32":
+    import asyncio
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import asyncio
 import json
 import time

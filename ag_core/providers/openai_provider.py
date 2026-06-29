@@ -64,6 +64,7 @@ class OpenAIProvider(BaseProvider):
                 "--json"
             ]
                 
+            # Redirect stdin to DEVNULL to prevent CLI hang
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -84,112 +85,166 @@ class OpenAIProvider(BaseProvider):
             total_tokens = 0
             
             lines = stdout_str.splitlines()
+            accumulator = []
+            
+            # Helper to convert values to int safely
+            def safe_int(val) -> int | None:
+                try:
+                    return int(val)
+                except (ValueError, TypeError):
+                    return None
+            
             for line in lines:
                 try:
-                    line = line.strip()
-                    if not line:
+                    line_stripped = line.strip()
+                    if not line_stripped:
                         continue
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+
+                    # Strip prefix noise if present
+                    idx = -1
+                    for char in ('{', '['):
+                        pos = line_stripped.find(char)
+                        if pos != -1 and (idx == -1 or pos < idx):
+                            idx = pos
+                    if idx != -1:
+                        line_stripped = line_stripped[idx:]
                     
+                    # Try to parse line directly first
+                    data = None
+                    try:
+                        data = json.loads(line_stripped)
+                        accumulator = []  # Clear accumulator on successful parse of a single line
+                    except (Exception, RecursionError):
+                        # Line itself is not valid JSON, so we append to accumulator
+                        accumulator.append(line)
+                        if len(accumulator) > 50:
+                            accumulator = accumulator[-50:]
+                            
+                        # Clean leading lines in accumulator that cannot start JSON
+                        while accumulator and not (accumulator[0].strip().startswith('{') or accumulator[0].strip().startswith('[')):
+                            accumulator.pop(0)
+                            
+                        # Try to parse from suffix starting points to recover from noise
+                        for i in range(len(accumulator)):
+                            # Only try suffixes that start with { or [ to avoid parsing nested structures
+                            suffix_start = accumulator[i].strip()
+                            if not (suffix_start.startswith('{') or suffix_start.startswith('[')):
+                                continue
+                                
+                            # Check prefix for any unmatched open braces to prevent parsing inner objects too early
+                            prefix_text = "".join(accumulator[:i])
+                            opens = prefix_text.count('{') + prefix_text.count('[')
+                            closes = prefix_text.count('}') + prefix_text.count(']')
+                            if opens > closes:
+                                continue  # Likely nested inside an unmatched outer structure in the prefix
+                                
+                            try:
+                                accumulated_str = "\n".join(accumulator[i:])
+                                parsed = json.loads(accumulated_str)
+                                accumulator = []  # Clear on success
+                                if isinstance(parsed, dict):
+                                    data = parsed
+                                break
+                            except (Exception, RecursionError):
+                                pass
+                                
+                        if data is None:
+                            continue
+                            
                     if not isinstance(data, dict):
                         continue
-                    
+                        
                     event_type = data.get("event") or data.get("type")
-                    
+                    item = data.get("item")
+                    if not isinstance(item, dict):
+                        item = {}
+                        
                     is_agent_msg = False
-                    item = None
-                    if event_type == "agent_message":
-                        item = data.get("item")
+                    if event_type == "agent_message" or item.get("type") == "agent_message":
                         is_agent_msg = True
                     elif "agent_message" in data:
                         am = data.get("agent_message")
                         if isinstance(am, dict):
-                            item = am.get("item")
                             is_agent_msg = True
+                            if am.get("item") and isinstance(am.get("item"), dict):
+                                item = am.get("item")
                     elif (
                         event_type == "item.completed"
                         and isinstance(data.get("item"), dict)
                     ):
                         item = data.get("item")
-                        if isinstance(item, dict) and item.get("type") == "agent_message":
+                        if isinstance(item, dict) and (item.get("type") == "agent_message" or item.get("event") == "agent_message"):
                             is_agent_msg = True
 
-                    if is_agent_msg and isinstance(item, dict):
-                        text = item.get("text")
+                    if is_agent_msg:
+                        text = item.get("text") if isinstance(item, dict) else None
+                        if text is None:
+                            text = data.get("text")
+                        if text is None and "agent_message" in data:
+                            am = data.get("agent_message")
+                            if isinstance(am, dict):
+                                text = am.get("text")
                         if text is not None:
                             content_parts.append(str(text))
                                     
-                    # Check for turn.completed event
+                    # Check for turn.completed event or equivalent keys
                     if event_type == "turn.completed" or "turn.completed" in data:
-                        turn_dict = data.get("turn.completed") if isinstance(data.get("turn.completed"), dict) else data
-                        if isinstance(turn_dict, dict):
-                            input_val = None
-                            output_val = None
-                            total_val = None
+                        # Gather all possible dictionaries containing token counts
+                        candidate_dicts = []
+                        
+                        # Helper to add a dict safely
+                        def add_candidate(d):
+                            if isinstance(d, dict) and d not in candidate_dicts:
+                                candidate_dicts.append(d)
+                                
+                        add_candidate(data)
+                        
+                        turn_completed = data.get("turn.completed")
+                        if isinstance(turn_completed, dict):
+                            add_candidate(turn_completed)
+                            add_candidate(turn_completed.get("usage"))
+                            add_candidate(turn_completed.get("tokens"))
                             
-                            # Try to find input tokens
-                            for key in ["input_tokens", "prompt_tokens"]:
-                                if key in turn_dict:
-                                    input_val = turn_dict[key]
-                                    break
+                        turn_val = data.get("turn")
+                        if isinstance(turn_val, dict):
+                            completed_val = turn_val.get("completed")
+                            if isinstance(completed_val, dict):
+                                add_candidate(completed_val)
+                                add_candidate(completed_val.get("usage"))
+                                add_candidate(completed_val.get("tokens"))
+                                
+                        add_candidate(data.get("usage"))
+                        add_candidate(data.get("tokens"))
+                        
+                        input_val = None
+                        output_val = None
+                        total_val = None
+                        
+                        for d in candidate_dicts:
                             if input_val is None:
-                                for sub in ["usage", "tokens"]:
-                                    if isinstance(turn_dict.get(sub), dict):
-                                        for key in ["input_tokens", "prompt_tokens"]:
-                                            if key in turn_dict[sub]:
-                                                input_val = turn_dict[sub][key]
-                                                break
-                                        if input_val is not None:
-                                            break
-                                            
-                            # Try to find output tokens
-                            for key in ["output_tokens", "completion_tokens"]:
-                                if key in turn_dict:
-                                    output_val = turn_dict[key]
-                                    break
+                                val = d.get("input_tokens") or d.get("prompt_tokens")
+                                parsed = safe_int(val)
+                                if parsed is not None:
+                                    input_val = parsed
+                                    
                             if output_val is None:
-                                for sub in ["usage", "tokens"]:
-                                    if isinstance(turn_dict.get(sub), dict):
-                                        for key in ["output_tokens", "completion_tokens"]:
-                                            if key in turn_dict[sub]:
-                                                output_val = turn_dict[sub][key]
-                                                break
-                                        if output_val is not None:
-                                            break
-                                            
-                            # Try to find total tokens
-                            for key in ["total_tokens", "tokens"]:
-                                if key in turn_dict and not isinstance(turn_dict[key], dict):
-                                    total_val = turn_dict[key]
-                                    break
+                                val = d.get("output_tokens") or d.get("completion_tokens")
+                                parsed = safe_int(val)
+                                if parsed is not None:
+                                    output_val = parsed
+                                    
                             if total_val is None:
-                                for sub in ["usage", "tokens"]:
-                                    if isinstance(turn_dict.get(sub), dict):
-                                        for key in ["total_tokens", "tokens"]:
-                                            if key in turn_dict[sub] and not isinstance(turn_dict[sub][key], dict):
-                                                total_val = turn_dict[sub][key]
-                                                break
-                                        if total_val is not None:
-                                            break
-                                            
-                            if input_val is not None:
-                                try:
-                                    prompt_tokens = int(input_val)
-                                except (ValueError, TypeError):
-                                    pass
-                            if output_val is not None:
-                                try:
-                                    completion_tokens = int(output_val)
-                                except (ValueError, TypeError):
-                                    pass
-                            if total_val is not None:
-                                try:
-                                    total_tokens = int(total_val)
-                                except (ValueError, TypeError):
-                                    pass
+                                val = d.get("total_tokens") or d.get("total")
+                                parsed = safe_int(val)
+                                if parsed is not None:
+                                    total_val = parsed
+                                    
+                        if input_val is not None:
+                            prompt_tokens = input_val
+                        if output_val is not None:
+                            completion_tokens = output_val
+                        if total_val is not None:
+                            total_tokens = total_val
                 except Exception:
                     continue
                             

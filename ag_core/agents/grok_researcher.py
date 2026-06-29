@@ -48,12 +48,21 @@ class GrokResearcherAgent(BaseAgent):
         for filepath, content in scanned_files.items():
             context += f"\n--- File: {filepath} ---\n{content}\n"
             
-        full_prompt = f"{user_prompt}\n\nProject files context:\n{context}"
+        history_context = ""
+        if self.history:
+            history_context += "Previous conversation history:\n"
+            for turn in self.history:
+                history_context += f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
+            history_context += "\n"
+            
+        full_prompt = f"{history_context}{user_prompt}\n\nProject files context:\n{context}"
         
         # Invoke provider
         response = await self.provider.send_prompt(full_prompt, system=AGENT_CORE_RULES)
         content = response.get("content", "")
         usage = response.get("usage", {})
+        
+        self.history.append({"prompt": user_prompt, "response": content})
         
         # Log transaction
         log_transaction(

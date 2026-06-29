@@ -158,4 +158,29 @@ def load_config(config_path: str = "config.yaml") -> Config:
         config.services.tester_agent = "http://localhost:8004/tester"
         config.services.security_agent = "http://localhost:8005/security"
         config.services.devops_agent = "http://localhost:8006/devops"
+
+    import json
+    registry_path = os.environ.get("GENIUS_SERVICE_REGISTRY", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".agents", "service_registry.json"))
+    if os.path.exists(registry_path):
+        try:
+            with open(registry_path, "r", encoding="utf-8") as f:
+                registry = json.load(f)
+            role_to_field = {
+                "grok": "grok_researcher",
+                "claude": "claude_architect",
+                "codex": "codex_reviewer",
+                "tester": "tester_agent",
+                "security": "security_agent",
+                "devops": "devops_agent"
+            }
+            for role, port in registry.items():
+                field_name = role_to_field.get(role)
+                if field_name and hasattr(config.services, field_name):
+                    suffix = ""
+                    if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+                        suffix = f"/{role}"
+                    setattr(config.services, field_name, f"http://localhost:{port}{suffix}")
+        except Exception:
+            pass
+
     return config

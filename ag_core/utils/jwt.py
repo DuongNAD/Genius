@@ -15,10 +15,20 @@ def base64url_decode(data_str: str) -> bytes:
         data_str += '=' * (4 - rem)
     return base64.urlsafe_b64decode(data_str.encode('utf-8'))
 
+import uuid
+import threading
+
+_seen_jtis = {}
+_jtis_lock = threading.Lock()
+
 def encode_jwt(payload: dict, secret: str) -> str:
     """
     Encode a JWT token with HS256 algorithm.
     """
+    payload = dict(payload)
+    if "jti" not in payload:
+        payload["jti"] = str(uuid.uuid4())
+        
     header = {"alg": "HS256", "typ": "JWT"}
     header_json = json.dumps(header, separators=(',', ':')).encode('utf-8')
     payload_json = json.dumps(payload, separators=(',', ':')).encode('utf-8')
@@ -75,5 +85,21 @@ def decode_jwt(token: str, secret: str) -> dict:
             raise ValueError("Invalid exp claim type")
         if time.time() > exp:
             raise ValueError("Token has expired")
+            
+    jti = payload.get("jti")
+    if not jti:
+        raise ValueError("Missing jti claim")
+        
+    now = time.time()
+    with _jtis_lock:
+        # Prune expired JTIs
+        expired = [k for k, exp_val in _seen_jtis.items() if exp_val is not None and now > exp_val]
+        for k in expired:
+            del _seen_jtis[k]
+            
+        if jti in _seen_jtis:
+            raise ValueError("Token replay detected")
+            
+        _seen_jtis[jti] = payload.get("exp")
             
     return payload

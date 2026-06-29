@@ -3,8 +3,8 @@ app:
   version: "2.0"
 models:
   openai: "gpt-4o"
-  anthropic: "claude-3-5-sonnet"
-  grok: "grok-2"
+  anthropic: "claude-sonnet-4-6"
+  grok: "grok-build-0.1"
 scanner:
   chunk_size_limit: 8000
   exclude_patterns:

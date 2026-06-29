@@ -38,17 +38,15 @@ def patched_verify_auth(self, headers):
     )
     return api_key == self.api_key
 
+from ag_core.utils.security import verify_checksum as real_verify_checksum
+
 def patched_verify_checksum(self, payload, headers):
     checksum = (
         headers.get("X-Payload-SHA256")
         or headers.get("x-payload-sha256")
         or headers.get("X-Payload-Sha256")
     )
-    if not checksum:
-        return False
-    serialized = json.dumps(payload, sort_keys=True).encode('utf-8')
-    computed = hashlib.sha256(serialized).hexdigest()
-    return computed == checksum
+    return real_verify_checksum(payload, checksum, self.api_key)
 
 CentralHub.verify_auth = patched_verify_auth
 CentralHub.verify_checksum = patched_verify_checksum

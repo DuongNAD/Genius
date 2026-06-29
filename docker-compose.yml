@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  hub:
+    build: .
+    command: python serve.py --roles=hub
+    ports:
+      - "8000:8000"
+    environment:
+      - SKILL_API_KEY=valid-api-key
+      - GENIUS_DB_PATH=/app/genius.db
+    volumes:
+      - genius_data:/app
+
+  dashboard:
+    build: .
+    command: python dashboard.py
+    ports:
+      - "8080:8080"
+    environment:
+      - GENIUS_DB_PATH=/app/genius.db
+    depends_on:
+      - hub
+    volumes:
+      - genius_data:/app
+
+  grok_researcher:
+    build: .
+    command: python -m uvicorn .agents.skills.grok_researcher.api:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    environment:
+      - SKILL_API_KEY=valid-api-key
+      - GENIUS_DB_PATH=/app/genius.db
+    depends_on:
+      - hub
+    volumes:
+      - genius_data:/app
+
+  claude_architect:
+    build: .
+    command: python -m uvicorn .agents.skills.claude_architect.api:app --host 0.0.0.0 --port 8002
+    ports:
+      - "8002:8002"
+    environment:
+      - SKILL_API_KEY=valid-api-key
+      - GENIUS_DB_PATH=/app/genius.db
+    depends_on:
+      - hub
+    volumes:
+      - genius_data:/app
+
+  codex_reviewer:
+    build: .
+    command: python -m uvicorn .agents.skills.codex_reviewer.api:app --host 0.0.0.0 --port 8003
+    ports:
+      - "8003:8003"
+    environment:
+      - SKILL_API_KEY=valid-api-key
+      - GENIUS_DB_PATH=/app/genius.db
+    depends_on:
+      - hub
+    volumes:
+      - genius_data:/app
+
+  tester_agent:
+    build: .
+    command: python -m uvicorn .agents.skills.tester_agent.api:app --host 0.0.0.0 --port 8004
+    ports:
+      - "8004:8004"
+    environment:
+      - SKILL_API_KEY=valid-api-key
+      - GENIUS_DB_PATH=/app/genius.db
+    depends_on:
+      - hub
+    volumes:
+      - genius_data:/app
+
+  security_agent:
+    build: .
+    command: python -m uvicorn .agents.skills.security_agent.api:app --host 0.0.0.0 --port 8005
+    ports:
+      - "8005:8005"
+    environment:
+      - SKILL_API_KEY=valid-api-key
+      - GENIUS_DB_PATH=/app/genius.db
+    depends_on:
+      - hub
+    volumes:
+      - genius_data:/app
+
+  devops_agent:
+    build: .
+    command: python -m uvicorn .agents.skills.devops_agent.api:app --host 0.0.0.0 --port 8006
+    ports:
+      - "8006:8006"
+    environment:
+      - SKILL_API_KEY=valid-api-key
+      - GENIUS_DB_PATH=/app/genius.db
+    depends_on:
+      - hub
+    volumes:
+      - genius_data:/app
+
+volumes:
+  genius_data:

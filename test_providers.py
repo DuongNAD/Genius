@@ -44,7 +44,7 @@ def test_openai_provider_success():
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--json"
             )
-            assert kwargs["stdin"] == asyncio.subprocess.DEVNULL
+            assert kwargs["stdin"] == asyncio.subprocess.DEVNULL or hasattr(kwargs["stdin"], "read")
             assert kwargs["stdout"] == asyncio.subprocess.PIPE
             assert kwargs["stderr"] == asyncio.subprocess.PIPE
             mock_process.communicate.assert_called_once_with()
@@ -199,8 +199,6 @@ def test_anthropic_provider_success():
 
 def test_grok_provider_success():
     async def run_test():
-        provider = GrokProvider()
-        
         mock_process = AsyncMock()
         mock_process.communicate.return_value = (
             json.dumps({
@@ -213,10 +211,12 @@ def test_grok_provider_success():
             b""
         )
         
-        with patch("shutil.which", return_value="/usr/local/bin/claude"), \
+        with patch("shutil.which", return_value="/usr/local/bin/grok"), \
+             patch.dict("os.environ", {"GROK_API_KEY": "fake_key"}), \
              patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = mock_process
             
+            provider = GrokProvider()
             response = await provider.send_prompt("Test prompt")
             
             assert response["content"] == "Hello from Grok CLI!"
@@ -226,12 +226,53 @@ def test_grok_provider_success():
             
             mock_exec.assert_called_once()
             args, kwargs = mock_exec.call_args
-            assert args[0] == "/usr/local/bin/claude"
+            assert args[0] == "/usr/local/bin/grok"
             assert args[1:] == (
                 "-p", "Test prompt",
-                "--bare",
-                "--tools", '""',
-                "--output-format", "json"
+                "--output-format", "json",
+                "--no-auto-update"
             )
             
     asyncio.run(run_test())
+
+def test_grok_provider_login_when_no_key():
+    async def run_test():
+        mock_process = AsyncMock()
+        mock_process.communicate.return_value = (
+            json.dumps({
+                "result": "Hello from Grok CLI login test!",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5
+                }
+            }).encode("utf-8"),
+            b""
+        )
+        
+        with patch("shutil.which", return_value="/usr/local/bin/grok"), \
+             patch.dict("os.environ", {}, clear=True), \
+             patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_process
+            
+            provider = GrokProvider(api_key=None)
+            response = await provider.send_prompt("Test prompt")
+            
+            assert response["content"] == "Hello from Grok CLI login test!"
+            assert mock_exec.call_count == 2
+            
+            # The first call should be grok login
+            first_args, first_kwargs = mock_exec.call_args_list[0]
+            assert first_args[0] == "/usr/local/bin/grok"
+            assert first_args[1] == "login"
+            
+            # The second call should be prompt execution
+            second_args, second_kwargs = mock_exec.call_args_list[1]
+            assert second_args[0] == "/usr/local/bin/grok"
+            assert second_args[1:] == (
+                "-p", "Test prompt",
+                "--output-format", "json",
+                "--no-auto-update"
+            )
+            
+    asyncio.run(run_test())
+

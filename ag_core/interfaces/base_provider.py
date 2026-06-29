@@ -25,21 +25,23 @@ class TokenBucket:
         self.capacity = capacity
         self.tokens = capacity
         try:
-            loop = asyncio.get_event_loop()
-            self.last_refill = loop.time() if loop.is_running() else 0.0
+            loop = asyncio.get_running_loop()
+            self.last_refill = loop.time()
         except RuntimeError:
-            self.last_refill = 0.0
+            import time
+            self.last_refill = time.time()
 
     def _refill(self):
         try:
-            loop = asyncio.get_event_loop()
-            if not loop.is_running():
-                return
+            loop = asyncio.get_running_loop()
             now = loop.time()
         except RuntimeError:
-            return
+            import time
+            now = time.time()
         elapsed = now - self.last_refill
-        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+        if elapsed < 0:
+            elapsed = 0
+        self.tokens = min(self.capacity, max(0.0, self.tokens) + elapsed * self.rate)
         self.last_refill = now
 
     async def acquire(self):

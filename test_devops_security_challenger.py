@@ -126,7 +126,6 @@ def test_auth_bearer_casing_and_spaces(get_app, role):
     """Verify that Authorization: Bearer is parsed case-insensitively and tolerates multiple spaces."""
     app = get_app()
     client = TestClient(app)
-    jwt_token = get_valid_api_key()
     
     # Prepare identical payload bytes and exact checksum
     payload = {"prompt": "test"}
@@ -134,8 +133,9 @@ def test_auth_bearer_casing_and_spaces(get_app, role):
     checksum = hashlib.sha256(body).hexdigest()
     
     # Test case-insensitivity: "bearer <token>"
+    jwt_token1 = get_valid_api_key()
     headers = {
-        "Authorization": f"bearer {jwt_token}",
+        "Authorization": f"bearer {jwt_token1}",
         "X-Payload-SHA256": checksum,
         "Content-Type": "application/json"
     }
@@ -144,8 +144,9 @@ def test_auth_bearer_casing_and_spaces(get_app, role):
     assert "task_id" in res.json()
 
     # Test multiple spaces: "Bearer      <token>"
+    jwt_token2 = get_valid_api_key()
     headers = {
-        "Authorization": f"Bearer      {jwt_token}",
+        "Authorization": f"Bearer      {jwt_token2}",
         "X-Payload-SHA256": checksum,
         "Content-Type": "application/json"
     }
@@ -153,8 +154,9 @@ def test_auth_bearer_casing_and_spaces(get_app, role):
     assert res.status_code == 200
 
     # Test raw token without "Bearer ": "Authorization: <token>"
+    jwt_token3 = get_valid_api_key()
     headers = {
-        "Authorization": jwt_token,
+        "Authorization": jwt_token3,
         "X-Payload-SHA256": checksum,
         "Content-Type": "application/json"
     }
@@ -344,16 +346,18 @@ def test_rate_limiter_active_and_retry_after(get_app, role):
         
         # Run with ENABLE_RATE_LIMITER set
         with patch.dict(os.environ, {"ENABLE_RATE_LIMITER": "true", "PYTEST_CURRENT_TEST": ""}):
-            headers, body = make_headers(jwt_token=jwt_token, payload_dict={"prompt": "test"})
-            
             # Consume the bucket (capacity is 2)
-            res1 = client.post("/run", content=body, headers=headers)
+            headers1, body1 = make_headers(jwt_token=get_valid_api_key(), payload_dict={"prompt": "test"})
+            res1 = client.post("/run", content=body1, headers=headers1)
             assert res1.status_code == 200
-            res2 = client.post("/run", content=body, headers=headers)
+            
+            headers2, body2 = make_headers(jwt_token=get_valid_api_key(), payload_dict={"prompt": "test"})
+            res2 = client.post("/run", content=body2, headers=headers2)
             assert res2.status_code == 200
                 
             # The 3rd request should be rate-limited
-            res_limited = client.post("/run", content=body, headers=headers)
+            headers3, body3 = make_headers(jwt_token=get_valid_api_key(), payload_dict={"prompt": "test"})
+            res_limited = client.post("/run", content=body3, headers=headers3)
             assert res_limited.status_code == 429
             assert res_limited.headers.get("Retry-After") == "1"
             assert "Too Many Requests" in res_limited.json().get("detail", "")

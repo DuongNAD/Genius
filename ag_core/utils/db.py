@@ -1,5 +1,7 @@
 import os
 import sqlite3
+import queue
+import threading
 from contextlib import contextmanager
 from ag_core.utils.logger import logger
 
@@ -59,64 +61,144 @@ def get_db_connection():
     finally:
         conn.close()
 
+# --- Single Writer SQLite Thread Queue Implementation ---
+
+_db_write_queue = queue.Queue()
+_db_writer_thread = None
+
+class WriteTask:
+    def __init__(self, func, args, kwargs):
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+        self.event = threading.Event()
+        self.exception = None
+        self.result = None
+
+def _db_writer_worker():
+    conn = None
+    current_conn_path = None
+    
+    while True:
+        task = _db_write_queue.get()
+        if task is None:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            break
+            
+        db_path = get_db_path()
+        if conn is None or db_path != current_conn_path:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            try:
+                conn = sqlite3.connect(db_path, timeout=30.0)
+                conn.execute("PRAGMA journal_mode=WAL;")
+                current_conn_path = db_path
+            except Exception as e:
+                task.exception = e
+                task.event.set()
+                _db_write_queue.task_done()
+                continue
+                
+        try:
+            task.result = task.func(conn, *task.args, **task.kwargs)
+        except Exception as e:
+            task.exception = e
+        finally:
+            task.event.set()
+            _db_write_queue.task_done()
+
+def _start_writer_thread():
+    global _db_writer_thread
+    if _db_writer_thread is None or not _db_writer_thread.is_alive():
+        _db_writer_thread = threading.Thread(target=_db_writer_worker, daemon=True, name="SQLiteWriterThread")
+        _db_writer_thread.start()
+
+def _submit_write(func, *args, **kwargs):
+    _start_writer_thread()
+    task = WriteTask(func, args, kwargs)
+    _db_write_queue.put(task)
+    task.event.wait()
+    if task.exception:
+        raise task.exception
+    return task.result
+
+# --- Internal DB Write Implementations ---
+
+def _log_agent_start_impl(conn, task_id: str, agent_name: str, prompt: str):
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO agent_logs (task_id, agent_name, prompt, status) VALUES (?, ?, ?, ?)",
+        (task_id, agent_name, prompt, "started")
+    )
+    conn.commit()
+
+def _log_agent_success_impl(conn, task_id: str, result: str):
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE agent_logs SET status = ?, result = ? WHERE task_id = ?",
+        ("success", result, task_id)
+    )
+    if cursor.rowcount == 0:
+        cursor.execute(
+            "INSERT INTO agent_logs (task_id, status, result) VALUES (?, ?, ?)",
+            (task_id, "success", result)
+        )
+    conn.commit()
+
+def _log_agent_failure_impl(conn, task_id: str, error: str):
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE agent_logs SET status = ?, error = ? WHERE task_id = ?",
+        ("failure", error, task_id)
+    )
+    if cursor.rowcount == 0:
+        cursor.execute(
+            "INSERT INTO agent_logs (task_id, status, error) VALUES (?, ?, ?)",
+            (task_id, "failure", error)
+        )
+    conn.commit()
+
+def _log_conversation_impl(conn, prompt: str, result: str):
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO conversations (prompt, result) VALUES (?, ?)",
+        (prompt, result)
+    )
+    conn.commit()
+
+# --- Public API Functions ---
+
 def log_agent_start(task_id: str, agent_name: str, prompt: str):
     """Logs the start of an agent execution."""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO agent_logs (task_id, agent_name, prompt, status) VALUES (?, ?, ?, ?)",
-                (task_id, agent_name, prompt, "started")
-            )
-            conn.commit()
+        _submit_write(_log_agent_start_impl, task_id, agent_name, prompt)
     except Exception as e:
         logger.error(f"Error logging agent start for task {task_id}: {e}")
 
 def log_agent_success(task_id: str, result: str):
     """Logs the success of an agent execution."""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE agent_logs SET status = ?, result = ? WHERE task_id = ?",
-                ("success", result, task_id)
-            )
-            if cursor.rowcount == 0:
-                cursor.execute(
-                    "INSERT INTO agent_logs (task_id, status, result) VALUES (?, ?, ?)",
-                    (task_id, "success", result)
-                )
-            conn.commit()
+        _submit_write(_log_agent_success_impl, task_id, result)
     except Exception as e:
         logger.error(f"Error logging agent success for task {task_id}: {e}")
 
 def log_agent_failure(task_id: str, error: str):
     """Logs the failure of an agent execution."""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE agent_logs SET status = ?, error = ? WHERE task_id = ?",
-                ("failure", error, task_id)
-            )
-            if cursor.rowcount == 0:
-                cursor.execute(
-                    "INSERT INTO agent_logs (task_id, status, error) VALUES (?, ?, ?)",
-                    (task_id, "failure", error)
-                )
-            conn.commit()
+        _submit_write(_log_agent_failure_impl, task_id, error)
     except Exception as e:
         logger.error(f"Error logging agent failure for task {task_id}: {e}")
 
 def log_conversation(prompt: str, result: str):
     """Logs an overall conversation history."""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO conversations (prompt, result) VALUES (?, ?)",
-                (prompt, result)
-            )
-            conn.commit()
+        _submit_write(_log_conversation_impl, prompt, result)
     except Exception as e:
         logger.error(f"Error logging conversation: {e}")

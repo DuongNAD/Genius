@@ -1,3 +1,16 @@
+import sys
+sys.modules["sentence_transformers"] = None
+sys.modules["transformers"] = None
+sys.modules["peft"] = None
+sys.modules["torch"] = None
+sys.modules["tensorflow"] = None
+
+if sys.platform == "win32":
+    import asyncio
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+
 import asyncio
 import json
 import time
@@ -50,7 +63,8 @@ async def test_concurrent_task_dispatches_resolution_and_no_leaks(run_server):
     are correctly matched, executed, and resolved without race conditions
     or memory leaks in the future map (pending_tasks).
     """
-    import orchestrator
+    import sys, orchestrator
+    print("LOADED MODULES:", [m for m in sys.modules if "torch" in m or "tensorflow" in m])
     orchestrator.DISTRIBUTED_MODE = True
 
     # Start 3 workers in parallel

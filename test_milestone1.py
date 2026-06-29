@@ -41,6 +41,7 @@ def test_jwt_encode_decode():
     # Test normal encode & decode
     token = encode_jwt(payload, secret)
     decoded = decode_jwt(token, secret)
+    assert decoded.pop("jti", None) is not None
     assert decoded == payload
 
     # Test invalid signature
@@ -56,7 +57,9 @@ def test_jwt_encode_decode():
     # Test valid non-expired token with exp claim
     valid_payload = {"sub": "user123", "exp": time.time() + 60}
     valid_token = encode_jwt(valid_payload, secret)
-    assert decode_jwt(valid_token, secret) == valid_payload
+    decoded_valid = decode_jwt(valid_token, secret)
+    assert decoded_valid.pop("jti", None) is not None
+    assert decoded_valid == valid_payload
 
     # Test malformed token
     with pytest.raises(ValueError, match="Invalid token format"):

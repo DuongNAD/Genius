@@ -29,6 +29,18 @@ $$\text{Orchestrator} \xrightarrow{\text{Async HTTP + Checksums}} \text{FastAPI 
 | 8 | DevOps & Security (R2) | Add Security & DevOps Agents, integrate into serve.py/orchestrator routing and CLI menu. | M5 | DONE |
 | 9 | CI/CD Pipeline (R3) | Setup GitHub Actions workflow (.github/workflows/ci.yml) for automated test runs. | M6 | DONE |
 | 10| E2E Testing & Verification | Validate all Phase 5 capabilities through integration/E2E test suite. | M7, M8, M9 | DONE |
+| 11| Swarm Upgrades Planning & Exploration | Investigate codebase and verify existing tests | None | DONE |
+| 12| Skill Layer & CLI Hang Resolution | Implement missing api.py/run.py for 6 agents; resolve serve.py CLI hang | M11 | DONE |
+| 13| Core Distribution & Security | Unify serialization, fix orphan tasks, upgrade HMAC-SHA256, jti JWT, bounded caches | M11 | DONE |
+| 14| Database & Microservices | SQLite write queue, Dynamic port discovery | M11 | DONE |
+| 15| Quality & Logging | Jitter backoff, type annotations, structured logging | M11 | DONE |
+| 16| E2E Verification & Audit Gate | Run pytest on all test suites; perform forensic integrity audit | M12, M13, M14, M15 | DONE |
+| 17| Analysis & Exploration (Upgrade V2) | Gather requirements, examine CLI providers, rate limiters, memory, and tests. | None | DONE |
+| 18| Grok & Codex CLI Providers (Upgrade V2) | Fix GrokProvider to use grok CLI, fix OpenAIProvider to parse Codex JSONL on Windows. | M17 | DONE |
+| 19| Config, Rate Limiter & Cleanups (Upgrade V2) | Update config.yaml models, fix TokenBucket asyncio loop warnings, remove python paths, add gitignore/pre-commit. | M18 | DONE |
+| 20| Memory, Concurrency & History (Upgrade V2) | Upgrade VectorMemory to sentence-transformers, parallelize steps in orchestrator, add context history. | M18 | DONE |
+| 21| Advanced Features (Upgrade V2) | Implement streaming, WebSocket dashboard, MCP server, Dockerization. | M19, M20 | DONE |
+| 22| Final Integration & Audit Gate (Upgrade V2) | Verify 100% pass on all test suites and perform forensic integrity audit. | M21 | DONE |
 
 ## Code Layout
 - `ag_core/`: Core library containing `agents/`, `interfaces/`, `providers/`, `scanner/`, `utils/`, `memory/`.

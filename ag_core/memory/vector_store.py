@@ -17,6 +17,12 @@ try:
 except ImportError:
     CHROMA_AVAILABLE = False
 
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except Exception:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+
 class SimpleTFIDFEmbedding:
     """Offline-safe term frequency-based embedding generator."""
     def __init__(self, vector_dim: int = 128):
@@ -49,16 +55,24 @@ class SimpleTFIDFEmbedding:
         return embeddings
 
 if CHROMA_AVAILABLE:
-    class ChromaTFIDFEmbeddingFunction(EmbeddingFunction):
-        def __init__(self, embedder: SimpleTFIDFEmbedding):
-            self.embedder = embedder
+    class ChromaEmbeddingFunctionWrapper(EmbeddingFunction):
+        def __init__(self, vector_memory):
+            self.vector_memory = vector_memory
         def __call__(self, input: Documents) -> Embeddings:
-            return self.embedder.get_embeddings(input)
+            return self.vector_memory.get_embeddings(input)
 
 class VectorMemory:
     def __init__(self, collection_name: str, use_chroma: bool = False, db_path: str = None, chroma_persist_dir: str = None):
         self.collection_name = collection_name
         self.embedder = SimpleTFIDFEmbedding()
+        
+        self.sentence_transformer_model = None
+        if SENTENCE_TRANSFORMERS_AVAILABLE:
+            try:
+                self.sentence_transformer_model = SentenceTransformer('all-MiniLM-L6-v2')
+            except Exception as e:
+                print(f"Warning: Failed to load SentenceTransformer ({e}). Falling back to TF-IDF.")
+                
         self.db_path = db_path or os.environ.get("GENIUS_MEMORY_DB_PATH") or os.environ.get("GENIUS_DB_PATH") or os.path.join(_ROOT_DIR, "genius.db")
         
         self.use_chroma = use_chroma and CHROMA_AVAILABLE
@@ -66,7 +80,7 @@ class VectorMemory:
             try:
                 self.chroma_dir = chroma_persist_dir or os.environ.get("GENIUS_CHROMA_DIR") or os.path.join(_ROOT_DIR, ".chroma")
                 self.client = chromadb.PersistentClient(path=self.chroma_dir)
-                emb_fn = ChromaTFIDFEmbeddingFunction(self.embedder)
+                emb_fn = ChromaEmbeddingFunctionWrapper(self)
                 self.collection = self.client.get_or_create_collection(
                      name=collection_name, 
                      embedding_function=emb_fn
@@ -77,6 +91,26 @@ class VectorMemory:
                 self._init_sqlite_db()
         else:
             self._init_sqlite_db()
+
+    def get_embeddings(self, texts: List[str]) -> List[List[float]]:
+        if self.sentence_transformer_model:
+            try:
+                embeddings = self.sentence_transformer_model.encode(texts)
+                ret = []
+                for idx, emb in enumerate(embeddings):
+                    text = texts[idx]
+                    v = emb.tolist()
+                    if not text.strip():
+                        v = [0.0] * len(v)
+                    else:
+                        norm = math.sqrt(sum(x * x for x in v))
+                        if norm > 0:
+                            v = [x / norm for x in v]
+                    ret.append(v)
+                return ret
+            except Exception as e:
+                print(f"Warning: SentenceTransformer encoding failed ({e}). Falling back to TF-IDF.")
+        return self.embedder.get_embeddings(texts)
 
     def _get_connection(self):
         import sqlite3
@@ -117,7 +151,7 @@ class VectorMemory:
                 ids=[doc_id]
             )
         else:
-            embedding = self.embedder.get_embeddings([text])[0]
+            embedding = self.get_embeddings([text])[0]
             conn = self._get_connection()
             try:
                 conn.execute(
@@ -161,13 +195,15 @@ class VectorMemory:
             if not rows:
                 return []
 
-            query_vector = self.embedder.get_embeddings([query_text])[0]
+            query_vector = self.get_embeddings([query_text])[0]
             scored_rows = []
             for uid, text, metadata_str, emb_str in rows:
                 try:
                     emb = json.loads(emb_str)
-                    # Dot product since vectors are normalized to unit L2 norm
-                    score = sum(q * e for q, e in zip(query_vector, emb))
+                    if len(query_vector) != len(emb):
+                        score = 0.0
+                    else:
+                        score = sum(q * e for q, e in zip(query_vector, emb))
                 except Exception:
                     score = 0.0
                 

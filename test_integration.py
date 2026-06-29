@@ -83,8 +83,8 @@ def test_config_loading_and_merging():
     assert config.app.name == "Antigravity Core"
     assert config.app.version == "2.0"
     assert config.models.openai == "gpt-4o"
-    assert config.models.anthropic == "claude-3-5-sonnet"
-    assert config.models.grok == "grok-2"
+    assert config.models.anthropic == "claude-sonnet-4-6"
+    assert config.models.grok == "grok-build-0.1"
     assert config.scanner.chunk_size_limit == 8000
     assert ".git/" in config.scanner.exclude_patterns
     

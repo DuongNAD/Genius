@@ -56,11 +56,10 @@ async def test_duplicate_worker_connection_hijack_prevention(run_server):
     """
     port = run_server
     worker_id = "duplicate-conn-worker"
-    token = encode_jwt({"sub": worker_id, "exp": time.time() + 60}, JWT_SECRET)
-    ws_url = f"ws://{HOST}:{port}/ws/connect?token={token}"
-
     # Connection 1 connects & registers
-    ws1 = await websockets.connect(ws_url)
+    token1 = encode_jwt({"sub": worker_id, "exp": time.time() + 60}, JWT_SECRET)
+    ws_url1 = f"ws://{HOST}:{port}/ws/connect?token={token1}"
+    ws1 = await websockets.connect(ws_url1)
     reg_payload1 = {"type": "register", "worker_id": worker_id, "roles": ["grok"]}
     await ws1.send(json.dumps(reg_payload1))
     resp1 = await ws1.recv()
@@ -71,7 +70,9 @@ async def test_duplicate_worker_connection_hijack_prevention(run_server):
     assert w_info["ws"] is not None
 
     # Connection 2 connects & registers
-    ws2 = await websockets.connect(ws_url)
+    token2 = encode_jwt({"sub": worker_id, "exp": time.time() + 60}, JWT_SECRET)
+    ws_url2 = f"ws://{HOST}:{port}/ws/connect?token={token2}"
+    ws2 = await websockets.connect(ws_url2)
     reg_payload2 = {"type": "register", "worker_id": worker_id, "roles": ["grok"]}
     await ws2.send(json.dumps(reg_payload2))
     resp2 = await ws2.recv()

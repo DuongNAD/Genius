@@ -25,17 +25,31 @@ class TaskQueue(list):
     def task_done(self):
         pass
 
+class BoundedTasks(dict):
+    def __setitem__(self, key, value):
+        if len(self) >= 10000:
+            to_evict = []
+            for t_id, task in self.items():
+                if task.get("status") in ("completed", "failed"):
+                    to_evict.append(t_id)
+            for t_id in to_evict:
+                self.pop(t_id, None)
+            while len(self) >= 10000:
+                first_key = next(iter(self))
+                self.pop(first_key, None)
+        super().__setitem__(key, value)
+
 class CentralHub:
     def __init__(self, api_key: str = "valid-api-key"):
         self.api_key = api_key
         self.workers: Dict[str, Dict[str, Any]] = {}
-        self.tasks: Dict[str, Dict[str, Any]] = {}
+        self.tasks = BoundedTasks()
         self.network = None
         self.task_queue = TaskQueue()
         self.config = {
             "max_workers": 10,
             "heartbeat_timeout": 0.5,
-            "task_timeout": 1.0,
+            "task_timeout": 60.0,
         }
         self._sweeper_task: Optional[asyncio.Task] = None
         self._sweeper_running = False
@@ -148,9 +162,9 @@ class CentralHub:
             checksum = next((v for k, v in headers.items() if k.lower() == "x-payload-sha256"), None)
         if not checksum:
             return False
-        serialized = json.dumps(payload, sort_keys=True).encode('utf-8')
-        computed = hashlib.sha256(serialized).hexdigest()
-        return computed == checksum
+        from ag_core.utils.security import verify_checksum
+        return verify_checksum(payload, checksum, self.api_key)
+
 
     def check_liveness(self):
         # Keep this for backward compatibility in tests
@@ -342,8 +356,8 @@ class CentralHub:
         if w_info and w_info.get("ws") is not None:
             ws = w_info["ws"]
             task_data = self.tasks[task_id]["task_data"]
-            serialized = json.dumps(task_data, sort_keys=True).encode('utf-8')
-            checksum = hashlib.sha256(serialized).hexdigest()
+            from ag_core.utils.security import calculate_checksum
+            checksum = calculate_checksum(task_data, self.api_key)
             payload = {
                 "type": "run_task",
                 "task_id": task_id,
@@ -431,8 +445,8 @@ class CentralHub:
                 self.task_queue.remove(task_id)
 
     def create_headers(self, payload: Any) -> Dict[str, str]:
-        serialized = json.dumps(payload, sort_keys=True).encode('utf-8')
-        checksum = hashlib.sha256(serialized).hexdigest()
+        from ag_core.utils.security import calculate_checksum
+        checksum = calculate_checksum(payload, self.api_key)
         return {
             "X-API-Key": self.api_key,
             "X-Payload-SHA256": checksum

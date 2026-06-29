@@ -34,6 +34,15 @@ class SlowCloseWebSocket:
 
 @pytest_asyncio.fixture
 async def run_server():
+    global PORT, WS_URL
+    import socket
+    s = socket.socket()
+    s.bind(('', 0))
+    allocated_port = s.getsockname()[1]
+    s.close()
+    PORT = allocated_port
+    WS_URL = f"ws://{HOST}:{PORT}/ws/connect"
+    
     # Start the FastAPI app on a separate port in the background
     config = uvicorn.Config(app, host=HOST, port=PORT, log_level="warning")
     server = uvicorn.Server(config)

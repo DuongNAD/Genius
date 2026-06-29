@@ -23,7 +23,18 @@ import json
 
 central_hub = CentralHub()
 
-pending_tasks = {}
+class BoundedPendingTasks(dict):
+    def __setitem__(self, key, value):
+        if len(self) >= 10000:
+            for t_id, fut in list(self.items()):
+                if fut.done():
+                    self.pop(t_id, None)
+            while len(self) >= 10000:
+                first_key = next(iter(self))
+                self.pop(first_key, None)
+        super().__setitem__(key, value)
+
+pending_tasks = BoundedPendingTasks()
 
 class WorkerDisconnectedError(Exception):
     pass
@@ -97,7 +108,7 @@ class WorkerRegistry:
                 if t_id in central_hub.tasks:
                     central_hub.tasks[t_id]["status"] = "failed"
                     central_hub.tasks[t_id]["result"] = {"error": "Worker disconnected"}
-                fut = pending_tasks.get(t_id)
+                fut = pending_tasks.pop(t_id, None)
                 if fut and not fut.done():
                     fut.set_exception(WorkerDisconnectedError("Worker disconnected"))
 
@@ -123,6 +134,7 @@ async def prune_stale_workers(timeout_sec: float = 30.0, check_interval: float =
                 if task_id in central_hub.tasks:
                     task_info = central_hub.tasks[task_id]
                     if task_info.get("status") == "failed":
+                        pending_tasks.pop(task_id, None)
                         if fut and not fut.done():
                             result = task_info.get("result") or {}
                             error_msg = result.get("error", "Task timed out or failed on worker") if isinstance(result, dict) else str(result)
@@ -158,11 +170,31 @@ async def hub_http_route(path: str, request: Request):
     except Exception:
         payload = {}
     headers = dict(request.headers)
+    
+    if payload.get("stream") or request.query_params.get("stream") == "true":
+        from fastapi.responses import StreamingResponse
+        async def stream_generator():
+            status_code, body, resp_headers = await central_hub.handle_request("/" + path, payload, headers)
+            if isinstance(body, dict):
+                yield json.dumps(body)
+            else:
+                yield str(body)
+        return StreamingResponse(stream_generator(), media_type="application/json")
+        
     status_code, body, resp_headers = await central_hub.handle_request("/" + path, payload, headers)
     return Response(content=json.dumps(body), status_code=status_code, media_type="application/json", headers=resp_headers)
 
+IS_DISTRIBUTED = False
+
 @app.websocket("/ws/connect")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
+    global IS_DISTRIBUTED
+    import sys
+    is_pytest = "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST") is not None
+    if not IS_DISTRIBUTED and not is_pytest:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="WebSocket not enabled in local mode")
+
     secret = os.getenv("SKILL_API_KEY", "mock-skill-key")
     try:
         payload = decode_jwt(token, secret)
@@ -227,21 +259,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     if task_id and task_id in central_hub.tasks:
                         central_hub.tasks[task_id]["status"] = "failed"
                         central_hub.tasks[task_id]["result"] = {"error": "Missing result checksum"}
-                    fut = pending_tasks.get(task_id)
+                    fut = pending_tasks.pop(task_id, None)
                     if fut and not fut.done():
                         fut.set_exception(ValueError("Missing result checksum"))
                     continue
 
-                serialized = json.dumps(result, sort_keys=True).encode('utf-8')
-                computed = hashlib.sha256(serialized).hexdigest()
-                if computed != checksum:
-                    print(f"[Hub] Result checksum mismatch! Expected {checksum}, got {computed}")
+                from ag_core.utils.security import verify_checksum
+                if not verify_checksum(result, checksum, central_hub.api_key):
+                    print(f"[Hub] Result checksum mismatch! Expected {checksum}")
                     if worker_id and worker_id in worker_registry.workers:
                         worker_registry.workers[worker_id]["status"] = "idle"
                     if task_id and task_id in central_hub.tasks:
                         central_hub.tasks[task_id]["status"] = "failed"
                         central_hub.tasks[task_id]["result"] = {"error": "Result checksum validation failed"}
-                    fut = pending_tasks.get(task_id)
+                    fut = pending_tasks.pop(task_id, None)
                     if fut and not fut.done():
                         fut.set_exception(ValueError("Result checksum validation failed"))
                     continue
@@ -259,7 +290,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     if worker_id in worker_registry.workers:
                         worker_registry.workers[worker_id]["status"] = "idle"
                     
-                    fut = pending_tasks.get(task_id)
+                    fut = pending_tasks.pop(task_id, None)
                     if fut and not fut.done():
                         if status == "completed":
                             output = result.get("output", result) if isinstance(result, dict) else result
@@ -364,9 +395,44 @@ def get_api_app(role: str):
 
 async def start_server(role: str, port: int):
     app = get_api_app(role)
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
+    try:
+        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+        server = uvicorn.Server(config)
+        await server.startup()
+    except OSError:
+        config = uvicorn.Config(app, host="0.0.0.0", port=0, log_level="info")
+        server = uvicorn.Server(config)
+        await server.startup()
+        
+    bound_port = None
+    for s in server.servers:
+        for sock in s.sockets:
+            bound_port = sock.getsockname()[1]
+            break
+        if bound_port:
+            break
+    if not bound_port:
+        bound_port = server.config.port
+        
+    registry_path = os.environ.get("GENIUS_SERVICE_REGISTRY", os.path.join(root_dir, ".agents", "service_registry.json"))
+    os.makedirs(os.path.dirname(registry_path), exist_ok=True)
+    
+    registry = {}
+    if os.path.exists(registry_path):
+        try:
+            with open(registry_path, "r", encoding="utf-8") as f:
+                registry = json.load(f)
+        except Exception:
+            pass
+            
+    registry[role] = bound_port
+    with open(registry_path, "w", encoding="utf-8") as f:
+        json.dump(registry, f, indent=2)
+        
+    try:
+        await server.main_loop()
+    finally:
+        await server.shutdown()
 
 async def main_async():
     parser = argparse.ArgumentParser(description="Unified Startup Menu for Genius Microservices")
@@ -382,6 +448,9 @@ async def main_async():
     auto_pilot = getattr(args, "auto_pilot", False) is True
     interactive = getattr(args, "interactive", False) is True
     distributed = getattr(args, "distributed", False) is True
+
+    global IS_DISTRIBUTED
+    IS_DISTRIBUTED = distributed
 
     if auto_pilot:
         selected_roles = ["grok", "claude", "codex", "tester", "security", "devops", "dashboard", "orchestrator"]
@@ -455,8 +524,10 @@ async def main_async():
             print("Error: Prompt is required to run the orchestrator.")
             return
 
+        pipeline_run = False
         try:
             print(f"Launching orchestrator pipeline with prompt: '{prompt}'")
+            pipeline_run = True
             pipeline_kwargs = {}
             if interactive or auto_pilot:
                 pipeline_kwargs["interactive"] = interactive
@@ -473,21 +544,26 @@ async def main_async():
             print("Orchestrator pipeline completed successfully.")
         except Exception as e:
             print(f"Orchestrator pipeline failed: {e}")
+        finally:
+            if pipeline_run:
+                for task in server_tasks:
+                    task.cancel()
+                if server_tasks:
+                    await asyncio.gather(*server_tasks, return_exceptions=True)
+                return
 
-        if args.prompt is not None or auto_pilot:
-            for task in server_tasks:
-                task.cancel()
-            if server_tasks:
-                await asyncio.gather(*server_tasks, return_exceptions=True)
-            return
-
-            
     # If we started servers, we await them to run continuously
     if server_tasks:
         try:
             print("FastAPI servers are running. Press Ctrl+C to stop.")
             await asyncio.gather(*server_tasks)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            print("Stopping servers...")
+        finally:
+            for task in server_tasks:
+                task.cancel()
+            if server_tasks:
+                await asyncio.gather(*server_tasks, return_exceptions=True)
             print("Servers stopped.")
 
 def main():

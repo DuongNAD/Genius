@@ -63,3 +63,6 @@ desktop.ini
 .agents/*/
 
 *.db
+*.db-shm
+*.db-wal
+config.yaml

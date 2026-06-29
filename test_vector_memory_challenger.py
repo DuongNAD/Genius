@@ -119,9 +119,11 @@ def test_hashing_collisions(temp_db_path):
     emb2 = embedder.get_embeddings([w2])[0]
     assert emb1 == emb2
     
-    memory = VectorMemory(collection_name="collision", use_chroma=False, db_path=temp_db_path)
-    memory.add(w2, doc_id="target")
-    results = memory.query(w1, n_results=1)
+    from unittest.mock import patch
+    with patch("ag_core.memory.vector_store.SENTENCE_TRANSFORMERS_AVAILABLE", False):
+        memory = VectorMemory(collection_name="collision", use_chroma=False, db_path=temp_db_path)
+        memory.add(w2, doc_id="target")
+        results = memory.query(w1, n_results=1)
     assert results[0]["id"] == "target"
     assert pytest.approx(results[0]["score"], rel=1e-5) == 1.0
     print(f"Collision query score verified: {results[0]['score']}")
