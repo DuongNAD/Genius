@@ -399,13 +399,23 @@ def get_api_app(role: str):
 
 async def start_server(role: str, port: int):
     app = get_api_app(role)
-    try:
-        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+
+    def _make_server(bind_port: int) -> uvicorn.Server:
+        config = uvicorn.Config(app, host="0.0.0.0", port=bind_port, log_level="info")
         server = uvicorn.Server(config)
+        # uvicorn wires up the loaded config + lifespan inside serve(); since we
+        # drive the lifecycle manually (startup -> read bound port -> main_loop),
+        # replicate that init here or startup() fails on a missing .lifespan.
+        if not config.loaded:
+            config.load()
+        server.lifespan = config.lifespan_class(config)
+        return server
+
+    try:
+        server = _make_server(port)
         await server.startup()
     except OSError:
-        config = uvicorn.Config(app, host="0.0.0.0", port=0, log_level="info")
-        server = uvicorn.Server(config)
+        server = _make_server(0)
         await server.startup()
         
     bound_port = None
