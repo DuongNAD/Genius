@@ -26,6 +26,15 @@ class GrokProvider(BaseProvider):
             
             cli_path = shutil.which("grok")
             if not cli_path:
+                # Official xAI Grok Build CLI installs to ~/.grok/bin (added to
+                # PATH on install, but a long-running process may predate that).
+                userprofile = os.getenv("USERPROFILE") or os.path.expanduser("~")
+                for name in ("grok.exe", "grok"):
+                    candidate = os.path.join(userprofile, ".grok", "bin", name)
+                    if os.path.exists(candidate):
+                        cli_path = candidate
+                        break
+            if not cli_path:
                 appdata = os.getenv("APPDATA")
                 if appdata:
                     fallback = os.path.join(appdata, "npm", "grok.cmd")
@@ -77,16 +86,16 @@ class GrokProvider(BaseProvider):
                     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
                         f.write(prompt)
                         temp_file_path = f.name
-                    cmd = [cli_path, "--prompt", temp_file_path, "--output-format", "json", "--no-auto-update"]
+                    cmd = [cli_path, "--prompt-file", temp_file_path, "--output-format", "json"]
                 else:
-                    cmd = [cli_path, "-p", prompt, "--output-format", "json", "--no-auto-update"]
+                    cmd = [cli_path, "-p", prompt, "--output-format", "json"]
                 
                 session_id = extra.pop("session_id", None) or kwargs.get("session_id") or self.extra_params.get("session_id")
                 if session_id:
                     cmd.extend(["--session-id", str(session_id)])
                     
                 if sys_prompt:
-                    cmd.extend(["--system-prompt", sys_prompt])
+                    cmd.extend(["--system-prompt-override", sys_prompt])
                     
                 actual_cmd = cmd
                 if sys.platform == "win32":
@@ -121,6 +130,10 @@ class GrokProvider(BaseProvider):
                     except Exception:
                         pass
             
+            if isinstance(process.returncode, int) and process.returncode != 0:
+                stderr_str = stderr.decode("utf-8", errors="ignore").strip()
+                raise RuntimeError(f"Grok CLI failed with exit code {process.returncode}: {stderr_str}")
+
             stdout_str = stdout.decode("utf-8", errors="ignore").strip()
             try:
                 res_json = json.loads(stdout_str)

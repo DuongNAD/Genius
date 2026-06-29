@@ -54,63 +54,49 @@ class OpenAIProvider(BaseProvider):
             if sys_prompt:
                 prompt = f"{sys_prompt}\n\n{prompt}"
 
-            import tempfile
             import sys
-            
-            temp_file_path = None
+
+            # `codex exec [PROMPT]` treats the positional arg as the literal
+            # instructions — it has no flag to read the prompt from a file.
+            # Passing a temp-file PATH (the old behaviour) made Codex run with
+            # the path string as its instructions. Instead use "-" so Codex
+            # reads the prompt from stdin; this also sidesteps the Windows
+            # command-line length limit the temp file was trying to avoid.
+            cmd = [
+                cli_path,
+                "exec",
+                "-",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--json"
+            ]
+
+            actual_cmd = cmd
+            if sys.platform == "win32":
+                resolved_cli = shutil.which(cli_path) or cli_path
+                if resolved_cli.lower().endswith((".cmd", ".bat")):
+                    actual_cmd = ["cmd.exe", "/c"] + cmd
+
+            prompt_bytes = prompt.encode("utf-8")
             try:
-                if len(prompt) > 1000:
-                    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
-                        f.write(prompt)
-                        temp_file_path = f.name
-                    cmd = [
-                        cli_path,
-                        "exec",
-                        temp_file_path,
-                        "--dangerously-bypass-approvals-and-sandbox",
-                        "--json"
-                    ]
-                else:
-                    cmd = [
-                        cli_path,
-                        "exec",
-                        prompt,
-                        "--dangerously-bypass-approvals-and-sandbox",
-                        "--json"
-                    ]
-                
-                actual_cmd = cmd
-                if sys.platform == "win32":
-                    resolved_cli = shutil.which(cli_path) or cli_path
-                    if resolved_cli.lower().endswith((".cmd", ".bat")):
-                        actual_cmd = ["cmd.exe", "/c"] + cmd
-                        
-                try:
+                process = await asyncio.create_subprocess_exec(
+                    *actual_cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+            except OSError:
+                if sys.platform == "win32" and actual_cmd == cmd:
+                    actual_cmd = ["cmd.exe", "/c"] + cmd
                     process = await asyncio.create_subprocess_exec(
                         *actual_cmd,
-                        stdin=asyncio.subprocess.DEVNULL,
+                        stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
-                except OSError:
-                    if sys.platform == "win32" and actual_cmd == cmd:
-                        actual_cmd = ["cmd.exe", "/c"] + cmd
-                        process = await asyncio.create_subprocess_exec(
-                            *actual_cmd,
-                            stdin=asyncio.subprocess.DEVNULL,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
-                        )
-                    else:
-                        raise
-                stdout, stderr = await process.communicate()
-            finally:
-                if temp_file_path and os.path.exists(temp_file_path):
-                    try:
-                        os.remove(temp_file_path)
-                    except Exception:
-                        pass
-            
+                else:
+                    raise
+            stdout, stderr = await process.communicate(input=prompt_bytes)
+
             if isinstance(process.returncode, int) and process.returncode != 0:
                 stderr_str = stderr.decode("utf-8", errors="ignore").strip()
                 raise RuntimeError(f"Codex CLI failed with exit code {process.returncode}: {stderr_str}")

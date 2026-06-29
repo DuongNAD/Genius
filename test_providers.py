@@ -41,14 +41,17 @@ def test_openai_provider_success():
             assert args[0] == fake_path
             assert args[1:] == (
                 "exec",
-                "You are helpful\n\nTest prompt",
+                "-",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--json"
             )
-            assert kwargs["stdin"] == asyncio.subprocess.DEVNULL or hasattr(kwargs["stdin"], "read")
+            # Prompt is piped via stdin (the "-" arg), not passed positionally.
+            assert kwargs["stdin"] == asyncio.subprocess.PIPE
             assert kwargs["stdout"] == asyncio.subprocess.PIPE
             assert kwargs["stderr"] == asyncio.subprocess.PIPE
-            mock_process.communicate.assert_called_once_with()
+            mock_process.communicate.assert_called_once_with(
+                input=b"You are helpful\n\nTest prompt"
+            )
             
     asyncio.run(run_test())
 
@@ -129,10 +132,12 @@ def test_openai_provider_fallback_path():
             assert args[0] == "codex.exe"
             assert args[1:] == (
                 "exec",
-                "Test prompt",
+                "-",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--json"
             )
+            assert kwargs["stdin"] == asyncio.subprocess.PIPE
+            mock_process.communicate.assert_called_once_with(input=b"Test prompt")
             
     asyncio.run(run_test())
 
@@ -232,10 +237,9 @@ def test_grok_provider_success():
             assert args[0] == "/usr/local/bin/grok"
             assert args[1:] == (
                 "-p", "Test prompt",
-                "--output-format", "json",
-                "--no-auto-update"
+                "--output-format", "json"
             )
-            
+
     asyncio.run(run_test())
 
 def test_grok_provider_login_when_no_key():
@@ -273,8 +277,7 @@ def test_grok_provider_login_when_no_key():
             assert second_args[0] == "/usr/local/bin/grok"
             assert second_args[1:] == (
                 "-p", "Test prompt",
-                "--output-format", "json",
-                "--no-auto-update"
+                "--output-format", "json"
             )
             
     asyncio.run(run_test())
