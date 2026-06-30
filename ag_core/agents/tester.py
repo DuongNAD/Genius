@@ -5,6 +5,7 @@ from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.scanner.project_scanner import ProjectScanner
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
+from ag_core.utils.code_extract import extract_code
 
 
 class TesterAgent(BaseAgent):
@@ -92,19 +93,11 @@ class TesterAgent(BaseAgent):
             else:
                 output_file = "test_generated.py"
 
-        def _extract_code(txt: str) -> str:
-            import re
-
-            blocks = re.findall(r"```[a-zA-Z0-9_-]*\n(.*?)\n```", txt, re.DOTALL)
-            if blocks:
-                return "\n".join(blocks).strip()
-            return txt.strip()
-
         test_failures_logs = ""
         if output_file != "None":
             # Self-healing loop
             for attempt in range(1, self.max_retries + 1):
-                code_to_write = _extract_code(content)
+                code_to_write = extract_code(content)
                 try:
                     dir_name = os.path.dirname(output_file)
                     if dir_name:
@@ -168,7 +161,7 @@ class TesterAgent(BaseAgent):
                     )
 
             # Make sure the final clean code without evidence remains written in output_file
-            code_to_write = _extract_code(content)
+            code_to_write = extract_code(content)
             try:
                 with open(output_file, "w", encoding="utf-8") as f:
                     f.write(code_to_write)

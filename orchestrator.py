@@ -10,6 +10,7 @@ import httpx
 import re
 import shutil
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+from ag_core.utils.code_extract import extract_code
 
 
 def parse_design_for_files(design_content: str) -> list:
@@ -62,13 +63,6 @@ def parse_design_for_files(design_content: str) -> list:
             files.append({"path": filepath, "specification": block.strip()})
 
     return files
-
-
-def extract_code(content: str) -> str:
-    blocks = re.findall(r"```[a-zA-Z0-9_-]*\n(.*?)\n```", content, re.DOTALL)
-    if blocks:
-        return "\n".join(blocks).strip()
-    return content.strip()
 
 
 async def run_subprocess(cmd: list, env: dict = None) -> tuple[int, str]:
