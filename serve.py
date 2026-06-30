@@ -578,7 +578,18 @@ async def main_async():
         default=8000,
         help="Port to run the central hub service on",
     )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Run preflight checks (CLI resolution, auth, SKILL_API_KEY) and exit",
+    )
     args = parser.parse_args()
+
+    if getattr(args, "doctor", False) is True:
+        from ag_core.diagnostics import run_doctor_report_async
+
+        code = await run_doctor_report_async()
+        raise SystemExit(code)
 
     auto_pilot = getattr(args, "auto_pilot", False) is True
     interactive = getattr(args, "interactive", False) is True
