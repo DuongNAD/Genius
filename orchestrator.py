@@ -41,6 +41,16 @@ async def gather_or_raise(*awaitables):
     return results
 
 
+def degraded_mode() -> bool:
+    """Opt-in resilience: when ``GENIUS_DEGRADED_MODE`` is truthy, the pipeline
+    keeps producing partial artifacts instead of aborting when a non-critical
+    stage fails (some files fail to verify, or the DevOps/deploy stage errors).
+
+    Off by default so CI and normal runs keep strict fail-fast semantics.
+    """
+    return os.getenv("GENIUS_DEGRADED_MODE", "").lower() in ("1", "true", "yes")
+
+
 def write_progress_md(progress_file_path: str, status_dict: dict) -> None:
     """Write the per-file pipeline progress as a markdown checklist. Failures
     are logged but non-fatal."""
@@ -1594,13 +1604,30 @@ async def run_pipeline(
                 else:
                     aggregated_audits.append(f"### Audit for {file_path}\n\n{result}")
 
-            if failed_files:
+            all_failed = len(failed_files) == len(files_to_implement)
+            if failed_files and not (degraded_mode() and not all_failed):
                 raise PipelineError(
                     f"Self-healing loop failed to implement and verify files: {', '.join(failed_files)}"
                 )
+            if failed_files:
+                logger.warning(
+                    "Degraded mode: %d/%d files failed verification; continuing "
+                    "with the rest. Failed: %s",
+                    len(failed_files),
+                    len(files_to_implement),
+                    ", ".join(failed_files),
+                )
 
             # Write review.md as implementation is verified
-            review_content = "All files successfully implemented and verified through self-healing loop."
+            if failed_files:
+                verified = len(files_to_implement) - len(failed_files)
+                review_content = (
+                    f"Degraded run: {verified}/{len(files_to_implement)} files "
+                    f"verified through the self-healing loop. "
+                    f"Failed: {', '.join(failed_files)}."
+                )
+            else:
+                review_content = "All files successfully implemented and verified through self-healing loop."
             review_art_id = message_bus.publish(
                 Artifact(
                     name="review_data",
@@ -1660,14 +1687,28 @@ async def run_pipeline(
                 current_context = {}
             current_context["audit.md"] = devops_prompt
 
-            devops_content = await call_api(
-                devops_url,
-                api_key,
-                devops_prompt,
-                context=current_context,
-                client=client,
-                poll_timeout=poll_timeout,
-            )
+            try:
+                devops_content = await call_api(
+                    devops_url,
+                    api_key,
+                    devops_prompt,
+                    context=current_context,
+                    client=client,
+                    poll_timeout=poll_timeout,
+                )
+            except Exception as e:
+                if not degraded_mode():
+                    raise
+                logger.error(
+                    "Degraded mode: DevOps stage failed, emitting a placeholder "
+                    "deploy artifact and continuing: %s",
+                    e,
+                )
+                devops_content = (
+                    "# DevOps stage unavailable (degraded mode)\n\n"
+                    "The DevOps/deploy stage failed and was skipped; the code and "
+                    f"audit artifacts above are still valid.\n\nError: {e}\n"
+                )
 
             # Publish DevOps to MessageBus
             message_bus.publish(
