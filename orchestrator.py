@@ -28,6 +28,51 @@ def make_http_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(limits=limits, timeout=timeout)
 
 
+def write_progress_md(progress_file_path: str, status_dict: dict) -> None:
+    """Write the per-file pipeline progress as a markdown checklist. Failures
+    are logged but non-fatal."""
+    try:
+        os.makedirs(os.path.dirname(progress_file_path), exist_ok=True)
+        with open(progress_file_path, "w", encoding="utf-8") as f:
+            f.write("# Current Progress\n\n")
+            for path, status in status_dict.items():
+                f.write(f"- {path}: {status}\n")
+    except Exception as e:
+        logger.warning(f"Failed to update CURRENT_PROG.md: {e}")
+
+
+def _resolve_pipeline_setup(prompt, workspace, max_debate_rounds):
+    """Shared pipeline preamble: resolve the debate-round default (0 under
+    pytest), validate the prompt, derive the project name from the prompt, and
+    default the workspace to cwd. Returns (project_name, workspace,
+    max_debate_rounds). Raises PipelineError on an empty prompt."""
+    if max_debate_rounds is None:
+        if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+            max_debate_rounds = 0
+        else:
+            max_debate_rounds = 2
+
+    if not prompt or not prompt.strip():
+        raise PipelineError("Prompt cannot be empty.")
+
+    slugified = re.sub(r"[^a-zA-Z0-9]+", "_", prompt.strip().lower()).strip("_")
+    if not slugified:
+        project_name = "default_project"
+    elif len(slugified) > 50:
+        project_name = (
+            slugified[:40]
+            + "_"
+            + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
+        )
+    else:
+        project_name = slugified
+
+    if workspace is None:
+        workspace = os.getcwd()
+
+    return project_name, workspace, max_debate_rounds
+
+
 def parse_design_for_files(design_content: str) -> list:
     """
     Parses design_content for a list of files to implement.
@@ -1174,29 +1219,9 @@ async def run_pipeline(
     global DISTRIBUTED_MODE
     DISTRIBUTED_MODE = distributed
 
-    if max_debate_rounds is None:
-        if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
-            max_debate_rounds = 0
-        else:
-            max_debate_rounds = 2
-
-    if not prompt or not prompt.strip():
-        raise PipelineError("Prompt cannot be empty.")
-
-    slugified = re.sub(r"[^a-zA-Z0-9]+", "_", prompt.strip().lower()).strip("_")
-    if not slugified:
-        project_name = "default_project"
-    elif len(slugified) > 50:
-        project_name = (
-            slugified[:40]
-            + "_"
-            + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
-        )
-    else:
-        project_name = slugified
-
-    if workspace is None:
-        workspace = os.getcwd()
+    project_name, workspace, max_debate_rounds = _resolve_pipeline_setup(
+        prompt, workspace, max_debate_rounds
+    )
 
     project_dir = os.path.join(workspace, "projects", project_name)
     os.makedirs(os.path.join(project_dir, "src"), exist_ok=True)
@@ -1499,14 +1524,7 @@ async def run_pipeline(
             progress_file_path = os.path.join(workspace, ".agents", "CURRENT_PROG.md")
 
             def update_progress_md(status_dict):
-                try:
-                    os.makedirs(os.path.dirname(progress_file_path), exist_ok=True)
-                    with open(progress_file_path, "w", encoding="utf-8") as f:
-                        f.write("# Current Progress\n\n")
-                        for path, status in status_dict.items():
-                            f.write(f"- {path}: {status}\n")
-                except Exception as e:
-                    logger.warning(f"Failed to update CURRENT_PROG.md: {e}")
+                write_progress_md(progress_file_path, status_dict)
 
             status_dict = {f["path"]: "pending" for f in files_to_implement}
             update_progress_md(status_dict)
@@ -1971,29 +1989,9 @@ async def run_e2e_pipeline(
     global DISTRIBUTED_MODE
     DISTRIBUTED_MODE = distributed
 
-    if max_debate_rounds is None:
-        if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
-            max_debate_rounds = 0
-        else:
-            max_debate_rounds = 2
-
-    if not prompt or not prompt.strip():
-        raise PipelineError("Prompt cannot be empty.")
-
-    slugified = re.sub(r"[^a-zA-Z0-9]+", "_", prompt.strip().lower()).strip("_")
-    if not slugified:
-        project_name = "default_project"
-    elif len(slugified) > 50:
-        project_name = (
-            slugified[:40]
-            + "_"
-            + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
-        )
-    else:
-        project_name = slugified
-
-    if workspace is None:
-        workspace = os.getcwd()
+    project_name, workspace, max_debate_rounds = _resolve_pipeline_setup(
+        prompt, workspace, max_debate_rounds
+    )
 
     project_dir = os.path.join(workspace, "projects", project_name)
     os.makedirs(os.path.join(project_dir, "src"), exist_ok=True)
@@ -2119,14 +2117,7 @@ async def run_e2e_pipeline(
         progress_file_path = os.path.join(workspace, "CURRENT_PROG.md")
 
         def update_progress_md(status_dict):
-            try:
-                os.makedirs(os.path.dirname(progress_file_path), exist_ok=True)
-                with open(progress_file_path, "w", encoding="utf-8") as f:
-                    f.write("# Current Progress\n\n")
-                    for path, status in status_dict.items():
-                        f.write(f"- {path}: {status}\n")
-            except Exception as e:
-                logger.warning(f"Failed to update CURRENT_PROG.md: {e}")
+            write_progress_md(progress_file_path, status_dict)
 
         status_dict = {f["path"]: "pending" for f in files_to_implement}
         update_progress_md(status_dict)
