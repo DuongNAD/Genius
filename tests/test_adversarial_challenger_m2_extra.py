@@ -1,5 +1,4 @@
 # tests/test_adversarial_challenger_m2_extra.py
-import os
 import asyncio
 import json
 import time
@@ -8,12 +7,10 @@ import pytest
 import pytest_asyncio
 import websockets
 import uvicorn
-from unittest.mock import patch, AsyncMock
 
 import serve as serve_mod
 from serve import app, worker_registry, pending_tasks
-from orchestrator import call_api, PipelineError
-from ag_core.distributed.worker import ClientWorker
+from orchestrator import call_api
 from ag_core.utils.jwt import encode_jwt
 
 JWT_SECRET = "mock-skill-key"

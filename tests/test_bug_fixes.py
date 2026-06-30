@@ -1,9 +1,7 @@
 import os
-import sys
 import time
 import json
 import asyncio
-import shutil
 import pytest
 import tempfile
 import weakref
@@ -13,10 +11,9 @@ from unittest.mock import patch, AsyncMock, MagicMock
 from ag_core.utils.jwt import encode_jwt, decode_jwt
 from ag_core.agents.codex_reviewer import CodexReviewerAgent
 from ag_core.providers.anthropic_provider import AnthropicProvider
-from ag_core.providers.grok_provider import GrokProvider
 from ag_core.providers.openai_provider import OpenAIProvider
 from ag_core.interfaces.base_provider import TokenBucket, wait_retry_after
-from ag_core.utils.db import enqueue_db_write, init_db, get_db_path
+from ag_core.utils.db import enqueue_db_write, init_db
 from ag_core.utils.message_bus import MessageBus, Artifact
 from ag_core.utils.rate_limiter import TokenBucketRateLimiter
 from ag_core.scanner.project_scanner import ProjectChunker

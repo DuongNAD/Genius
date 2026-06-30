@@ -10,7 +10,7 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from ag_core.utils.jwt import encode_jwt
 from ag_core.distributed import CentralHub, ClientWorker
-from test_distributed import MockNetworkProtocol, call_api_with_retry
+from test_distributed import MockNetworkProtocol
 from serve import app, worker_registry
 
 JWT_SECRET = os.getenv("SKILL_API_KEY", "mock-skill-key")

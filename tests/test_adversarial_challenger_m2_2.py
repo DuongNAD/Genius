@@ -1,5 +1,4 @@
 # tests/test_adversarial_challenger_m2_2.py
-import os
 import asyncio
 import json
 import time
@@ -9,7 +8,6 @@ import pytest
 import pytest_asyncio
 import websockets
 import uvicorn
-from unittest.mock import patch, AsyncMock, MagicMock
 
 import serve as serve_mod
 from serve import app, worker_registry, pending_tasks, WorkerDisconnectedError
