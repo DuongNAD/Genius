@@ -5,6 +5,7 @@ import asyncio
 from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
+from ag_core.utils.cli_resolver import which_external
 
 
 class AnthropicProvider(BaseProvider):
@@ -39,7 +40,7 @@ class AnthropicProvider(BaseProvider):
             extra.update(kwargs)
             sys_prompt = extra.pop("system", None) or system
 
-            cli_path = shutil.which("claude")
+            cli_path = which_external("claude")
             if not cli_path:
                 appdata = os.getenv("APPDATA")
                 if appdata:

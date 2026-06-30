@@ -1,9 +1,30 @@
 import asyncio
 import json
+import os
 from unittest.mock import AsyncMock, patch
-from ag_core.providers.openai_provider import OpenAIProvider
+from ag_core.providers.openai_provider import OpenAIProvider, _newest
 from ag_core.providers.anthropic_provider import AnthropicProvider
 from ag_core.providers.grok_provider import GrokProvider
+
+
+def test_newest_picks_most_recent_codex_and_tolerates_missing(tmp_path):
+    # The Codex desktop app can leave several content-addressed bin/<hash> dirs
+    # behind after an update; _newest must select the freshest codex.exe.
+    old = tmp_path / "old" / "codex.exe"
+    new = tmp_path / "new" / "codex.exe"
+    old.parent.mkdir()
+    new.parent.mkdir()
+    old.write_text("")
+    new.write_text("")
+    os.utime(old, (1_000_000, 1_000_000))
+    os.utime(new, (2_000_000, 2_000_000))
+
+    assert _newest([str(old), str(new)]) == str(new)
+    assert _newest([str(new), str(old)]) == str(new)
+    # A path that no longer exists must sort last, never raise.
+    missing = str(tmp_path / "gone" / "codex.exe")
+    assert _newest([missing, str(old)]) == str(old)
+    assert _newest([missing]) == missing
 
 
 def test_openai_provider_success():

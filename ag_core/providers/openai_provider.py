@@ -5,6 +5,26 @@ import asyncio
 from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
+from ag_core.utils.cli_resolver import which_external
+
+
+def _newest(paths):
+    """Return the most recently modified path, tolerating ones that don't exist.
+
+    The Codex desktop app keeps binaries in content-addressed ``bin/<hash>``
+    dirs and leaves stale ones behind after an update, so several ``codex.exe``
+    copies can coexist; pick the newest. ``getmtime`` is guarded so a path that
+    vanished (or a mocked, non-existent path in tests) sorts last instead of
+    raising.
+    """
+
+    def mtime(p):
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return 0.0
+
+    return max(paths, key=mtime)
 
 
 class OpenAIProvider(BaseProvider):
@@ -40,7 +60,7 @@ class OpenAIProvider(BaseProvider):
             # Locate codex prioritized in PATH, then fallbacks
             import shutil
 
-            cli_path = shutil.which("codex") or shutil.which("codex.exe")
+            cli_path = which_external("codex") or which_external("codex.exe")
 
             if not cli_path:
                 localappdata = os.environ.get("LOCALAPPDATA")
@@ -50,7 +70,7 @@ class OpenAIProvider(BaseProvider):
                     )
                     matches1 = glob.glob(pattern1)
                     if matches1:
-                        cli_path = matches1[0]
+                        cli_path = _newest(matches1)
 
                 if not cli_path and localappdata:
                     candidate2 = os.path.join(
@@ -72,7 +92,7 @@ class OpenAIProvider(BaseProvider):
                         )
                         matches3 = glob.glob(pattern3)
                         if matches3:
-                            cli_path = matches3[0]
+                            cli_path = _newest(matches3)
 
                 if not cli_path:
                     cli_path = "codex" if os.name != "nt" else "codex.exe"
