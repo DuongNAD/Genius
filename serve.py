@@ -490,6 +490,23 @@ def get_api_app(role: str):
     return module.app
 
 
+def _resolve_registry_path() -> str:
+    """Resolve the service-registry path and ensure its parent dir exists.
+
+    An empty ``GENIUS_SERVICE_REGISTRY`` (as shipped blank in ``.env.example``
+    and loaded into ``os.environ`` by python-dotenv) must be treated as unset;
+    otherwise ``os.path.dirname("")`` is ``""`` and ``os.makedirs("")`` raises
+    ``FileNotFoundError`` on Windows, crashing every agent server on startup.
+    """
+    registry_path = os.environ.get("GENIUS_SERVICE_REGISTRY") or os.path.join(
+        root_dir, ".agents", "service_registry.json"
+    )
+    registry_dir = os.path.dirname(registry_path)
+    if registry_dir:
+        os.makedirs(registry_dir, exist_ok=True)
+    return registry_path
+
+
 async def start_server(role: str, port: int):
     app = get_api_app(role)
 
@@ -521,11 +538,7 @@ async def start_server(role: str, port: int):
     if not bound_port:
         bound_port = server.config.port
 
-    registry_path = os.environ.get(
-        "GENIUS_SERVICE_REGISTRY",
-        os.path.join(root_dir, ".agents", "service_registry.json"),
-    )
-    os.makedirs(os.path.dirname(registry_path), exist_ok=True)
+    registry_path = _resolve_registry_path()
 
     registry = {}
     if os.path.exists(registry_path):
