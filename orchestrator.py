@@ -1023,6 +1023,18 @@ def resolve_debate_rounds(max_debate_rounds):
     return 2
 
 
+def write_progress_md(progress_file_path, status_dict):
+    """Write the per-file pipeline progress to CURRENT_PROG.md."""
+    try:
+        os.makedirs(os.path.dirname(progress_file_path), exist_ok=True)
+        with open(progress_file_path, "w", encoding="utf-8") as f:
+            f.write("# Current Progress\n\n")
+            for path, status in status_dict.items():
+                f.write(f"- {path}: {status}\n")
+    except Exception as e:
+        logger.warning(f"Failed to update CURRENT_PROG.md: {e}")
+
+
 async def run_pipeline(
     prompt: str,
     grok_cmd: str = "grok",
@@ -1366,14 +1378,7 @@ async def run_pipeline(
             progress_file_path = os.path.join(workspace, ".agents", "CURRENT_PROG.md")
 
             def update_progress_md(status_dict):
-                try:
-                    os.makedirs(os.path.dirname(progress_file_path), exist_ok=True)
-                    with open(progress_file_path, "w", encoding="utf-8") as f:
-                        f.write("# Current Progress\n\n")
-                        for path, status in status_dict.items():
-                            f.write(f"- {path}: {status}\n")
-                except Exception as e:
-                    logger.warning(f"Failed to update CURRENT_PROG.md: {e}")
+                write_progress_md(progress_file_path, status_dict)
 
             status_dict = {f["path"]: "pending" for f in files_to_implement}
             update_progress_md(status_dict)
@@ -1955,14 +1960,7 @@ async def run_e2e_pipeline(
         progress_file_path = os.path.join(workspace, "CURRENT_PROG.md")
 
         def update_progress_md(status_dict):
-            try:
-                os.makedirs(os.path.dirname(progress_file_path), exist_ok=True)
-                with open(progress_file_path, "w", encoding="utf-8") as f:
-                    f.write("# Current Progress\n\n")
-                    for path, status in status_dict.items():
-                        f.write(f"- {path}: {status}\n")
-            except Exception as e:
-                logger.warning(f"Failed to update CURRENT_PROG.md: {e}")
+            write_progress_md(progress_file_path, status_dict)
 
         status_dict = {f["path"]: "pending" for f in files_to_implement}
         update_progress_md(status_dict)
