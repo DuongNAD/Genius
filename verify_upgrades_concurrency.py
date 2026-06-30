@@ -229,9 +229,7 @@ async def test_orchestrator_concurrency_bounds():
     # We patch call_api, ProjectScanner, and os/file write operations to make it run fast
     with patch("orchestrator.call_api", side_effect=mock_call_api), patch(
         "orchestrator.ProjectScanner"
-    ), patch(
-        "orchestrator.load_config", return_value=mock_config
-    ), patch(
+    ), patch("orchestrator.load_config", return_value=mock_config), patch(
         "orchestrator.parse_design_for_files", return_value=files_to_implement
     ), patch(
         "orchestrator.run_subprocess", return_value=(0, "Pytest passed")

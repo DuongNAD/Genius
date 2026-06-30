@@ -82,7 +82,9 @@ class BaseAgent(abc.ABC):
 
             config = getattr(self, "config", None)
             exclude_patterns = config.scanner.exclude_patterns if config else None
-            scanner = ProjectScanner(root_dir=os.getcwd(), extra_ignores=exclude_patterns)
+            scanner = ProjectScanner(
+                root_dir=os.getcwd(), extra_ignores=exclude_patterns
+            )
             scanned_files = scanner.scan()
 
         context = ""
