@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
 from ag_core.utils.cli_resolver import which_external
+from ag_core.utils.cli_runner import communicate_with_timeout, explain_cli_failure
 
 
 def _newest(paths):
@@ -25,6 +26,50 @@ def _newest(paths):
             return 0.0
 
     return max(paths, key=mtime)
+
+
+def resolve_codex_cli() -> str:
+    """Resolve the Codex CLI path (PATH, then Codex desktop install dirs).
+
+    Shared by send_prompt and the ``--doctor`` preflight. Never returns the
+    bundled repo wrapper (``which_external`` excludes it).
+    """
+    cli_path = which_external("codex") or which_external("codex.exe")
+    if not cli_path:
+        localappdata = os.environ.get("LOCALAPPDATA")
+        if localappdata:
+            pattern1 = os.path.join(
+                localappdata, "OpenAI", "Codex", "bin", "*", "codex.exe"
+            )
+            matches1 = glob.glob(pattern1)
+            if matches1:
+                cli_path = _newest(matches1)
+
+        if not cli_path and localappdata:
+            candidate2 = os.path.join(
+                localappdata, "Microsoft", "WindowsApps", "codex.exe"
+            )
+            if os.path.exists(candidate2):
+                cli_path = candidate2
+
+        if not cli_path:
+            program_files = os.environ.get("ProgramFiles")
+            if program_files:
+                pattern3 = os.path.join(
+                    program_files,
+                    "WindowsApps",
+                    "OpenAI.Codex_*",
+                    "app",
+                    "resources",
+                    "codex.exe",
+                )
+                matches3 = glob.glob(pattern3)
+                if matches3:
+                    cli_path = _newest(matches3)
+
+        if not cli_path:
+            cli_path = "codex" if os.name != "nt" else "codex.exe"
+    return cli_path
 
 
 class OpenAIProvider(BaseProvider):
@@ -57,45 +102,10 @@ class OpenAIProvider(BaseProvider):
             extra.update(kwargs)
             sys_prompt = extra.pop("system", None) or system
 
-            # Locate codex prioritized in PATH, then fallbacks
+            # Locate codex prioritized in PATH, then Codex desktop install dirs
             import shutil
 
-            cli_path = which_external("codex") or which_external("codex.exe")
-
-            if not cli_path:
-                localappdata = os.environ.get("LOCALAPPDATA")
-                if localappdata:
-                    pattern1 = os.path.join(
-                        localappdata, "OpenAI", "Codex", "bin", "*", "codex.exe"
-                    )
-                    matches1 = glob.glob(pattern1)
-                    if matches1:
-                        cli_path = _newest(matches1)
-
-                if not cli_path and localappdata:
-                    candidate2 = os.path.join(
-                        localappdata, "Microsoft", "WindowsApps", "codex.exe"
-                    )
-                    if os.path.exists(candidate2):
-                        cli_path = candidate2
-
-                if not cli_path:
-                    program_files = os.environ.get("ProgramFiles")
-                    if program_files:
-                        pattern3 = os.path.join(
-                            program_files,
-                            "WindowsApps",
-                            "OpenAI.Codex_*",
-                            "app",
-                            "resources",
-                            "codex.exe",
-                        )
-                        matches3 = glob.glob(pattern3)
-                        if matches3:
-                            cli_path = _newest(matches3)
-
-                if not cli_path:
-                    cli_path = "codex" if os.name != "nt" else "codex.exe"
+            cli_path = resolve_codex_cli()
 
             if sys_prompt:
                 prompt = f"{sys_prompt}\n\n{prompt}"
@@ -148,12 +158,14 @@ class OpenAIProvider(BaseProvider):
                     )
                 else:
                     raise
-            stdout, stderr = await process.communicate(input=prompt_bytes)
+            stdout, stderr = await communicate_with_timeout(
+                process, input=prompt_bytes, cli_name="Codex CLI"
+            )
 
             if isinstance(process.returncode, int) and process.returncode != 0:
                 stderr_str = stderr.decode("utf-8", errors="ignore").strip()
                 raise RuntimeError(
-                    f"Codex CLI failed with exit code {process.returncode}: {stderr_str}"
+                    explain_cli_failure("Codex CLI", process.returncode, stderr_str)
                 )
 
             stdout_str = stdout.decode("utf-8", errors="ignore")

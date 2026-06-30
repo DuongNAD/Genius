@@ -6,6 +6,32 @@ from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
 from ag_core.utils.cli_resolver import which_external
+from ag_core.utils.cli_runner import communicate_with_timeout, explain_cli_failure
+
+
+def resolve_claude_cli() -> str:
+    """Resolve the real Claude CLI path, never the bundled repo wrapper.
+
+    Shared by send_prompt and the ``--doctor`` preflight.
+    """
+    cli_path = which_external("claude")
+    if not cli_path:
+        appdata = os.getenv("APPDATA")
+        if appdata:
+            fallback = os.path.join(appdata, "npm", "claude.cmd")
+            if os.path.exists(fallback):
+                cli_path = fallback
+    if not cli_path:
+        userprofile = os.getenv("USERPROFILE")
+        if userprofile:
+            fallback = os.path.join(
+                userprofile, "AppData", "Roaming", "npm", "claude.cmd"
+            )
+            if os.path.exists(fallback):
+                cli_path = fallback
+    if not cli_path:
+        cli_path = "claude"
+    return cli_path
 
 
 class AnthropicProvider(BaseProvider):
@@ -40,23 +66,7 @@ class AnthropicProvider(BaseProvider):
             extra.update(kwargs)
             sys_prompt = extra.pop("system", None) or system
 
-            cli_path = which_external("claude")
-            if not cli_path:
-                appdata = os.getenv("APPDATA")
-                if appdata:
-                    fallback = os.path.join(appdata, "npm", "claude.cmd")
-                    if os.path.exists(fallback):
-                        cli_path = fallback
-            if not cli_path:
-                userprofile = os.getenv("USERPROFILE")
-                if userprofile:
-                    fallback = os.path.join(
-                        userprofile, "AppData", "Roaming", "npm", "claude.cmd"
-                    )
-                    if os.path.exists(fallback):
-                        cli_path = fallback
-            if not cli_path:
-                cli_path = "claude"
+            cli_path = resolve_claude_cli()
 
             import tempfile
             import sys
@@ -119,13 +129,21 @@ class AnthropicProvider(BaseProvider):
                     else:
                         raise
 
-                stdout, stderr = await process.communicate()
+                stdout, stderr = await communicate_with_timeout(
+                    process, cli_name="Claude CLI"
+                )
             finally:
                 if temp_file_path and os.path.exists(temp_file_path):
                     try:
                         os.remove(temp_file_path)
                     except Exception:
                         pass
+
+            if isinstance(process.returncode, int) and process.returncode != 0:
+                stderr_str = stderr.decode("utf-8", errors="ignore").strip()
+                raise RuntimeError(
+                    explain_cli_failure("Claude CLI", process.returncode, stderr_str)
+                )
 
             stdout_str = stdout.decode("utf-8", errors="ignore").strip()
             try:
