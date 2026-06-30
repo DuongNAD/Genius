@@ -5,6 +5,7 @@ from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.scanner.project_scanner import ProjectScanner
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
+from ag_core.utils.code_extract import extract_code
 
 
 class CodexReviewerAgent(BaseAgent):
@@ -103,16 +104,6 @@ class CodexReviewerAgent(BaseAgent):
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
         )
-
-        def _extract_code(txt: str) -> str:
-            import re
-
-            blocks = re.findall(
-                r"```[a-zA-Z0-9_+.\-]*[ \t]*\r?\n(.*?)\r?\n?```", txt, re.DOTALL
-            )
-            if blocks:
-                return max((b.strip() for b in blocks), key=len)
-            return txt.strip()
 
         def _detect_target_file(prompt_str, content_str, scanned_keys):
             import re
@@ -213,7 +204,7 @@ class CodexReviewerAgent(BaseAgent):
                     completion_tokens=usage.get("completion_tokens", 0),
                 )
 
-                code_to_write = _extract_code(content)
+                code_to_write = extract_code(content)
                 if target_file:
                     abs_target_path = os.path.abspath(
                         os.path.join(root_dir, target_file)
