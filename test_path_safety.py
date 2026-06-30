@@ -1,5 +1,6 @@
 """Tests for the path-safety helpers added to harden the orchestrator against
 malicious model-supplied file paths (write-anywhere) and basename collisions."""
+
 import os
 import tempfile
 
@@ -15,14 +16,17 @@ def test_safe_join_allows_normal_relative_path():
     assert result.endswith(os.path.join("src", "main.py"))
 
 
-@pytest.mark.parametrize("bad", [
-    "../evil.py",
-    "../../etc/passwd",
-    "src/../../escape.py",
-    "/etc/passwd",
-    "C:\\Windows\\system32\\x.py",
-    "",
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "../evil.py",
+        "../../etc/passwd",
+        "src/../../escape.py",
+        "/etc/passwd",
+        "C:\\Windows\\system32\\x.py",
+        "",
+    ],
+)
 def test_safe_join_rejects_unsafe_paths(bad):
     base = tempfile.gettempdir()
     with pytest.raises(PipelineError):

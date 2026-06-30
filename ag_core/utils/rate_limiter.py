@@ -4,6 +4,7 @@ import threading
 import asyncio
 from fastapi import HTTPException, status
 
+
 class TokenBucketRateLimiter:
     def __init__(self, rate: float = 10.0, capacity: float = 10.0):
         self.rate = rate
@@ -21,6 +22,7 @@ class TokenBucketRateLimiter:
         with self.lock:
             if not hasattr(self, "_async_locks"):
                 import weakref
+
                 self._async_locks = weakref.WeakKeyDictionary()
             if loop is None:
                 if not hasattr(self, "_none_lock"):
@@ -58,17 +60,21 @@ class TokenBucketRateLimiter:
                     return True
                 return False
 
+
 # Central default rate limiter instance
 limiter = TokenBucketRateLimiter(rate=10.0, capacity=10.0)
 
+
 async def rate_limit_dependency():
     # Bypass rate limiting in standard test runs to prevent rate-limiting rapid sequential test requests.
-    if "PYTEST_CURRENT_TEST" in os.environ and not os.environ.get("ENABLE_RATE_LIMITER"):
+    if "PYTEST_CURRENT_TEST" in os.environ and not os.environ.get(
+        "ENABLE_RATE_LIMITER"
+    ):
         return
 
     if not await limiter.consume_async(1.0):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too Many Requests",
-            headers={"Retry-After": "1"}
+            headers={"Retry-After": "1"},
         )

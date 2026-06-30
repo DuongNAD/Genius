@@ -12,6 +12,7 @@ import orchestrator
 
 # --- 1. Bounds Checks on vector_dim ---
 
+
 def test_vector_dim_bounds_checks():
     """Verify that vector_dim bounds checks throw early ValueError/TypeError on invalid dimensions."""
     # Zero or negative integers must throw ValueError
@@ -39,6 +40,7 @@ def test_vector_dim_bounds_checks():
 
 # --- 2. SQLite WAL Concurrency Under Load ---
 
+
 def test_sqlite_wal_concurrency_load(tmp_path):
     """Verify SQLite WAL concurrency under multi-threaded read/write load."""
     db_file = str(tmp_path / "wal_load.db")
@@ -61,7 +63,7 @@ def test_sqlite_wal_concurrency_load(tmp_path):
             try:
                 memory.add(
                     text=f"Thread {t_idx} document {i} with some content",
-                    metadata={"thread": t_idx, "iteration": i}
+                    metadata={"thread": t_idx, "iteration": i},
                 )
             except Exception as e:
                 errors.append((t_idx, "write", type(e).__name__, str(e)))
@@ -98,12 +100,18 @@ def test_sqlite_wal_concurrency_load(tmp_path):
 
 # --- 3. Missing/Unavailable E: Drive Simulation ---
 
+
 def test_missing_e_drive_simulation():
     """Mock filesystem and sqlite3 functions to assert that no crashes occur when the E: drive is unavailable."""
+
     # Define a helper function to raise OSError for any path on E: drive
     def mock_fs_raise(path, *args, **kwargs):
         path_str = str(path)
-        if "E:" in path_str.upper() or "E:/" in path_str.upper() or "E:\\" in path_str.upper():
+        if (
+            "E:" in path_str.upper()
+            or "E:/" in path_str.upper()
+            or "E:\\" in path_str.upper()
+        ):
             raise OSError(21, "Device not ready (E: drive is simulated as unavailable)")
         return mock_fs_raise.original_exists(path)
 
@@ -130,6 +138,7 @@ def test_missing_e_drive_simulation():
         return sqlite3.connect(":memory:")
 
     import builtins
+
     original_open = builtins.open
 
     def mock_open(file, *args, **kwargs):
@@ -138,14 +147,17 @@ def test_missing_e_drive_simulation():
             raise OSError(21, "Device not ready (E: drive is simulated as unavailable)")
         return original_open(file, *args, **kwargs)
 
-    with patch("os.path.exists", side_effect=mock_fs_raise), \
-         patch("os.makedirs", side_effect=mock_makedirs), \
-         patch("sqlite3.connect", side_effect=mock_sqlite_connect), \
-         patch("builtins.open", side_effect=mock_open):
+    with patch("os.path.exists", side_effect=mock_fs_raise), patch(
+        "os.makedirs", side_effect=mock_makedirs
+    ), patch("sqlite3.connect", side_effect=mock_sqlite_connect), patch(
+        "builtins.open", side_effect=mock_open
+    ):
 
         # Test A: VectorMemory fails cleanly when database is on E:
         with pytest.raises(OSError) as excinfo:
-            VectorMemory(collection_name="missing_e", use_chroma=False, db_path="E:\\genius.db")
+            VectorMemory(
+                collection_name="missing_e", use_chroma=False, db_path="E:\\genius.db"
+            )
         assert "Device not ready" in str(excinfo.value)
 
         # Test B: Orchestrator run_pipeline fails cleanly when workspace is on E:
@@ -154,5 +166,10 @@ def test_missing_e_drive_simulation():
             # We mock the http client post to bypass actual network requests since we are in CODE_ONLY
             with patch("httpx.AsyncClient.post") as mock_post:
                 import asyncio
-                asyncio.run(orchestrator.run_pipeline("build my microservice", workspace="E:\\missing_e_workspace"))
+
+                asyncio.run(
+                    orchestrator.run_pipeline(
+                        "build my microservice", workspace="E:\\missing_e_workspace"
+                    )
+                )
         assert "Device not ready" in str(excinfo_orch.value)

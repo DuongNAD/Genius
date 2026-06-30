@@ -11,7 +11,12 @@ from unittest.mock import patch, MagicMock, AsyncMock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from orchestrator import call_api, run_pipeline, PipelineError, _API_RESPONSE_CACHE
-from ag_core.utils.rate_limiter import TokenBucketRateLimiter, limiter, rate_limit_dependency
+from ag_core.utils.rate_limiter import (
+    TokenBucketRateLimiter,
+    limiter,
+    rate_limit_dependency,
+)
+
 
 @pytest.fixture(autouse=True)
 def enable_genius_cache_and_limiter():
@@ -21,11 +26,13 @@ def enable_genius_cache_and_limiter():
     os.environ.pop("ENABLE_GENIUS_CACHE", None)
     os.environ.pop("ENABLE_RATE_LIMITER", None)
 
+
 @pytest.fixture
 def temp_workspace(tmp_path, monkeypatch):
     """Fixture that moves to a temp directory and returns it as a workspace."""
     monkeypatch.chdir(tmp_path)
     return tmp_path
+
 
 @pytest.mark.asyncio
 async def test_caching_returns_cached_results_instantly():
@@ -43,18 +50,21 @@ async def test_caching_returns_cached_results_instantly():
         status_code=200,
         json={"status": "processing", "task_id": "cache-task-id"},
         headers={"X-Payload-SHA256": "dummy"},
-        request=httpx.Request("POST", f"{url}/run")
+        request=httpx.Request("POST", f"{url}/run"),
     )
     mock_res_get = httpx.Response(
         status_code=200,
         json={"status": "completed", "result": "Expected Cached Result"},
         headers={"X-Payload-SHA256": "dummy"},
-        request=httpx.Request("GET", f"{url}/status/cache-task-id")
+        request=httpx.Request("GET", f"{url}/status/cache-task-id"),
     )
 
-    with patch("orchestrator.perform_post_with_retry", new_callable=AsyncMock) as mock_post, \
-         patch("orchestrator.perform_get_with_retry", new_callable=AsyncMock) as mock_get:
-        
+    with patch(
+        "orchestrator.perform_post_with_retry", new_callable=AsyncMock
+    ) as mock_post, patch(
+        "orchestrator.perform_get_with_retry", new_callable=AsyncMock
+    ) as mock_get:
+
         mock_post.return_value = mock_res_post
         mock_get.return_value = mock_res_get
 
@@ -75,29 +85,32 @@ async def test_caching_returns_cached_results_instantly():
         assert mock_post.call_count == 0
         assert mock_get.call_count == 0
 
+
 def test_rate_limiter_token_bucket_thread_safe():
     """Verify thread-safety and correctness of the TokenBucketRateLimiter."""
     tb = TokenBucketRateLimiter(rate=100.0, capacity=5.0)
-    
+
     # Consume 5 tokens -> OK
     for _ in range(5):
         assert tb.consume(1.0) is True
-        
+
     # Consume 6th token -> False
     assert tb.consume(1.0) is False
-    
+
     # Sleep to refill 1 token
     import time
-    time.sleep(0.011) # rate is 100/sec, so 0.01 sec gives 1 token
+
+    time.sleep(0.011)  # rate is 100/sec, so 0.01 sec gives 1 token
     assert tb.consume(1.0) is True
+
 
 def test_rate_limiter_http_429_returned_when_exceeded():
     """Verify FastAPI dependency returns 429 Too Many Requests with Retry-After when rate limit is exceeded."""
     from fastapi import FastAPI, Depends
     from fastapi.testclient import TestClient
-    
+
     app = FastAPI(dependencies=[Depends(rate_limit_dependency)])
-    
+
     @app.get("/test-limit")
     def test_endpoint():
         return {"status": "ok"}
@@ -112,7 +125,7 @@ def test_rate_limiter_http_429_returned_when_exceeded():
     # 1st request -> 200 OK
     res1 = client.get("/test-limit")
     assert res1.status_code == 200
-    
+
     # 2nd request -> 200 OK
     res2 = client.get("/test-limit")
     assert res2.status_code == 200
@@ -123,6 +136,7 @@ def test_rate_limiter_http_429_returned_when_exceeded():
     assert res3.json()["detail"] == "Too Many Requests"
     assert "Retry-After" in res3.headers
     assert res3.headers["Retry-After"] == "1"
+
 
 @pytest.mark.asyncio
 @patch("httpx.AsyncClient")
@@ -146,19 +160,22 @@ async def test_connection_pool_settings(mock_exec, mock_client_class, temp_works
         status_code=200,
         json={"status": "processing", "task_id": "test-task-id"},
         headers={"X-Payload-SHA256": "dummy"},
-        request=httpx.Request("POST", "http://localhost:8001/run")
+        request=httpx.Request("POST", "http://localhost:8001/run"),
     )
     # Mock get response
     mock_res_get = httpx.Response(
         status_code=200,
         json={"status": "completed", "result": "mock results"},
         headers={"X-Payload-SHA256": "dummy"},
-        request=httpx.Request("GET", "http://localhost:8001/status/test-task-id")
+        request=httpx.Request("GET", "http://localhost:8001/status/test-task-id"),
     )
 
-    with patch("orchestrator.perform_post_with_retry", new_callable=AsyncMock) as mock_post, \
-         patch("orchestrator.perform_get_with_retry", new_callable=AsyncMock) as mock_get:
-        
+    with patch(
+        "orchestrator.perform_post_with_retry", new_callable=AsyncMock
+    ) as mock_post, patch(
+        "orchestrator.perform_get_with_retry", new_callable=AsyncMock
+    ) as mock_get:
+
         mock_post.return_value = mock_res_post
         mock_get.return_value = mock_res_get
 
@@ -169,7 +186,7 @@ async def test_connection_pool_settings(mock_exec, mock_client_class, temp_works
 
     # Verify httpx.AsyncClient constructor arguments
     assert mock_client_class.call_count >= 1
-    
+
     # Inspect the constructor arguments of the client
     # Find the call that configured limits
     found_limits_config = False
@@ -178,13 +195,15 @@ async def test_connection_pool_settings(mock_exec, mock_client_class, temp_works
         if "limits" in kwargs and "timeout" in kwargs:
             limits = kwargs["limits"]
             timeout = kwargs["timeout"]
-            
+
             assert limits.max_keepalive_connections == 50
             assert limits.max_connections == 100
-            
+
             assert timeout.connect == 5.0
             assert timeout.read == 10.0
             found_limits_config = True
             break
-            
-    assert found_limits_config is True, "httpx.AsyncClient was not instantiated with correct pool limits/timeouts"
+
+    assert (
+        found_limits_config is True
+    ), "httpx.AsyncClient was not instantiated with correct pool limits/timeouts"

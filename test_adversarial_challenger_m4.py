@@ -15,9 +15,11 @@ from ag_core.config import MemoryConfig, load_config
 from ag_core.memory.vector_store import VectorMemory
 import serve
 
+
 @pytest.mark.asyncio
 async def test_call_api_zero_timeout():
     """Verify that call_api with 0 or negative poll_timeout raises PipelineError immediately."""
+
     async def mock_post(url, **kwargs):
         res = MagicMock()
         res.status_code = 200
@@ -32,13 +34,15 @@ async def test_call_api_zero_timeout():
                 url="http://localhost:8001",
                 api_key="mock-key",
                 prompt="test prompt",
-                poll_timeout=0.0
+                poll_timeout=0.0,
             )
         assert "timeout" in str(exc_info.value) or "poll_timeout" in str(exc_info.value)
+
 
 @pytest.mark.asyncio
 async def test_call_api_negative_timeout():
     """Verify that call_api with negative poll_timeout raises PipelineError immediately."""
+
     async def mock_post(url, **kwargs):
         res = MagicMock()
         res.status_code = 200
@@ -53,20 +57,21 @@ async def test_call_api_negative_timeout():
                 url="http://localhost:8001",
                 api_key="mock-key",
                 prompt="test prompt",
-                poll_timeout=-5.0
+                poll_timeout=-5.0,
             )
         assert "timeout" in str(exc_info.value) or "poll_timeout" in str(exc_info.value)
+
 
 def test_vector_memory_direct_init_respects_genius_memory_db_path():
     """Verify that direct VectorMemory instantiation respects GENIUS_MEMORY_DB_PATH."""
     old_mem = os.environ.get("GENIUS_MEMORY_DB_PATH")
     old_db = os.environ.get("GENIUS_DB_PATH")
-    
+
     try:
         os.environ["GENIUS_MEMORY_DB_PATH"] = "mem_custom_path.db"
         if "GENIUS_DB_PATH" in os.environ:
             del os.environ["GENIUS_DB_PATH"]
-            
+
         vm = VectorMemory(collection_name="test_direct")
         # Direct initialization should now respect GENIUS_MEMORY_DB_PATH
         assert vm.db_path == "mem_custom_path.db"
@@ -75,11 +80,12 @@ def test_vector_memory_direct_init_respects_genius_memory_db_path():
             os.environ["GENIUS_MEMORY_DB_PATH"] = old_mem
         elif "GENIUS_MEMORY_DB_PATH" in os.environ:
             del os.environ["GENIUS_MEMORY_DB_PATH"]
-            
+
         if old_db is not None:
             os.environ["GENIUS_DB_PATH"] = old_db
         elif "GENIUS_DB_PATH" in os.environ:
             del os.environ["GENIUS_DB_PATH"]
+
 
 @pytest.mark.asyncio
 async def test_serve_cli_prompt_does_not_block_and_defaults_role():
@@ -87,20 +93,24 @@ async def test_serve_cli_prompt_does_not_block_and_defaults_role():
     mock_args = MagicMock()
     mock_args.roles = None
     mock_args.prompt = "my prompt"
-    
-    with patch("argparse.ArgumentParser.parse_args", return_value=mock_args), \
-         patch("serve.interactive_prompt") as mock_interactive, \
-         patch("serve.run_pipeline", new_callable=AsyncMock) as mock_run_pipeline, \
-         patch("serve.start_server", new_callable=AsyncMock) as mock_start_server:
-        
+
+    with patch("argparse.ArgumentParser.parse_args", return_value=mock_args), patch(
+        "serve.interactive_prompt"
+    ) as mock_interactive, patch(
+        "serve.run_pipeline", new_callable=AsyncMock
+    ) as mock_run_pipeline, patch(
+        "serve.start_server", new_callable=AsyncMock
+    ) as mock_start_server:
+
         await serve.main_async()
         mock_interactive.assert_not_called()
         mock_run_pipeline.assert_called_once_with("my prompt")
 
+
 def test_fastapi_lifespans():
     """Test that all FastAPI apps can start/stop their lifespans cleanly using TestClient."""
     from serve import get_api_app
-    
+
     roles = ["grok", "claude", "codex", "tester", "security", "devops", "dashboard"]
     for role in roles:
         try:

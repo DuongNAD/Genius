@@ -115,7 +115,7 @@ class OpenAIProvider(BaseProvider):
                     *actual_cmd,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                    stderr=asyncio.subprocess.PIPE,
                 )
             except OSError:
                 if sys.platform == "win32" and actual_cmd == cmd:
@@ -124,7 +124,7 @@ class OpenAIProvider(BaseProvider):
                         *actual_cmd,
                         stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
+                        stderr=asyncio.subprocess.PIPE,
                     )
                 else:
                     raise

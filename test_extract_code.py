@@ -1,10 +1,14 @@
 """Tests for the hardened extract_code parser used to materialize agent output
 into source files (Phase 2 B3)."""
+
 from orchestrator import extract_code
 
 
 def test_single_block():
-    assert extract_code("```python\ndef f():\n    return 1\n```") == "def f():\n    return 1"
+    assert (
+        extract_code("```python\ndef f():\n    return 1\n```")
+        == "def f():\n    return 1"
+    )
 
 
 def test_returns_largest_block_not_joined():
@@ -16,7 +20,9 @@ def test_returns_largest_block_not_joined():
     )
     result = extract_code(content)
     assert result == "def f():\n    return 42\n    # real impl"
-    assert "f()\n" not in result.splitlines()[0]  # the tiny usage block is not prepended
+    assert (
+        "f()\n" not in result.splitlines()[0]
+    )  # the tiny usage block is not prepended
 
 
 def test_tolerates_missing_trailing_newline():

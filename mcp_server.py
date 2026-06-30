@@ -25,35 +25,56 @@ from ag_core.agents.devops_agent import DevOpsAgent
 
 app = FastAPI(title="Genius MCP Server")
 
+
 class CallToolRequest(BaseModel):
     name: str
     arguments: Dict[str, Any]
 
-async def execute_agent(agent_name: str, prompt: str, context: Dict[str, str] = None) -> str:
+
+async def execute_agent(
+    agent_name: str, prompt: str, context: Dict[str, str] = None
+) -> str:
     config = load_config()
     if agent_name == "research":
-        provider = GrokProvider(api_key=config.grok_api_key, model_name=config.models.grok)
-        agent = GrokResearcherAgent(provider=provider, config=config, output_file="None")
+        provider = GrokProvider(
+            api_key=config.grok_api_key, model_name=config.models.grok
+        )
+        agent = GrokResearcherAgent(
+            provider=provider, config=config, output_file="None"
+        )
     elif agent_name == "design":
-        provider = AnthropicProvider(api_key=config.anthropic_api_key, model_name=config.models.anthropic)
-        agent = ClaudeArchitectAgent(provider=provider, config=config, output_file="None")
+        provider = AnthropicProvider(
+            api_key=config.anthropic_api_key, model_name=config.models.anthropic
+        )
+        agent = ClaudeArchitectAgent(
+            provider=provider, config=config, output_file="None"
+        )
     elif agent_name == "code":
-        provider = OpenAIProvider(api_key=config.openai_api_key, model_name=config.models.openai)
+        provider = OpenAIProvider(
+            api_key=config.openai_api_key, model_name=config.models.openai
+        )
         agent = CodexReviewerAgent(provider=provider, config=config, output_file="None")
         prompt = f"/code {prompt}"
     elif agent_name == "unit_test":
-        provider = OpenAIProvider(api_key=config.openai_api_key, model_name=config.models.openai)
+        provider = OpenAIProvider(
+            api_key=config.openai_api_key, model_name=config.models.openai
+        )
         agent = TesterAgent(provider=provider, config=config, output_file="None")
     elif agent_name == "security_audit":
-        provider = OpenAIProvider(api_key=config.openai_api_key, model_name=config.models.openai)
+        provider = OpenAIProvider(
+            api_key=config.openai_api_key, model_name=config.models.openai
+        )
         agent = SecurityAgent(provider=provider, config=config, output_file="None")
     elif agent_name == "deploy":
-        provider = AnthropicProvider(api_key=config.anthropic_api_key, model_name=config.models.anthropic)
+        provider = AnthropicProvider(
+            api_key=config.anthropic_api_key, model_name=config.models.anthropic
+        )
         agent = DevOpsAgent(provider=provider, config=config, output_file="None")
     else:
         raise ValueError(f"Unknown agent: {agent_name}")
-        
+
     return await agent.run(prompt=prompt, context_data=context)
+
 
 TOOLS = [
     {
@@ -62,11 +83,17 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "The research query or topic"},
-                "context": {"type": "object", "description": "Optional file context as dict of filepath -> content"}
+                "prompt": {
+                    "type": "string",
+                    "description": "The research query or topic",
+                },
+                "context": {
+                    "type": "object",
+                    "description": "Optional file context as dict of filepath -> content",
+                },
             },
-            "required": ["prompt"]
-        }
+            "required": ["prompt"],
+        },
     },
     {
         "name": "design",
@@ -74,11 +101,14 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "The system design description or requirements"},
-                "context": {"type": "object", "description": "Optional file context"}
+                "prompt": {
+                    "type": "string",
+                    "description": "The system design description or requirements",
+                },
+                "context": {"type": "object", "description": "Optional file context"},
             },
-            "required": ["prompt"]
-        }
+            "required": ["prompt"],
+        },
     },
     {
         "name": "code",
@@ -86,11 +116,17 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "The coding requirements or specification"},
-                "context": {"type": "object", "description": "Optional existing files context"}
+                "prompt": {
+                    "type": "string",
+                    "description": "The coding requirements or specification",
+                },
+                "context": {
+                    "type": "object",
+                    "description": "Optional existing files context",
+                },
             },
-            "required": ["prompt"]
-        }
+            "required": ["prompt"],
+        },
     },
     {
         "name": "unit_test",
@@ -98,11 +134,14 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "Code content or test description"},
-                "context": {"type": "object", "description": "Optional context"}
+                "prompt": {
+                    "type": "string",
+                    "description": "Code content or test description",
+                },
+                "context": {"type": "object", "description": "Optional context"},
             },
-            "required": ["prompt"]
-        }
+            "required": ["prompt"],
+        },
     },
     {
         "name": "security_audit",
@@ -110,11 +149,14 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "Code content or security concerns to audit"},
-                "context": {"type": "object", "description": "Optional context"}
+                "prompt": {
+                    "type": "string",
+                    "description": "Code content or security concerns to audit",
+                },
+                "context": {"type": "object", "description": "Optional context"},
             },
-            "required": ["prompt"]
-        }
+            "required": ["prompt"],
+        },
     },
     {
         "name": "deploy",
@@ -123,41 +165,56 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "prompt": {"type": "string", "description": "Deployment requirements"},
-                "context": {"type": "object", "description": "Optional context"}
+                "context": {"type": "object", "description": "Optional context"},
             },
-            "required": ["prompt"]
-        }
+            "required": ["prompt"],
+        },
     },
     {
         "name": "orchestrate",
-        "description": ("Run the FULL multi-agent pipeline (research -> design -> code -> "
-                        "test + security + deploy) for a build request. Returns a job_id "
-                        "immediately; poll orchestrate_status to retrieve the artifacts. "
-                        "Requires the Genius skill servers to be running (python serve.py)."),
+        "description": (
+            "Run the FULL multi-agent pipeline (research -> design -> code -> "
+            "test + security + deploy) for a build request. Returns a job_id "
+            "immediately; poll orchestrate_status to retrieve the artifacts. "
+            "Requires the Genius skill servers to be running (python serve.py)."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "The build/refactor request to orchestrate"},
-                "pipeline": {"type": "string", "enum": ["sequential", "e2e"],
-                             "description": "Pipeline variant (default 'sequential')"},
-                "workspace": {"type": "string",
-                              "description": "Optional absolute path where artifacts are written (default: server cwd)"}
+                "prompt": {
+                    "type": "string",
+                    "description": "The build/refactor request to orchestrate",
+                },
+                "pipeline": {
+                    "type": "string",
+                    "enum": ["sequential", "e2e"],
+                    "description": "Pipeline variant (default 'sequential')",
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Optional absolute path where artifacts are written (default: server cwd)",
+                },
             },
-            "required": ["prompt"]
-        }
+            "required": ["prompt"],
+        },
     },
     {
         "name": "orchestrate_status",
-        "description": ("Poll the status of a pipeline started by orchestrate. Returns status "
-                        "(running|completed|failed) and, when completed, the generated artifacts."),
+        "description": (
+            "Poll the status of a pipeline started by orchestrate. Returns status "
+            "(running|completed|failed) and, when completed, the generated artifacts."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "job_id": {"type": "string", "description": "The job_id returned by orchestrate"}
+                "job_id": {
+                    "type": "string",
+                    "description": "The job_id returned by orchestrate",
+                }
             },
-            "required": ["job_id"]
-        }
-    }
+            "required": ["job_id"],
+        },
+    },
 ]
 
 # --- Full-pipeline orchestration (the "điều phối viên" entrypoint) ---------
@@ -191,12 +248,15 @@ def _collect_artifacts(workspace: str) -> Dict[str, str]:
     return artifacts
 
 
-async def _run_orchestration(job_id: str, prompt: str, pipeline: str, workspace: str = None) -> None:
+async def _run_orchestration(
+    job_id: str, prompt: str, pipeline: str, workspace: str = None
+) -> None:
     job = ORCHESTRATION_JOBS[job_id]
     try:
         # Imported lazily so the MCP server boots fast (initialize/tools-list
         # must respond before Antigravity's connect timeout).
         from orchestrator import run_pipeline, run_e2e_pipeline
+
         if pipeline == "e2e":
             await run_e2e_pipeline(prompt, workspace=workspace)
         else:
@@ -223,14 +283,21 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         workspace = arguments.get("workspace")
         job_id = uuid.uuid4().hex
         ORCHESTRATION_JOBS[job_id] = {
-            "job_id": job_id, "status": "running", "pipeline": pipeline,
-            "prompt": prompt, "error": None, "artifacts": None,
+            "job_id": job_id,
+            "status": "running",
+            "pipeline": pipeline,
+            "prompt": prompt,
+            "error": None,
+            "artifacts": None,
         }
         asyncio.create_task(_run_orchestration(job_id, prompt, pipeline, workspace))
-        return json.dumps({
-            "job_id": job_id, "status": "running",
-            "message": "Pipeline started. Poll orchestrate_status with this job_id.",
-        })
+        return json.dumps(
+            {
+                "job_id": job_id,
+                "status": "running",
+                "message": "Pipeline started. Poll orchestrate_status with this job_id.",
+            }
+        )
 
     if name == "orchestrate_status":
         job_id = arguments.get("job_id", "")
@@ -251,6 +318,7 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
 async def list_tools():
     return {"tools": TOOLS}
 
+
 @app.post("/tools/call")
 async def call_tool(req: CallToolRequest):
     valid_tool_names = {t["name"] for t in TOOLS}
@@ -265,6 +333,7 @@ async def call_tool(req: CallToolRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "genius", "version": "1.0.0"}
 
@@ -277,11 +346,15 @@ async def handle_request(req: Dict[str, Any]):
     params = req.get("params", {}) or {}
 
     if method == "initialize":
-        return {"jsonrpc": "2.0", "id": req_id, "result": {
-            "protocolVersion": params.get("protocolVersion", PROTOCOL_VERSION),
-            "capabilities": {"tools": {}},
-            "serverInfo": SERVER_INFO,
-        }}
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": params.get("protocolVersion", PROTOCOL_VERSION),
+                "capabilities": {"tools": {}},
+                "serverInfo": SERVER_INFO,
+            },
+        }
     if method in ("notifications/initialized", "initialized"):
         return None  # notification: no response
     if method == "ping":
@@ -293,34 +366,44 @@ async def handle_request(req: Dict[str, Any]):
         arguments = params.get("arguments", {}) or {}
         try:
             content = await dispatch_tool(name, arguments)
-            return {"jsonrpc": "2.0", "id": req_id,
-                    "result": {"content": [{"type": "text", "text": content}]}}
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"content": [{"type": "text", "text": content}]},
+            }
         except Exception as e:  # noqa: BLE001 - report as JSON-RPC error
-            return {"jsonrpc": "2.0", "id": req_id,
-                    "error": {"code": -32000, "message": str(e)}}
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32000, "message": str(e)},
+            }
 
     if req_id is None:
         return None  # unknown notification: stay silent
-    return {"jsonrpc": "2.0", "id": req_id,
-            "error": {"code": -32601, "message": "Method not found"}}
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": -32601, "message": "Method not found"},
+    }
 
 
 async def run_stdio_mcp():
     import logging
+
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
-    
+
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
-    
+
     loop = asyncio.get_running_loop()
-    
+
     if sys.platform != "win32":
         reader = asyncio.StreamReader()
         protocol = asyncio.StreamReaderProtocol(reader)
         await loop.connect_read_pipe(lambda: protocol, sys.stdin)
-        
+
     while True:
         if sys.platform == "win32":
             line = await loop.run_in_executor(None, sys.stdin.readline)
@@ -331,7 +414,7 @@ async def run_stdio_mcp():
             line_bytes = await reader.readline()
             if not line_bytes:
                 break
-            line_str = line_bytes.decode('utf-8')
+            line_str = line_bytes.decode("utf-8")
         # Strip a leading UTF-8 BOM (some clients/Windows pipes prepend one to
         # the first line) and surrounding whitespace before parsing.
         line_str = line_str.lstrip("﻿").strip()
@@ -347,9 +430,11 @@ async def run_stdio_mcp():
             sys.stderr.write(f"Error handling request: {e}\n")
             sys.stderr.flush()
 
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "stdio":
         asyncio.run(run_stdio_mcp())
     else:
         import uvicorn
+
         uvicorn.run("mcp_server:app", host="0.0.0.0", port=8000)

@@ -8,6 +8,7 @@ from ag_core.distributed import CentralHub, ClientWorker
 from serve import WorkerDisconnectedError, WorkerRegistry, pending_tasks
 import orchestrator
 
+
 class MockNetworkProtocol:
     def __init__(self):
         self.latency = 0.0
@@ -27,24 +28,32 @@ class MockNetworkProtocol:
         if worker_id in self.workers:
             del self.workers[worker_id]
 
-    async def send_to_hub(self, endpoint: str, payload: Any, headers: Dict[str, str]) -> tuple[int, Any]:
+    async def send_to_hub(
+        self, endpoint: str, payload: Any, headers: Dict[str, str]
+    ) -> tuple[int, Any]:
         self.request_log.append(("hub", endpoint, payload, headers, time.time()))
         if not self.hub:
             return 503, {"error": "Hub unreachable"}
         status_code, body, _ = await self.hub.handle_request(endpoint, payload, headers)
         return status_code, body
 
-    async def send_to_worker(self, worker_id: str, endpoint: str, payload: Any, headers: Dict[str, str]) -> tuple[int, Any]:
-        self.request_log.append(("worker", worker_id, endpoint, payload, headers, time.time()))
+    async def send_to_worker(
+        self, worker_id: str, endpoint: str, payload: Any, headers: Dict[str, str]
+    ) -> tuple[int, Any]:
+        self.request_log.append(
+            ("worker", worker_id, endpoint, payload, headers, time.time())
+        )
         worker = self.workers.get(worker_id)
         if not worker:
             return 404, {"error": "Worker unreachable"}
         status_code, body, _ = await worker.handle_request(endpoint, payload, headers)
         return status_code, body
 
+
 @pytest.fixture
 def network():
     return MockNetworkProtocol()
+
 
 @pytest.fixture
 def hub(network):
@@ -52,6 +61,7 @@ def hub(network):
     h.set_network(network)
     yield h
     h.stop_sweeper()
+
 
 @pytest.mark.asyncio
 async def test_workers_endpoint(network, hub):
@@ -67,6 +77,7 @@ async def test_workers_endpoint(network, hub):
     assert "w1" in body
     assert body["w1"]["roles"] == ["grok"]
     assert body["w1"]["status"] == "idle"
+
 
 @pytest.mark.asyncio
 async def test_worker_disconnected_error_on_deregister(network, hub):
@@ -94,6 +105,7 @@ async def test_worker_disconnected_error_on_deregister(network, hub):
     # We must mock get_worker and registry workers in serve.py to match central_hub workers
     # Serve.py uses central_hub workers directly. Let's make sure server unregister works
     import serve
+
     orig_hub = serve.central_hub
     serve.central_hub = hub
     try:
@@ -108,6 +120,7 @@ async def test_worker_disconnected_error_on_deregister(network, hub):
     finally:
         serve.central_hub = orig_hub
         pending_tasks.pop(task_id, None)
+
 
 @pytest.mark.asyncio
 async def test_heartbeat_sweep_fails_active_tasks(network, hub):
@@ -135,6 +148,7 @@ async def test_heartbeat_sweep_fails_active_tasks(network, hub):
     assert hub.tasks[task_id]["status"] == "failed"
     assert "disconnect" in hub.tasks[task_id]["result"]["error"].lower()
 
+
 @pytest.mark.asyncio
 async def test_task_timeout_sends_cancel_message(network, hub):
     hub.config["task_timeout"] = 1.0
@@ -161,11 +175,13 @@ async def test_task_timeout_sends_cancel_message(network, hub):
 
     # The cancel message should have been sent to the worker via the network simulator
     cancel_requests = [
-        req for req in network.request_log
+        req
+        for req in network.request_log
         if req[0] == "worker" and req[1] == "w1" and req[2] == "/cancel"
     ]
     assert len(cancel_requests) == 1
     assert cancel_requests[0][3]["task_id"] == task_id
+
 
 @pytest.mark.asyncio
 async def test_worker_cancellation_handling(network, hub):
@@ -188,7 +204,9 @@ async def test_worker_cancellation_handling(network, hub):
     # Send cancel
     payload_cancel = {"task_id": task_id}
     headers_cancel = worker.create_headers(payload_cancel)
-    status_code, body = await network.send_to_worker("w1", "/cancel", payload_cancel, headers_cancel)
+    status_code, body = await network.send_to_worker(
+        "w1", "/cancel", payload_cancel, headers_cancel
+    )
     assert status_code == 200
 
     # Wait a bit for cancel to propagate

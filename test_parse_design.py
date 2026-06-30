@@ -1,4 +1,5 @@
 """Tests for the brace-aware parse_design_for_files (Phase 2 B4)."""
+
 import json
 
 from orchestrator import parse_design_for_files
@@ -9,8 +10,10 @@ def test_spec_containing_braces_does_not_truncate():
     # contained a brace. The raw_decode scanner must parse the whole object.
     plan = {
         "files": [
-            {"path": "src/cfg.py",
-             "specification": "Return a config dict like {\"a\": 1, \"b\": {\"c\": 2}} from get_config()."}
+            {
+                "path": "src/cfg.py",
+                "specification": 'Return a config dict like {"a": 1, "b": {"c": 2}} from get_config().',
+            }
         ]
     }
     design = "Here is the plan:\n```json\n" + json.dumps(plan, indent=2) + "\n```\n"
