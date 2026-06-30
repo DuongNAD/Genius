@@ -62,6 +62,12 @@ desktop.ini
 # Agent Metadata folders (ignore subfolder contents)
 .agents/*/
 
+# ...but DO track the skill server source (api.py / run.py per agent)
+!.agents/skills/
+!.agents/skills/**
+# (still ignore compiled bytecode under the tracked skills)
+.agents/skills/**/__pycache__/
+
 *.db
 *.db-shm
 *.db-wal

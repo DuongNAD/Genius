@@ -6,48 +6,74 @@ from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
 
+
 class OpenAIProvider(BaseProvider):
     """
     OpenAI API provider implementation using the local codex CLI.
     """
-    def __init__(self, model_name: str = "gpt-4o", api_key: str | None = None, base_url: str | None = None, **kwargs: Any) -> None:
-        api_key = api_key or os.getenv("OPENAI_API_KEY")
-        base_url = base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
-        super().__init__(model_name=model_name, api_key=api_key, base_url=base_url, **kwargs)
 
-    async def send_prompt(self, prompt: str, system: str | None = None, **kwargs: Any) -> Dict[str, Any]:
+    def __init__(
+        self,
+        model_name: str = "gpt-4o",
+        api_key: str | None = None,
+        base_url: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        api_key = api_key or os.getenv("OPENAI_API_KEY")
+        base_url = (
+            base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+        )
+        super().__init__(
+            model_name=model_name, api_key=api_key, base_url=base_url, **kwargs
+        )
+
+    async def send_prompt(
+        self, prompt: str, system: str | None = None, **kwargs: Any
+    ) -> Dict[str, Any]:
         async with self.semaphore:
             await self.rate_limiter.acquire()
-                
+
             extra = self.extra_params.copy()
             extra.update(kwargs)
             sys_prompt = extra.pop("system", None) or system
-            
+
             # Locate codex prioritized in PATH, then fallbacks
             import shutil
+
             cli_path = shutil.which("codex") or shutil.which("codex.exe")
-            
+
             if not cli_path:
                 localappdata = os.environ.get("LOCALAPPDATA")
                 if localappdata:
-                    pattern1 = os.path.join(localappdata, "OpenAI", "Codex", "bin", "*", "codex.exe")
+                    pattern1 = os.path.join(
+                        localappdata, "OpenAI", "Codex", "bin", "*", "codex.exe"
+                    )
                     matches1 = glob.glob(pattern1)
                     if matches1:
                         cli_path = matches1[0]
-                        
+
                 if not cli_path and localappdata:
-                    candidate2 = os.path.join(localappdata, "Microsoft", "WindowsApps", "codex.exe")
+                    candidate2 = os.path.join(
+                        localappdata, "Microsoft", "WindowsApps", "codex.exe"
+                    )
                     if os.path.exists(candidate2):
                         cli_path = candidate2
-                        
+
                 if not cli_path:
                     program_files = os.environ.get("ProgramFiles")
                     if program_files:
-                        pattern3 = os.path.join(program_files, "WindowsApps", "OpenAI.Codex_*", "app", "resources", "codex.exe")
+                        pattern3 = os.path.join(
+                            program_files,
+                            "WindowsApps",
+                            "OpenAI.Codex_*",
+                            "app",
+                            "resources",
+                            "codex.exe",
+                        )
                         matches3 = glob.glob(pattern3)
                         if matches3:
                             cli_path = matches3[0]
-                            
+
                 if not cli_path:
                     cli_path = "codex" if os.name != "nt" else "codex.exe"
 
@@ -56,41 +82,44 @@ class OpenAIProvider(BaseProvider):
 
             import tempfile
             import sys
-            
+
             temp_file_path = None
             try:
+                # Sandbox/approvals are bypassed by default: this project was
+                # explicitly built to drive the Codex CLI non-interactively
+                # without a sandbox. Set GENIUS_CODEX_SANDBOX=1 (true/yes) to
+                # keep the Codex sandbox and approval prompts enabled.
+                sandbox_on = os.getenv("GENIUS_CODEX_SANDBOX", "").lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                )
+                bypass_flags = (
+                    [] if sandbox_on else ["--dangerously-bypass-approvals-and-sandbox"]
+                )
+
                 if len(prompt) > 1000:
-                    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+                    ) as f:
                         f.write(prompt)
                         temp_file_path = f.name
-                    cmd = [
-                        cli_path,
-                        "exec",
-                        temp_file_path,
-                        "--dangerously-bypass-approvals-and-sandbox",
-                        "--json"
-                    ]
+                    cmd = [cli_path, "exec", temp_file_path, *bypass_flags, "--json"]
                 else:
-                    cmd = [
-                        cli_path,
-                        "exec",
-                        prompt,
-                        "--dangerously-bypass-approvals-and-sandbox",
-                        "--json"
-                    ]
-                
+                    cmd = [cli_path, "exec", prompt, *bypass_flags, "--json"]
+
                 actual_cmd = cmd
                 if sys.platform == "win32":
                     resolved_cli = shutil.which(cli_path) or cli_path
                     if resolved_cli.lower().endswith((".cmd", ".bat")):
                         actual_cmd = ["cmd.exe", "/c"] + cmd
-                        
+
                 try:
                     process = await asyncio.create_subprocess_exec(
                         *actual_cmd,
                         stdin=asyncio.subprocess.DEVNULL,
                         stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
+                        stderr=asyncio.subprocess.PIPE,
                     )
                 except OSError:
                     if sys.platform == "win32" and actual_cmd == cmd:
@@ -99,7 +128,7 @@ class OpenAIProvider(BaseProvider):
                             *actual_cmd,
                             stdin=asyncio.subprocess.DEVNULL,
                             stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
+                            stderr=asyncio.subprocess.PIPE,
                         )
                     else:
                         raise
@@ -110,28 +139,30 @@ class OpenAIProvider(BaseProvider):
                         os.remove(temp_file_path)
                     except Exception:
                         pass
-            
+
             if isinstance(process.returncode, int) and process.returncode != 0:
                 stderr_str = stderr.decode("utf-8", errors="ignore").strip()
-                raise RuntimeError(f"Codex CLI failed with exit code {process.returncode}: {stderr_str}")
-            
+                raise RuntimeError(
+                    f"Codex CLI failed with exit code {process.returncode}: {stderr_str}"
+                )
+
             stdout_str = stdout.decode("utf-8", errors="ignore")
-            
+
             content_parts = []
             prompt_tokens = 0
             completion_tokens = 0
             total_tokens = 0
-            
+
             lines = stdout_str.splitlines()
             accumulator = []
-            
+
             # Helper to convert values to int safely
             def safe_int(val) -> int | None:
                 try:
                     return int(val)
                 except (ValueError, TypeError):
                     return None
-            
+
             for line in lines:
                 try:
                     line_stripped = line.strip()
@@ -140,42 +171,50 @@ class OpenAIProvider(BaseProvider):
 
                     # Strip prefix noise if present
                     idx = -1
-                    for char in ('{', '['):
+                    for char in ("{", "["):
                         pos = line_stripped.find(char)
                         if pos != -1 and (idx == -1 or pos < idx):
                             idx = pos
                     if idx != -1:
                         line_stripped = line_stripped[idx:]
-                    
+
                     # Try to parse line directly first
                     data = None
                     try:
                         data = json.loads(line_stripped)
-                        accumulator = []  # Clear accumulator on successful parse of a single line
+                        accumulator = (
+                            []
+                        )  # Clear accumulator on successful parse of a single line
                     except (Exception, RecursionError):
                         # Line itself is not valid JSON, so we append to accumulator
                         accumulator.append(line)
                         if len(accumulator) > 50:
                             accumulator = accumulator[-50:]
-                            
+
                         # Clean leading lines in accumulator that cannot start JSON
-                        while accumulator and not (accumulator[0].strip().startswith('{') or accumulator[0].strip().startswith('[')):
+                        while accumulator and not (
+                            accumulator[0].strip().startswith("{")
+                            or accumulator[0].strip().startswith("[")
+                        ):
                             accumulator.pop(0)
-                            
+
                         # Try to parse from suffix starting points to recover from noise
                         for i in range(len(accumulator)):
                             # Only try suffixes that start with { or [ to avoid parsing nested structures
                             suffix_start = accumulator[i].strip()
-                            if not (suffix_start.startswith('{') or suffix_start.startswith('[')):
+                            if not (
+                                suffix_start.startswith("{")
+                                or suffix_start.startswith("[")
+                            ):
                                 continue
-                                
+
                             # Check prefix for any unmatched open braces to prevent parsing inner objects too early
                             prefix_text = "".join(accumulator[:i])
-                            opens = prefix_text.count('{') + prefix_text.count('[')
-                            closes = prefix_text.count('}') + prefix_text.count(']')
+                            opens = prefix_text.count("{") + prefix_text.count("[")
+                            closes = prefix_text.count("}") + prefix_text.count("]")
                             if opens > closes:
                                 continue  # Likely nested inside an unmatched outer structure in the prefix
-                                
+
                             try:
                                 accumulated_str = "\n".join(accumulator[i:])
                                 parsed = json.loads(accumulated_str)
@@ -185,20 +224,23 @@ class OpenAIProvider(BaseProvider):
                                 break
                             except (Exception, RecursionError):
                                 pass
-                                
+
                         if data is None:
                             continue
-                            
+
                     if not isinstance(data, dict):
                         continue
-                        
+
                     event_type = data.get("event") or data.get("type")
                     item = data.get("item")
                     if not isinstance(item, dict):
                         item = {}
-                        
+
                     is_agent_msg = False
-                    if event_type == "agent_message" or item.get("type") == "agent_message":
+                    if (
+                        event_type == "agent_message"
+                        or item.get("type") == "agent_message"
+                    ):
                         is_agent_msg = True
                     elif "agent_message" in data:
                         am = data.get("agent_message")
@@ -206,12 +248,14 @@ class OpenAIProvider(BaseProvider):
                             is_agent_msg = True
                             if am.get("item") and isinstance(am.get("item"), dict):
                                 item = am.get("item")
-                    elif (
-                        event_type == "item.completed"
-                        and isinstance(data.get("item"), dict)
+                    elif event_type == "item.completed" and isinstance(
+                        data.get("item"), dict
                     ):
                         item = data.get("item")
-                        if isinstance(item, dict) and (item.get("type") == "agent_message" or item.get("event") == "agent_message"):
+                        if isinstance(item, dict) and (
+                            item.get("type") == "agent_message"
+                            or item.get("event") == "agent_message"
+                        ):
                             is_agent_msg = True
 
                     if is_agent_msg:
@@ -224,25 +268,25 @@ class OpenAIProvider(BaseProvider):
                                 text = am.get("text")
                         if text is not None:
                             content_parts.append(str(text))
-                                    
+
                     # Check for turn.completed event or equivalent keys
                     if event_type == "turn.completed" or "turn.completed" in data:
                         # Gather all possible dictionaries containing token counts
                         candidate_dicts = []
-                        
+
                         # Helper to add a dict safely
                         def add_candidate(d):
                             if isinstance(d, dict) and d not in candidate_dicts:
                                 candidate_dicts.append(d)
-                                
+
                         add_candidate(data)
-                        
+
                         turn_completed = data.get("turn.completed")
                         if isinstance(turn_completed, dict):
                             add_candidate(turn_completed)
                             add_candidate(turn_completed.get("usage"))
                             add_candidate(turn_completed.get("tokens"))
-                            
+
                         turn_val = data.get("turn")
                         if isinstance(turn_val, dict):
                             completed_val = turn_val.get("completed")
@@ -250,33 +294,35 @@ class OpenAIProvider(BaseProvider):
                                 add_candidate(completed_val)
                                 add_candidate(completed_val.get("usage"))
                                 add_candidate(completed_val.get("tokens"))
-                                
+
                         add_candidate(data.get("usage"))
                         add_candidate(data.get("tokens"))
-                        
+
                         input_val = None
                         output_val = None
                         total_val = None
-                        
+
                         for d in candidate_dicts:
                             if input_val is None:
                                 val = d.get("input_tokens") or d.get("prompt_tokens")
                                 parsed = safe_int(val)
                                 if parsed is not None:
                                     input_val = parsed
-                                    
+
                             if output_val is None:
-                                val = d.get("output_tokens") or d.get("completion_tokens")
+                                val = d.get("output_tokens") or d.get(
+                                    "completion_tokens"
+                                )
                                 parsed = safe_int(val)
                                 if parsed is not None:
                                     output_val = parsed
-                                    
+
                             if total_val is None:
                                 val = d.get("total_tokens") or d.get("total")
                                 parsed = safe_int(val)
                                 if parsed is not None:
                                     total_val = parsed
-                                    
+
                         if input_val is not None:
                             prompt_tokens = input_val
                         if output_val is not None:
@@ -285,20 +331,18 @@ class OpenAIProvider(BaseProvider):
                             total_tokens = total_val
                 except Exception:
                     continue
-                            
+
             if total_tokens == 0:
                 total_tokens = prompt_tokens + completion_tokens
-            
+
             content = "".join(content_parts)
-            
+
             response = ProviderResponse(
                 content=content,
                 usage=TokenUsage(
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
-                    total_tokens=total_tokens
-                )
+                    total_tokens=total_tokens,
+                ),
             )
             return response.model_dump()
-
-

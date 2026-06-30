@@ -21,9 +21,11 @@ from ag_core.distributed.hub import CentralHub
 from fastapi import Request, Response
 import json
 from ag_core.utils.db import init_db
+
 init_db()
 
 central_hub = CentralHub()
+
 
 class BoundedPendingTasks(dict):
     def __setitem__(self, key, value):
@@ -38,10 +40,13 @@ class BoundedPendingTasks(dict):
                     fut.cancel()
         super().__setitem__(key, value)
 
+
 pending_tasks = BoundedPendingTasks()
+
 
 class WorkerDisconnectedError(Exception):
     pass
+
 
 class WorkerRegistry:
     def __init__(self):
@@ -65,7 +70,15 @@ class WorkerRegistry:
                 worker_roles = [r.lower() for r in info.get("roles", [])]
                 role_matched = False
                 for r in worker_roles:
-                    if r == role.lower() or (role.lower() == "grok" and "grok" in r) or (role.lower() == "claude" and "claude" in r) or (role.lower() == "codex" and "codex" in r) or (role.lower() == "tester" and "tester" in r) or (role.lower() == "security" and "security" in r) or (role.lower() == "devops" and "devops" in r):
+                    if (
+                        r == role.lower()
+                        or (role.lower() == "grok" and "grok" in r)
+                        or (role.lower() == "claude" and "claude" in r)
+                        or (role.lower() == "codex" and "codex" in r)
+                        or (role.lower() == "tester" and "tester" in r)
+                        or (role.lower() == "security" and "security" in r)
+                        or (role.lower() == "devops" and "devops" in r)
+                    ):
                         role_matched = True
                         break
                 if role_matched and info.get("status") == "idle":
@@ -80,14 +93,14 @@ class WorkerRegistry:
             if central_hub.workers[worker_id].get("status") == "busy":
                 current_status = "busy"
         for t_info in central_hub.tasks.values():
-            if t_info.get("worker_id") == worker_id and t_info.get("status") == "running":
+            if (
+                t_info.get("worker_id") == worker_id
+                and t_info.get("status") == "running"
+            ):
                 current_status = "busy"
                 break
 
-        payload = {
-            "worker_id": worker_id,
-            "roles": roles
-        }
+        payload = {"worker_id": worker_id, "roles": roles}
         headers = central_hub.create_headers(payload)
         await central_hub.handle_request("/register", payload, headers)
         if worker_id in central_hub.workers:
@@ -99,12 +112,13 @@ class WorkerRegistry:
         if worker and (ws is None or worker.get("ws") == ws):
             active_tasks = []
             for t_id, t_info in list(central_hub.tasks.items()):
-                if t_info.get("worker_id") == worker_id and t_info.get("status") == "running":
+                if (
+                    t_info.get("worker_id") == worker_id
+                    and t_info.get("status") == "running"
+                ):
                     active_tasks.append(t_id)
 
-            payload = {
-                "worker_id": worker_id
-            }
+            payload = {"worker_id": worker_id}
             headers = central_hub.create_headers(payload)
             await central_hub.handle_request("/deregister", payload, headers)
 
@@ -117,16 +131,16 @@ class WorkerRegistry:
                     fut.set_exception(WorkerDisconnectedError("Worker disconnected"))
 
     async def update_heartbeat(self, worker_id: str):
-        payload = {
-            "worker_id": worker_id
-        }
+        payload = {"worker_id": worker_id}
         headers = central_hub.create_headers(payload)
         await central_hub.handle_request("/heartbeat", payload, headers)
 
     async def get_worker(self, worker_id: str):
         return central_hub.workers.get(worker_id)
 
+
 worker_registry = WorkerRegistry()
+
 
 async def prune_stale_workers(timeout_sec: float = 30.0, check_interval: float = 5.0):
     try:
@@ -141,10 +155,23 @@ async def prune_stale_workers(timeout_sec: float = 30.0, check_interval: float =
                         pending_tasks.pop(task_id, None)
                         if fut and not fut.done():
                             result = task_info.get("result") or {}
-                            error_msg = result.get("error", "Task timed out or failed on worker") if isinstance(result, dict) else str(result)
-                            if "timed out" in error_msg.lower() or "timeout" in error_msg.lower():
+                            error_msg = (
+                                result.get(
+                                    "error", "Task timed out or failed on worker"
+                                )
+                                if isinstance(result, dict)
+                                else str(result)
+                            )
+                            if (
+                                "timed out" in error_msg.lower()
+                                or "timeout" in error_msg.lower()
+                            ):
                                 fut.set_exception(asyncio.TimeoutError(error_msg))
-                            elif "disconnect" in error_msg.lower() or "offline" in error_msg.lower() or "disappeared" in error_msg.lower():
+                            elif (
+                                "disconnect" in error_msg.lower()
+                                or "offline" in error_msg.lower()
+                                or "disappeared" in error_msg.lower()
+                            ):
                                 fut.set_exception(WorkerDisconnectedError(error_msg))
                             else:
                                 fut.set_exception(ValueError(error_msg))
@@ -152,6 +179,7 @@ async def prune_stale_workers(timeout_sec: float = 30.0, check_interval: float =
         pass
     except Exception:
         pass
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -165,7 +193,9 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+
 app = FastAPI(title="Genius Central Hub", lifespan=lifespan)
+
 
 @app.post("/{path:path}")
 async def hub_http_route(path: str, request: Request):
@@ -174,32 +204,56 @@ async def hub_http_route(path: str, request: Request):
     except Exception:
         payload = {}
     headers = dict(request.headers)
-    
+
     if payload.get("stream") or request.query_params.get("stream") == "true":
         from fastapi.responses import StreamingResponse
+
         async def stream_generator():
-            status_code, body, resp_headers = await central_hub.handle_request("/" + path, payload, headers)
+            status_code, body, resp_headers = await central_hub.handle_request(
+                "/" + path, payload, headers
+            )
             if isinstance(body, dict):
                 yield json.dumps(body)
             else:
                 yield str(body)
+
         return StreamingResponse(stream_generator(), media_type="application/json")
-        
-    status_code, body, resp_headers = await central_hub.handle_request("/" + path, payload, headers)
-    return Response(content=json.dumps(body), status_code=status_code, media_type="application/json", headers=resp_headers)
+
+    status_code, body, resp_headers = await central_hub.handle_request(
+        "/" + path, payload, headers
+    )
+    return Response(
+        content=json.dumps(body),
+        status_code=status_code,
+        media_type="application/json",
+        headers=resp_headers,
+    )
+
 
 IS_DISTRIBUTED = False
+
 
 @app.websocket("/ws/connect")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     global IS_DISTRIBUTED
     import sys
+
     is_pytest = "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST") is not None
     if not IS_DISTRIBUTED and not is_pytest:
         from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="WebSocket not enabled in local mode")
 
-    secret = os.getenv("SKILL_API_KEY", "" if is_pytest else "")
+        raise HTTPException(
+            status_code=404, detail="WebSocket not enabled in local mode"
+        )
+
+    # Resolve the JWT secret the same way the hub/worker do, so tokens verify
+    # consistently. Fail closed (don't accept connections) if no secret is
+    # configured in production rather than silently using an empty secret.
+    secret = central_hub.api_key or os.getenv("SKILL_API_KEY", "")
+    if not secret and not is_pytest:
+        await websocket.accept()
+        await websocket.close(code=4001)
+        return
     try:
         payload = decode_jwt(token, secret)
         worker_id_from_jwt = payload.get("sub") or payload.get("worker_id")
@@ -215,41 +269,52 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         while True:
             data = await websocket.receive_json()
             msg_type = data.get("type")
-            
+
             if msg_type == "register":
                 payload_worker_id = data.get("worker_id")
                 if payload_worker_id and payload_worker_id != worker_id_from_jwt:
-                    await websocket.send_json({"type": "error", "error": "Identity spoofing detected"})
+                    await websocket.send_json(
+                        {"type": "error", "error": "Identity spoofing detected"}
+                    )
                     await websocket.close(code=4003)
                     return
                 worker_id = worker_id_from_jwt
                 roles = data.get("roles") or data.get("role") or []
                 if isinstance(roles, str):
                     roles = [r.strip() for r in roles.split(",") if r.strip()]
-                
+
                 registered_worker_id = worker_id
-                await worker_registry.register(worker_id, roles, websocket, status="idle")
+                await worker_registry.register(
+                    worker_id, roles, websocket, status="idle"
+                )
                 await websocket.send_json({"type": "registered", "status": "success"})
-                
+
             elif msg_type == "heartbeat":
                 payload_worker_id = data.get("worker_id")
                 if payload_worker_id and payload_worker_id != registered_worker_id:
-                    await websocket.send_json({"type": "error", "error": "Identity spoofing detected"})
+                    await websocket.send_json(
+                        {"type": "error", "error": "Identity spoofing detected"}
+                    )
                     await websocket.close(code=4003)
                     return
                 worker_id = payload_worker_id or registered_worker_id
                 if not worker_id or worker_id not in worker_registry.workers:
-                    await websocket.send_json({"type": "error", "error": "not_registered"})
+                    await websocket.send_json(
+                        {"type": "error", "error": "not_registered"}
+                    )
                 else:
                     await worker_registry.update_heartbeat(worker_id)
                     await websocket.send_json({"type": "pong"})
-                    
+
             elif msg_type in ("report_result", "result"):
                 import hashlib
+
                 task_id = data.get("task_id")
                 payload_worker_id = data.get("worker_id")
                 if payload_worker_id and payload_worker_id != registered_worker_id:
-                    await websocket.send_json({"type": "error", "error": "Identity spoofing detected"})
+                    await websocket.send_json(
+                        {"type": "error", "error": "Identity spoofing detected"}
+                    )
                     await websocket.close(code=4003)
                     return
                 worker_id = payload_worker_id or registered_worker_id
@@ -262,47 +327,62 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         worker_registry.workers[worker_id]["status"] = "idle"
                     if task_id and task_id in central_hub.tasks:
                         central_hub.tasks[task_id]["status"] = "failed"
-                        central_hub.tasks[task_id]["result"] = {"error": "Missing result checksum"}
+                        central_hub.tasks[task_id]["result"] = {
+                            "error": "Missing result checksum"
+                        }
                     fut = pending_tasks.pop(task_id, None)
                     if fut and not fut.done():
                         fut.set_exception(ValueError("Missing result checksum"))
                     continue
 
                 from ag_core.utils.security import verify_checksum
+
                 if not verify_checksum(result, checksum, central_hub.api_key):
                     print(f"[Hub] Result checksum mismatch! Expected {checksum}")
                     if worker_id and worker_id in worker_registry.workers:
                         worker_registry.workers[worker_id]["status"] = "idle"
                     if task_id and task_id in central_hub.tasks:
                         central_hub.tasks[task_id]["status"] = "failed"
-                        central_hub.tasks[task_id]["result"] = {"error": "Result checksum validation failed"}
+                        central_hub.tasks[task_id]["result"] = {
+                            "error": "Result checksum validation failed"
+                        }
                     fut = pending_tasks.pop(task_id, None)
                     if fut and not fut.done():
-                        fut.set_exception(ValueError("Result checksum validation failed"))
+                        fut.set_exception(
+                            ValueError("Result checksum validation failed")
+                        )
                     continue
-                
+
                 if task_id and worker_id:
                     payload = {
                         "task_id": task_id,
                         "worker_id": worker_id,
                         "status": status,
-                        "result": result
+                        "result": result,
                     }
                     headers = central_hub.create_headers(payload)
                     await central_hub.handle_request("/report_result", payload, headers)
-                    
+
                     if worker_id in worker_registry.workers:
                         worker_registry.workers[worker_id]["status"] = "idle"
-                    
+
                     fut = pending_tasks.pop(task_id, None)
                     if fut and not fut.done():
                         if status == "completed":
-                            output = result.get("output", result) if isinstance(result, dict) else result
+                            output = (
+                                result.get("output", result)
+                                if isinstance(result, dict)
+                                else result
+                            )
                             fut.set_result(output)
                         else:
-                            error_msg = result.get("error", "Unknown worker error") if isinstance(result, dict) else str(result)
+                            error_msg = (
+                                result.get("error", "Unknown worker error")
+                                if isinstance(result, dict)
+                                else str(result)
+                            )
                             fut.set_exception(Exception(error_msg))
-                    
+
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -310,6 +390,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     finally:
         if registered_worker_id:
             await worker_registry.unregister(registered_worker_id, websocket)
+
 
 async def start_hub_server(port: int):
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
@@ -334,6 +415,7 @@ ROUTING_TABLE = {
     "/deploy": ("devops", 8006),
 }
 
+
 def normalize_roles(roles_str: str) -> list:
     raw_roles = [r.strip().lower() for r in roles_str.split(",") if r.strip()]
     normalized = []
@@ -348,13 +430,21 @@ def normalize_roles(roles_str: str) -> list:
             normalized.append("tester")
         elif r in ["5", "orchestrator"]:
             normalized.append("orchestrator")
-        elif r in ["6", "dashboard", "web dashboard", "web-dashboard", "dashboard api", "dashboard-api"]:
+        elif r in [
+            "6",
+            "dashboard",
+            "web dashboard",
+            "web-dashboard",
+            "dashboard api",
+            "dashboard-api",
+        ]:
             normalized.append("dashboard")
         elif r in ["7", "security", "security_agent", "security api", "security-api"]:
             normalized.append("security")
         elif r in ["8", "devops", "devops_agent", "devops api", "devops-api"]:
             normalized.append("devops")
     return normalized
+
 
 def interactive_prompt() -> list:
     print("=== Antigravity 2.0 Unified Startup Menu ===")
@@ -368,11 +458,14 @@ def interactive_prompt() -> list:
     print("7. security     - Security Agent API (Port 8005)")
     print("8. devops       - DevOps Agent API (Port 8006)")
     try:
-        choice = input("Enter selection (e.g. 'grok,claude' or '5' or '1,2,3,4,5,6,7,8'): ").strip()
+        choice = input(
+            "Enter selection (e.g. 'grok,claude' or '5' or '1,2,3,4,5,6,7,8'): "
+        ).strip()
         return normalize_roles(choice)
     except KeyboardInterrupt:
         print("\nExiting.")
         sys.exit(0)
+
 
 def get_api_app(role: str):
     if role == "grok":
@@ -391,11 +484,12 @@ def get_api_app(role: str):
         path = os.path.join(root_dir, "dashboard.py")
     else:
         raise ValueError(f"Unknown role: {role}")
-        
+
     spec = importlib.util.spec_from_file_location(f"{role}_api", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.app
+
 
 async def start_server(role: str, port: int):
     app = get_api_app(role)
@@ -407,7 +501,7 @@ async def start_server(role: str, port: int):
         config = uvicorn.Config(app, host="0.0.0.0", port=0, log_level="info")
         server = uvicorn.Server(config)
         await server.startup()
-        
+
     bound_port = None
     for s in server.servers:
         for sock in s.sockets:
@@ -417,10 +511,13 @@ async def start_server(role: str, port: int):
             break
     if not bound_port:
         bound_port = server.config.port
-        
-    registry_path = os.environ.get("GENIUS_SERVICE_REGISTRY", os.path.join(root_dir, ".agents", "service_registry.json"))
+
+    registry_path = os.environ.get(
+        "GENIUS_SERVICE_REGISTRY",
+        os.path.join(root_dir, ".agents", "service_registry.json"),
+    )
     os.makedirs(os.path.dirname(registry_path), exist_ok=True)
-    
+
     registry = {}
     if os.path.exists(registry_path):
         try:
@@ -428,25 +525,50 @@ async def start_server(role: str, port: int):
                 registry = json.load(f)
         except Exception:
             pass
-            
+
     registry[role] = bound_port
     with open(registry_path, "w", encoding="utf-8") as f:
         json.dump(registry, f, indent=2)
-        
+
     try:
         await server.main_loop()
     finally:
         await server.shutdown()
 
+
 async def main_async():
-    parser = argparse.ArgumentParser(description="Unified Startup Menu for Genius Microservices")
-    parser.add_argument("--roles", default=None, help="Comma-separated roles to run (grok, claude, codex, tester, orchestrator, dashboard)")
+    parser = argparse.ArgumentParser(
+        description="Unified Startup Menu for Genius Microservices"
+    )
+    parser.add_argument(
+        "--roles",
+        default=None,
+        help="Comma-separated roles to run (grok, claude, codex, tester, orchestrator, dashboard)",
+    )
     parser.add_argument("--prompt", default=None, help="Prompt for orchestrator role")
-    parser.add_argument("--interactive", action="store_true", help="Interactive design review loop")
-    parser.add_argument("--auto-pilot", action="store_true", help="Auto-pilot: start all servers and run pipeline")
-    parser.add_argument("--pipeline", choices=["sequential", "e2e"], default="sequential", help="Pipeline type to execute")
-    parser.add_argument("--distributed", action="store_true", help="Start the central hub service")
-    parser.add_argument("--hub-port", type=int, default=8000, help="Port to run the central hub service on")
+    parser.add_argument(
+        "--interactive", action="store_true", help="Interactive design review loop"
+    )
+    parser.add_argument(
+        "--auto-pilot",
+        action="store_true",
+        help="Auto-pilot: start all servers and run pipeline",
+    )
+    parser.add_argument(
+        "--pipeline",
+        choices=["sequential", "e2e"],
+        default="sequential",
+        help="Pipeline type to execute",
+    )
+    parser.add_argument(
+        "--distributed", action="store_true", help="Start the central hub service"
+    )
+    parser.add_argument(
+        "--hub-port",
+        type=int,
+        default=8000,
+        help="Port to run the central hub service on",
+    )
     args = parser.parse_args()
 
     auto_pilot = getattr(args, "auto_pilot", False) is True
@@ -457,7 +579,16 @@ async def main_async():
     IS_DISTRIBUTED = distributed
 
     if auto_pilot:
-        selected_roles = ["grok", "claude", "codex", "tester", "security", "devops", "dashboard", "orchestrator"]
+        selected_roles = [
+            "grok",
+            "claude",
+            "codex",
+            "tester",
+            "security",
+            "devops",
+            "dashboard",
+            "orchestrator",
+        ]
     elif args.roles:
         selected_roles = normalize_roles(args.roles)
     elif args.prompt is not None:
@@ -475,7 +606,9 @@ async def main_async():
             target_role, target_port = ROUTING_TABLE[first_word]
             if target_role not in selected_roles:
                 selected_roles.append(target_role)
-                print(f"Automatically adding agent role '{target_role}' for command routing of '{first_word}'")
+                print(
+                    f"Automatically adding agent role '{target_role}' for command routing of '{first_word}'"
+                )
 
     if not selected_roles and not distributed:
         print("No valid roles selected. Exiting.")
@@ -509,7 +642,7 @@ async def main_async():
         if server_tasks:
             print("Waiting 1 second for API servers to initialize...")
             await asyncio.sleep(1.0)
-            
+
         if not prompt:
             if auto_pilot:
                 print("Error: Prompt is required under auto-pilot mode.")
@@ -523,7 +656,7 @@ async def main_async():
             except KeyboardInterrupt:
                 print("\nExiting.")
                 return
-                
+
         if not prompt:
             print("Error: Prompt is required to run the orchestrator.")
             return
@@ -537,7 +670,7 @@ async def main_async():
                 pipeline_kwargs["interactive"] = interactive
             if distributed:
                 pipeline_kwargs["distributed"] = True
-            
+
             if getattr(args, "pipeline", "sequential") == "e2e":
                 e2e_kwargs = {}
                 if distributed:
@@ -570,11 +703,13 @@ async def main_async():
                 await asyncio.gather(*server_tasks, return_exceptions=True)
             print("Servers stopped.")
 
+
 def main():
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:
         print("\nExiting.")
+
 
 if __name__ == "__main__":
     main()
