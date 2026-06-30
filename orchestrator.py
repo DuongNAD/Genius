@@ -999,6 +999,29 @@ async def process_single_file(
         return security_report
 
 
+def derive_project_name(prompt: str) -> str:
+    """Slugify a prompt into a stable project directory name."""
+    slugified = re.sub(r"[^a-zA-Z0-9]+", "_", prompt.strip().lower()).strip("_")
+    if not slugified:
+        return "default_project"
+    if len(slugified) > 50:
+        return (
+            slugified[:40]
+            + "_"
+            + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
+        )
+    return slugified
+
+
+def resolve_debate_rounds(max_debate_rounds):
+    """Default the debate-round count (0 under pytest, otherwise 2) when unset."""
+    if max_debate_rounds is not None:
+        return max_debate_rounds
+    if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+        return 0
+    return 2
+
+
 async def run_pipeline(
     prompt: str,
     grok_cmd: str = "grok",
@@ -1033,28 +1056,12 @@ async def run_pipeline(
     global DISTRIBUTED_MODE
     DISTRIBUTED_MODE = distributed
 
-    if max_debate_rounds is None:
-        import sys
-
-        if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
-            max_debate_rounds = 0
-        else:
-            max_debate_rounds = 2
+    max_debate_rounds = resolve_debate_rounds(max_debate_rounds)
 
     if not prompt or not prompt.strip():
         raise PipelineError("Prompt cannot be empty.")
 
-    slugified = re.sub(r"[^a-zA-Z0-9]+", "_", prompt.strip().lower()).strip("_")
-    if not slugified:
-        project_name = "default_project"
-    elif len(slugified) > 50:
-        project_name = (
-            slugified[:40]
-            + "_"
-            + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
-        )
-    else:
-        project_name = slugified
+    project_name = derive_project_name(prompt)
 
     if workspace is None:
         workspace = os.getcwd()
@@ -1815,26 +1822,12 @@ async def run_e2e_pipeline(
     global DISTRIBUTED_MODE
     DISTRIBUTED_MODE = distributed
 
-    if max_debate_rounds is None:
-        if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
-            max_debate_rounds = 0
-        else:
-            max_debate_rounds = 2
+    max_debate_rounds = resolve_debate_rounds(max_debate_rounds)
 
     if not prompt or not prompt.strip():
         raise PipelineError("Prompt cannot be empty.")
 
-    slugified = re.sub(r"[^a-zA-Z0-9]+", "_", prompt.strip().lower()).strip("_")
-    if not slugified:
-        project_name = "default_project"
-    elif len(slugified) > 50:
-        project_name = (
-            slugified[:40]
-            + "_"
-            + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
-        )
-    else:
-        project_name = slugified
+    project_name = derive_project_name(prompt)
 
     if workspace is None:
         workspace = os.getcwd()
