@@ -147,7 +147,10 @@ def create_skill_app(role: str) -> FastAPI:
         if idempotency_key and idempotency_key in idempotency:
             existing_id = idempotency[idempotency_key]
             existing = tasks.get(existing_id, {"status": "processing"})
-            return {"task_id": existing_id, "status": existing.get("status", "processing")}
+            return {
+                "task_id": existing_id,
+                "status": existing.get("status", "processing"),
+            }
 
         task_id = uuid.uuid4().hex
         tasks[task_id] = {"status": "processing", "result": None}
