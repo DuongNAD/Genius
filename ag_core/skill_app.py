@@ -14,7 +14,7 @@ import os
 import uuid
 from typing import Any, Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from ag_core.config import load_config
@@ -125,19 +125,34 @@ def create_skill_app(role: str) -> FastAPI:
 
     # In-memory task store: task_id -> {"status", "result"/"error"}
     tasks: dict = {}
+    # Idempotency map: X-Idempotency-Key -> task_id, so a retried /run (e.g.
+    # after a transient network error where the server already accepted the
+    # first POST) returns the same task instead of dispatching the agent twice.
+    idempotency: dict = {}
 
     @app.post("/run")
     async def run_endpoint(
         request: RunRequest,
         background_tasks: BackgroundTasks,
+        idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key"),
         _auth: dict = Depends(verify_api_key),
         _rl: None = Depends(rate_limit_dependency),
     ):
         if strict_prompt and (not request.prompt or not request.prompt.strip()):
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
+        # A repeated idempotency key returns the in-flight/finished task. The
+        # check-and-record below is atomic: the handler never awaits between
+        # them, so concurrent retries cannot both create a task.
+        if idempotency_key and idempotency_key in idempotency:
+            existing_id = idempotency[idempotency_key]
+            existing = tasks.get(existing_id, {"status": "processing"})
+            return {"task_id": existing_id, "status": existing.get("status", "processing")}
+
         task_id = uuid.uuid4().hex
         tasks[task_id] = {"status": "processing", "result": None}
+        if idempotency_key:
+            idempotency[idempotency_key] = task_id
 
         async def _execute():
             try:

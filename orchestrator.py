@@ -438,6 +438,7 @@ async def call_api(
     poll_timeout: float = 60.0,
 ) -> str:
     import time
+    import uuid
     from ag_core.utils.jwt import encode_jwt
 
     import os
@@ -458,7 +459,6 @@ async def call_api(
         return _API_RESPONSE_CACHE[cache_key]
 
     if DISTRIBUTED_MODE:
-        import uuid
         from serve import (
             worker_registry,
             pending_tasks,
@@ -785,6 +785,9 @@ async def call_api(
     ).encode("utf-8")
 
     base_url = url.rstrip("/")
+    # Stable across the perform_post_with_retry retries so a re-sent /run after
+    # a transient error is deduplicated server-side instead of running twice.
+    idempotency_key = uuid.uuid4().hex
 
     async def _execute(c):
         try:
@@ -796,6 +799,7 @@ async def call_api(
                 "Authorization": f"Bearer {post_token}",
                 "X-Payload-SHA256": req_checksum,
                 "Content-Type": "application/json",
+                "X-Idempotency-Key": idempotency_key,
             }
             response = await perform_post_with_retry(
                 c, f"{base_url}/run", payload_bytes, post_headers
