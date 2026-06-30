@@ -7,18 +7,28 @@ from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
 from ag_core.utils.prompt_templates import AGENT_CORE_RULES
 
+
 class ClaudeArchitectAgent(BaseAgent):
     """
     Claude Architect Agent that scans project files, designs architecture,
     and documents structure and layout.
     """
-    def __init__(self, provider: BaseProvider, config: Config = None, **kwargs: Any) -> None:
+
+    def __init__(
+        self, provider: BaseProvider, config: Config = None, **kwargs: Any
+    ) -> None:
         self.config = config or load_config()
         super().__init__(name="ClaudeArchitectAgent", provider=provider, **kwargs)
 
-    async def run(self, prompt: str | None = None, context_data: dict | None = None) -> str:
-        user_prompt = prompt or self.extra_params.get("prompt") or "Design architecture and structure for the project."
-        
+    async def run(
+        self, prompt: str | None = None, context_data: dict | None = None
+    ) -> str:
+        user_prompt = (
+            prompt
+            or self.extra_params.get("prompt")
+            or "Design architecture and structure for the project."
+        )
+
         # Parse and wrap specialized slash commands
         words = user_prompt.strip().split(maxsplit=1)
         if words and words[0].startswith("/"):
@@ -31,23 +41,22 @@ class ClaudeArchitectAgent(BaseAgent):
             elif cmd == "/review-architecture":
                 user_prompt = f"Analyze the current project architecture, identifying architectural design patterns, coupling issues, and structural improvement areas:\n\n{query}"
 
-        
         # Determine scanning root
         root_dir = os.getcwd()
         exclude_patterns = self.config.scanner.exclude_patterns
-        
+
         # Scan files or use provided context_data
         if context_data is not None:
             scanned_files = context_data
         else:
             scanner = ProjectScanner(root_dir=root_dir, extra_ignores=exclude_patterns)
             scanned_files = scanner.scan()
-        
+
         # Format scanned files as input context
         context = ""
         for filepath, file_content in scanned_files.items():
             context += f"\n--- File: {filepath} ---\n{file_content}\n"
-            
+
         # Retrieve matching past interactions
         past_memories = self.retrieve_memory(user_prompt, limit=3)
         memory_context = ""
@@ -60,64 +69,55 @@ class ClaudeArchitectAgent(BaseAgent):
         if self.history:
             history_context += "Previous conversation history:\n"
             for turn in self.history:
-                history_context += f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
+                history_context += (
+                    f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
+                )
             history_context += "\n"
 
         full_prompt = f"{history_context}{user_prompt}\n"
         if memory_context:
             full_prompt += f"{memory_context}\n"
         full_prompt += f"\nProject files context:\n{context}"
-        
+
         # Invoke provider
         from ag_core.models import DesignPlan
         import json
+
         if hasattr(DesignPlan, "model_json_schema"):
             schema_dict = DesignPlan.model_json_schema()
         else:
             schema_dict = DesignPlan.schema()
         schema_json = json.dumps(schema_dict, indent=2)
-        
+
         sys_prompt = (
-            AGENT_CORE_RULES + 
-            "\nTách plan và implement (Separate plan and implement). Ép Agent này chỉ lên kiến trúc (plan), tuyệt đối không tự ý viết code implement."
+            AGENT_CORE_RULES
+            + "\nTách plan và implement (Separate plan and implement). Ép Agent này chỉ lên kiến trúc (plan), tuyệt đối không tự ý viết code implement."
             f"\n\nYou must output a JSON block conforming to the following JSON schema representation of the design plan:\n{schema_json}\n"
             "Format the JSON within a ```json block in your output."
         )
         response = await self.provider.send_prompt(full_prompt, system=sys_prompt)
         content = response.get("content", "")
         usage = response.get("usage", {})
-        
+
         self.history.append({"prompt": user_prompt, "response": content})
-        
+
         # Save interaction to memory
         self.store_memory(
             text=f"Prompt: {user_prompt}\nResponse: {content}",
-            metadata={"type": "agent_run", "task_id": self.extra_params.get("task_id", "unknown")}
+            metadata={
+                "type": "agent_run",
+                "task_id": self.extra_params.get("task_id", "unknown"),
+            },
         )
-        
+
         # Log transaction
         log_transaction(
             model_name=self.provider.model_name,
             prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0)
+            completion_tokens=usage.get("completion_tokens", 0),
         )
-        
+
         # Write to output file
-        output_file = self.extra_params.get("output_file")
-        if output_file is None:
-            if "output_file" in self.extra_params:
-                output_file = "None"
-            else:
-                output_file = "design.md"
-        
-        if output_file != "None":
-            try:
-                dir_name = os.path.dirname(output_file)
-                if dir_name:
-                    os.makedirs(dir_name, exist_ok=True)
-                with open(output_file, "w", encoding="utf-8") as f:
-                    f.write(content)
-            except Exception as e:
-                print(f"Warning: Failed to write output file {output_file}: {e}")
-            
+        self.write_output(content, "design.md")
+
         return content

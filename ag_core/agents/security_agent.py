@@ -7,20 +7,30 @@ from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
 from ag_core.utils.prompt_templates import AGENT_CORE_RULES
 
+
 class SecurityAgent(BaseAgent):
     """
     Security Agent that scans project files, performs security audits,
     checks for hardcoded secrets, vulnerabilities, and insecure dependencies.
     """
+
     __test__ = False
 
-    def __init__(self, provider: BaseProvider, config: Config = None, **kwargs: Any) -> None:
+    def __init__(
+        self, provider: BaseProvider, config: Config = None, **kwargs: Any
+    ) -> None:
         self.config = config or load_config()
         super().__init__(name="SecurityAgent", provider=provider, **kwargs)
 
-    async def run(self, prompt: str | None = None, context_data: dict | None = None) -> str:
-        user_prompt = prompt or self.extra_params.get("prompt") or "Perform a security audit on the codebase, checking for vulnerabilities and secrets."
-        
+    async def run(
+        self, prompt: str | None = None, context_data: dict | None = None
+    ) -> str:
+        user_prompt = (
+            prompt
+            or self.extra_params.get("prompt")
+            or "Perform a security audit on the codebase, checking for vulnerabilities and secrets."
+        )
+
         # Command routing
         words = user_prompt.strip().split(maxsplit=1)
         if words and words[0].startswith("/"):
@@ -33,17 +43,17 @@ class SecurityAgent(BaseAgent):
 
         root_dir = os.getcwd()
         exclude_patterns = self.config.scanner.exclude_patterns
-        
+
         if context_data is not None:
             scanned_files = context_data
         else:
             scanner = ProjectScanner(root_dir=root_dir, extra_ignores=exclude_patterns)
             scanned_files = scanner.scan()
-        
+
         context = ""
         for filepath, file_content in scanned_files.items():
             context += f"\n--- File: {filepath} ---\n{file_content}\n"
-            
+
         # Retrieve matching past interactions
         past_memories = self.retrieve_memory(user_prompt, limit=3)
         memory_context = ""
@@ -56,46 +66,36 @@ class SecurityAgent(BaseAgent):
         if self.history:
             history_context += "Previous conversation history:\n"
             for turn in self.history:
-                history_context += f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
+                history_context += (
+                    f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
+                )
             history_context += "\n"
 
         full_prompt = f"{history_context}{user_prompt}\n"
         if memory_context:
             full_prompt += f"{memory_context}\n"
         full_prompt += f"\nProject files context:\n{context}"
-        
+
         response = await self.provider.send_prompt(full_prompt, system=AGENT_CORE_RULES)
         content = response.get("content", "")
         usage = response.get("usage", {})
-        
+
         self.history.append({"prompt": user_prompt, "response": content})
-        
+
         self.store_memory(
             text=f"Prompt: {user_prompt}\nResponse: {content}",
-            metadata={"type": "agent_run", "task_id": self.extra_params.get("task_id", "unknown")}
+            metadata={
+                "type": "agent_run",
+                "task_id": self.extra_params.get("task_id", "unknown"),
+            },
         )
-        
+
         log_transaction(
             model_name=self.provider.model_name,
             prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0)
+            completion_tokens=usage.get("completion_tokens", 0),
         )
-        
-        output_file = self.extra_params.get("output_file")
-        if output_file is None:
-            if "output_file" in self.extra_params:
-                output_file = "None"
-            else:
-                output_file = "audit.md"
-        
-        if output_file != "None":
-            try:
-                dir_name = os.path.dirname(output_file)
-                if dir_name:
-                    os.makedirs(dir_name, exist_ok=True)
-                with open(output_file, "w", encoding="utf-8") as f:
-                    f.write(content)
-            except Exception as e:
-                print(f"Warning: Failed to write output file {output_file}: {e}")
-            
+
+        self.write_output(content, "audit.md")
+
         return content
