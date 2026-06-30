@@ -6,21 +6,31 @@ from ag_core.scanner.project_scanner import ProjectScanner
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
 
+
 class TesterAgent(BaseAgent):
     """
     Tester Agent that receives Codex's review output, scans project files,
     and writes automatically generated unit tests/scenarios.
     """
+
     __test__ = False
 
-    def __init__(self, provider: BaseProvider, config: Config = None, **kwargs: Any) -> None:
+    def __init__(
+        self, provider: BaseProvider, config: Config = None, **kwargs: Any
+    ) -> None:
         self.config = config or load_config()
         self.max_retries = kwargs.get("max_retries", 3)
         super().__init__(name="TesterAgent", provider=provider, **kwargs)
 
-    async def run(self, prompt: str | None = None, context_data: dict | None = None) -> str:
-        user_prompt = prompt or self.extra_params.get("prompt") or "Generate unit tests and scenarios based on the review output and project files."
-        
+    async def run(
+        self, prompt: str | None = None, context_data: dict | None = None
+    ) -> str:
+        user_prompt = (
+            prompt
+            or self.extra_params.get("prompt")
+            or "Generate unit tests and scenarios based on the review output and project files."
+        )
+
         # Parse and wrap specialized slash commands
         words = user_prompt.strip().split(maxsplit=1)
         if words and words[0].startswith("/"):
@@ -31,46 +41,49 @@ class TesterAgent(BaseAgent):
             elif cmd == "/stress-test":
                 user_prompt = f"Create a performance or stress testing script or scenario to simulate heavy concurrent load, analyzing latency and failure modes:\n\n{query}"
 
-        
         # Determine scanning root
         root_dir = os.getcwd()
         exclude_patterns = self.config.scanner.exclude_patterns
-        
+
         # Scan files or use provided context_data
         if context_data is not None:
             scanned_files = context_data
         else:
             scanner = ProjectScanner(root_dir=root_dir, extra_ignores=exclude_patterns)
             scanned_files = scanner.scan()
-        
+
         # Format scanned files as input context
         context = ""
         for filepath, content in scanned_files.items():
             context += f"\n--- File: {filepath} ---\n{content}\n"
-            
+
         history_context = ""
         if self.history:
             history_context += "Previous conversation history:\n"
             for turn in self.history:
-                history_context += f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
+                history_context += (
+                    f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
+                )
             history_context += "\n"
-            
-        full_prompt = f"{history_context}{user_prompt}\n\nProject files context:\n{context}"
-        
+
+        full_prompt = (
+            f"{history_context}{user_prompt}\n\nProject files context:\n{context}"
+        )
+
         from ag_core.utils.prompt_templates import AGENT_CORE_RULES
-        
+
         # Invoke provider
         response = await self.provider.send_prompt(full_prompt, system=AGENT_CORE_RULES)
         content = response.get("content", "")
         usage = response.get("usage", {})
-        
+
         # Log transaction
         log_transaction(
             model_name=self.provider.model_name,
             prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0)
+            completion_tokens=usage.get("completion_tokens", 0),
         )
-        
+
         # Write to output file
         output_file = self.extra_params.get("output_file")
         if output_file is None:
@@ -81,7 +94,8 @@ class TesterAgent(BaseAgent):
 
         def _extract_code(txt: str) -> str:
             import re
-            blocks = re.findall(r'```[a-zA-Z0-9_-]*\n(.*?)\n```', txt, re.DOTALL)
+
+            blocks = re.findall(r"```[a-zA-Z0-9_-]*\n(.*?)\n```", txt, re.DOTALL)
             if blocks:
                 return "\n".join(blocks).strip()
             return txt.strip()
@@ -99,19 +113,18 @@ class TesterAgent(BaseAgent):
                         f.write(code_to_write)
                 except Exception as e:
                     print(f"Warning: Failed to write output file {output_file}: {e}")
-                
+
                 import sys
                 import asyncio
+
                 pytest_cmd = [sys.executable, "-m", "pytest", output_file]
                 env = os.environ.copy()
                 abs_output_file = os.path.abspath(output_file)
                 project_dir = os.path.dirname(os.path.dirname(abs_output_file))
                 project_src_dir = os.path.join(project_dir, "src")
-                env["PYTHONPATH"] = os.path.pathsep.join([
-                    project_dir,
-                    project_src_dir,
-                    env.get("PYTHONPATH", "")
-                ]).strip(os.path.pathsep)
+                env["PYTHONPATH"] = os.path.pathsep.join(
+                    [project_dir, project_src_dir, env.get("PYTHONPATH", "")]
+                ).strip(os.path.pathsep)
 
                 if "PYTEST_CURRENT_TEST" in os.environ:
                     exit_code = 0
@@ -122,11 +135,15 @@ class TesterAgent(BaseAgent):
                             *pytest_cmd,
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE,
-                            env=env
+                            env=env,
                         )
                         stdout, stderr = await process.communicate()
                         exit_code = process.returncode
-                        test_failures_logs = stdout.decode("utf-8", errors="replace") + "\n" + stderr.decode("utf-8", errors="replace")
+                        test_failures_logs = (
+                            stdout.decode("utf-8", errors="replace")
+                            + "\n"
+                            + stderr.decode("utf-8", errors="replace")
+                        )
                     except Exception as e:
                         exit_code = -999
                         test_failures_logs = f"Failed to run pytest: {e}"
@@ -139,13 +156,15 @@ class TesterAgent(BaseAgent):
                         f"Error logs:\n{test_failures_logs}\n\n"
                         f"Please fix the test code and return it. Original context:\n{full_prompt}"
                     )
-                    response = await self.provider.send_prompt(retry_prompt, system=AGENT_CORE_RULES)
+                    response = await self.provider.send_prompt(
+                        retry_prompt, system=AGENT_CORE_RULES
+                    )
                     content = response.get("content", "")
                     usage = response.get("usage", {})
                     log_transaction(
                         model_name=self.provider.model_name,
                         prompt_tokens=usage.get("prompt_tokens", 0),
-                        completion_tokens=usage.get("completion_tokens", 0)
+                        completion_tokens=usage.get("completion_tokens", 0),
                     )
 
             # Make sure the final clean code without evidence remains written in output_file
@@ -153,11 +172,14 @@ class TesterAgent(BaseAgent):
             try:
                 with open(output_file, "w", encoding="utf-8") as f:
                     f.write(code_to_write)
-            except Exception as e:
+            except Exception:
                 pass
 
             # Append the test execution evidence (pytest stdout/stderr) to the returned markdown response
-            content = content + f"\n\n### Pytest Execution Evidence\n```\n{test_failures_logs}\n```"
-        
+            content = (
+                content
+                + f"\n\n### Pytest Execution Evidence\n```\n{test_failures_logs}\n```"
+            )
+
         self.history.append({"prompt": user_prompt, "response": content})
         return content

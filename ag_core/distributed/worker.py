@@ -1,7 +1,6 @@
 import asyncio
 import time
 import json
-import hashlib
 import os
 from typing import Dict, List, Optional, Any
 from ag_core.utils.jwt import encode_jwt
@@ -106,7 +105,7 @@ class ClientWorker:
                     status_code, body = await self.send_heartbeat()
                     if status_code == 404:
                         print(
-                            f"[Worker] Heartbeat 404: not registered. Re-registering..."
+                            "[Worker] Heartbeat 404: not registered. Re-registering..."
                         )
                         await self.register()
                 except Exception:
@@ -429,7 +428,7 @@ class ClientWorker:
                                 and data.get("error") == "not_registered"
                             ):
                                 print(
-                                    f"[Worker] Received not_registered error. Re-registering..."
+                                    "[Worker] Received not_registered error. Re-registering..."
                                 )
                                 reg_payload = {
                                     "type": "register",
@@ -461,7 +460,7 @@ class ClientWorker:
 
                                 if self.status == "busy":
                                     print(
-                                        f"[Worker] Worker is busy, rejecting dispatch!"
+                                        "[Worker] Worker is busy, rejecting dispatch!"
                                     )
                                     err_res = {"error": "Worker is busy"}
                                     err_chk = calculate_checksum(err_res, self.api_key)
@@ -477,7 +476,7 @@ class ClientWorker:
                                     continue
 
                                 if not checksum:
-                                    print(f"[Worker] Missing checksum in dispatch!")
+                                    print("[Worker] Missing checksum in dispatch!")
                                     err_res = {
                                         "error": "Missing checksum validation on worker node."
                                     }

@@ -2,7 +2,8 @@ import json
 import hmac
 import hashlib
 import os
-from typing import Any, Tuple, Union, Optional
+from typing import Any, Tuple, Optional
+
 
 def calculate_checksum(payload: Any, secret: str) -> str:
     """
@@ -17,9 +18,12 @@ def calculate_checksum(payload: Any, secret: str) -> str:
     elif isinstance(payload, str):
         data = payload.encode("utf-8")
     else:
-        data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    
+        data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+
     return hmac.new(secret.encode("utf-8"), data, hashlib.sha256).hexdigest()
+
 
 def verify_checksum(payload: Any, checksum: str, secret: str) -> bool:
     """
@@ -30,10 +34,13 @@ def verify_checksum(payload: Any, checksum: str, secret: str) -> bool:
         return False
     if not checksum:
         return False
-    
+
     return hmac.compare_digest(calculate_checksum(payload, secret), checksum)
 
-def verify_raw_body_checksum(body: bytes, checksum: str, secret: str) -> Tuple[bool, bool]:
+
+def verify_raw_body_checksum(
+    body: bytes, checksum: str, secret: str
+) -> Tuple[bool, bool]:
     """
     Verify the checksum of raw request body bytes.
     Returns (is_valid, is_plain).
@@ -42,16 +49,19 @@ def verify_raw_body_checksum(body: bytes, checksum: str, secret: str) -> Tuple[b
         return False, False
     if not checksum:
         return False, False
-    
+
     # 1. Try HMAC-SHA256
     try:
-        computed_hmac = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        computed_hmac = hmac.new(
+            secret.encode("utf-8"), body, hashlib.sha256
+        ).hexdigest()
         if hmac.compare_digest(computed_hmac, checksum):
             return True, False
     except Exception:
         pass
-            
+
     return False, False
+
 
 # Centralized Authentication and Checksum Middleware
 from fastapi import Depends, HTTPException, Header, status, Request
@@ -63,9 +73,10 @@ from ag_core.config import load_config
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
+
 def verify_api_key(
     x_api_key: Optional[str] = Depends(api_key_header),
-    authorization: Optional[str] = Header(None, alias="Authorization")
+    authorization: Optional[str] = Header(None, alias="Authorization"),
 ) -> dict:
     token = None
     if x_api_key:
@@ -78,8 +89,7 @@ def verify_api_key(
 
     if not token:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing token"
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token"
         )
     config = load_config()
     expected_key = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
@@ -88,9 +98,10 @@ def verify_api_key(
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired token: {str(e)}"
+            detail=f"Invalid or expired token: {str(e)}",
         )
     return payload
+
 
 async def checksum_middleware(request: Request, call_next):
     path = request.url.path
@@ -105,11 +116,9 @@ async def checksum_middleware(request: Request, call_next):
             body_bytes = json.dumps(content).encode("utf-8")
             checksum = hashlib.sha256(body_bytes).hexdigest()
             return JSONResponse(
-                status_code=400,
-                content=content,
-                headers={"X-Payload-SHA256": checksum}
+                status_code=400, content=content, headers={"X-Payload-SHA256": checksum}
             )
-            
+
         body = await request.body()
         is_valid, is_plain = verify_raw_body_checksum(body, x_payload, expected_key)
         if not is_valid:
@@ -117,30 +126,27 @@ async def checksum_middleware(request: Request, call_next):
             body_bytes = json.dumps(content).encode("utf-8")
             checksum = hashlib.sha256(body_bytes).hexdigest()
             return JSONResponse(
-                status_code=400,
-                content=content,
-                headers={"X-Payload-SHA256": checksum}
+                status_code=400, content=content, headers={"X-Payload-SHA256": checksum}
             )
         if is_plain:
             request.state.use_plain_checksum = True
-            
+
     response = await call_next(request)
-    
+
     response_body = b""
     async for chunk in response.body_iterator:
         response_body += chunk
-        
+
     if getattr(request.state, "use_plain_checksum", False):
         checksum = hashlib.sha256(response_body).hexdigest()
     else:
         checksum = calculate_checksum(response_body, expected_key)
-        
+
     response.headers["X-Payload-SHA256"] = checksum
-    
+
     return FastAPIResponse(
         content=response_body,
         status_code=response.status_code,
         headers=dict(response.headers),
-        media_type=response.media_type
+        media_type=response.media_type,
     )
-

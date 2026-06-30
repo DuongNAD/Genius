@@ -2,20 +2,20 @@ import sqlite3
 import json
 import time
 import uuid
-import contextlib
 import threading
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
+
 
 class Artifact:
     def __init__(
-        self, 
-        name: str, 
-        content: Any, 
-        created_by: str, 
-        content_type: str = "text", 
-        parent_id: Optional[str] = None, 
+        self,
+        name: str,
+        content: Any,
+        created_by: str,
+        content_type: str = "text",
+        parent_id: Optional[str] = None,
         metadata: Optional[Dict] = None,
-        artifact_id: Optional[str] = None
+        artifact_id: Optional[str] = None,
     ):
         self.artifact_id = artifact_id or str(uuid.uuid4())
         self.name = name
@@ -28,6 +28,7 @@ class Artifact:
         self.timestamp = time.time()
         self.parent_id = parent_id
         self.metadata = metadata or {}
+
 
 class MessageBus:
     def __init__(self, db_path: Optional[str] = None):
@@ -68,7 +69,11 @@ class MessageBus:
                 conn.close()
 
     def close(self):
-        if hasattr(self, "local") and hasattr(self.local, "conn") and self.local.conn is not None:
+        if (
+            hasattr(self, "local")
+            and hasattr(self.local, "conn")
+            and self.local.conn is not None
+        ):
             try:
                 self.local.conn.close()
             except Exception:
@@ -88,7 +93,7 @@ class MessageBus:
             "created_by": artifact.created_by,
             "timestamp": artifact.timestamp,
             "parent_id": artifact.parent_id,
-            "metadata": artifact.metadata
+            "metadata": artifact.metadata,
         }
 
         with self.lock:
@@ -101,15 +106,35 @@ class MessageBus:
 
                 serialized_content = (
                     json.dumps(artifact.content)
-                    if artifact.content_type == "json" or isinstance(artifact.content, (dict, list))
+                    if artifact.content_type == "json"
+                    or isinstance(artifact.content, (dict, list))
                     else str(artifact.content)
                 )
                 from ag_core.utils.db import enqueue_db_write
-                
-                def _publish_artifact_impl(conn, artifact_id, name, serialized_content, content_type, created_by, timestamp, parent_id, metadata_json):
+
+                def _publish_artifact_impl(
+                    conn,
+                    artifact_id,
+                    name,
+                    serialized_content,
+                    content_type,
+                    created_by,
+                    timestamp,
+                    parent_id,
+                    metadata_json,
+                ):
                     conn.execute(
                         "INSERT OR REPLACE INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (artifact_id, name, serialized_content, content_type, created_by, timestamp, parent_id, metadata_json)
+                        (
+                            artifact_id,
+                            name,
+                            serialized_content,
+                            content_type,
+                            created_by,
+                            timestamp,
+                            parent_id,
+                            metadata_json,
+                        ),
                     )
                     conn.commit()
 
@@ -124,7 +149,7 @@ class MessageBus:
                         artifact.timestamp,
                         artifact.parent_id,
                         json.dumps(artifact.metadata),
-                        db_path=self.db_path
+                        db_path=self.db_path,
                     )
                 except Exception:
                     raise
@@ -140,7 +165,9 @@ class MessageBus:
                 conn = self._get_connection()
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
-                cursor.execute("SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,))
+                cursor.execute(
+                    "SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)
+                )
                 row = cursor.fetchone()
                 if row:
                     content = row["content"]
@@ -157,7 +184,9 @@ class MessageBus:
                         "created_by": row["created_by"],
                         "timestamp": row["timestamp"],
                         "parent_id": row["parent_id"],
-                        "metadata": json.loads(row["metadata"]) if row["metadata"] else {}
+                        "metadata": (
+                            json.loads(row["metadata"]) if row["metadata"] else {}
+                        ),
                     }
         return None
 
@@ -175,8 +204,8 @@ class MessageBus:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT * FROM artifacts WHERE name = ? ORDER BY timestamp DESC LIMIT 1", 
-                    (name,)
+                    "SELECT * FROM artifacts WHERE name = ? ORDER BY timestamp DESC LIMIT 1",
+                    (name,),
                 )
                 row = cursor.fetchone()
                 if row:
@@ -194,7 +223,9 @@ class MessageBus:
                         "created_by": row["created_by"],
                         "timestamp": row["timestamp"],
                         "parent_id": row["parent_id"],
-                        "metadata": json.loads(row["metadata"]) if row["metadata"] else {}
+                        "metadata": (
+                            json.loads(row["metadata"]) if row["metadata"] else {}
+                        ),
                     }
 
             if in_mem_latest and db_latest:

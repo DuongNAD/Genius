@@ -1,9 +1,8 @@
 import asyncio
 import time
-import json
-import hashlib
 import os
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any
+
 
 class TaskQueue(list):
     def qsize(self) -> int:
@@ -26,6 +25,7 @@ class TaskQueue(list):
     def task_done(self):
         pass
 
+
 class BoundedTasks(dict):
     def __setitem__(self, key, value):
         if len(self) >= 10000:
@@ -39,6 +39,7 @@ class BoundedTasks(dict):
                 first_key = next(iter(self))
                 self.pop(first_key, None)
         super().__setitem__(key, value)
+
 
 class CentralHub:
     def __init__(self, api_key: Optional[str] = None):
@@ -62,6 +63,7 @@ class CentralHub:
         if self._api_key_override is not None:
             return self._api_key_override
         from ag_core.config import load_config
+
         try:
             config = load_config()
             val = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
@@ -105,15 +107,18 @@ class CentralHub:
         # 1. Prune stale workers (with a 10ms grace margin for scheduling jitter)
         dead_workers = []
         stale_websockets = []
-        
+
         async with self.lock:
             for w_id, w_info in list(self.workers.items()):
-                if now - w_info["last_heartbeat"] >= self.config["heartbeat_timeout"] - 0.01:
+                if (
+                    now - w_info["last_heartbeat"]
+                    >= self.config["heartbeat_timeout"] - 0.01
+                ):
                     dead_workers.append(w_id)
                     ws = w_info.get("ws")
                     if ws:
                         stale_websockets.append(ws)
-            
+
             for w_id in dead_workers:
                 # Fail any running tasks assigned to this dead worker
                 for t_id, t_info in list(self.tasks.items()):
@@ -138,7 +143,9 @@ class CentralHub:
                 t_info = self.tasks[t_id]
                 w_id = t_info["worker_id"]
                 t_info["status"] = "failed"
-                t_info["result"] = {"error": f"Task timed out after {self.config['task_timeout']}s"}
+                t_info["result"] = {
+                    "error": f"Task timed out after {self.config['task_timeout']}s"
+                }
                 if w_id and w_id in self.workers:
                     self.workers[w_id]["status"] = "idle"
                     ws = self.workers[w_id].get("ws")
@@ -151,7 +158,9 @@ class CentralHub:
                         try:
                             payload = {"task_id": t_id}
                             headers = self.create_headers(payload)
-                            await self.network.send_to_worker(w_id, "/cancel", payload, headers)
+                            await self.network.send_to_worker(
+                                w_id, "/cancel", payload, headers
+                            )
                         except Exception:
                             pass
 
@@ -173,18 +182,22 @@ class CentralHub:
     def verify_auth(self, headers: Dict[str, str]) -> bool:
         auth_header = headers.get("X-API-Key") or headers.get("x-api-key")
         if not auth_header and hasattr(headers, "items"):
-            auth_header = next((v for k, v in headers.items() if k.lower() == "x-api-key"), None)
+            auth_header = next(
+                (v for k, v in headers.items() if k.lower() == "x-api-key"), None
+            )
         return auth_header == self.api_key
 
     def verify_checksum(self, payload: Any, headers: Dict[str, str]) -> bool:
         checksum = headers.get("X-Payload-SHA256") or headers.get("x-payload-sha256")
         if not checksum and hasattr(headers, "items"):
-            checksum = next((v for k, v in headers.items() if k.lower() == "x-payload-sha256"), None)
+            checksum = next(
+                (v for k, v in headers.items() if k.lower() == "x-payload-sha256"), None
+            )
         if not checksum:
             return False
         from ag_core.utils.security import verify_checksum
-        return verify_checksum(payload, checksum, self.api_key)
 
+        return verify_checksum(payload, checksum, self.api_key)
 
     def check_liveness(self):
         # Keep this for backward compatibility in tests
@@ -192,9 +205,12 @@ class CentralHub:
         dead_workers = []
         for w_id, w_info in list(self.workers.items()):
             # Allow a 10ms grace margin for timing/scheduler jitter
-            if now - w_info["last_heartbeat"] >= self.config["heartbeat_timeout"] - 0.01:
+            if (
+                now - w_info["last_heartbeat"]
+                >= self.config["heartbeat_timeout"] - 0.01
+            ):
                 dead_workers.append(w_id)
-        
+
         for w_id in dead_workers:
             for t_id, t_info in list(self.tasks.items()):
                 if t_info["worker_id"] == w_id and t_info["status"] == "running":
@@ -207,7 +223,9 @@ class CentralHub:
             if self.network:
                 self.network.unregister_worker(w_id)
 
-    async def handle_request(self, endpoint: str, payload: Any, headers: Dict[str, str]) -> tuple[int, Any, Dict[str, str]]:
+    async def handle_request(
+        self, endpoint: str, payload: Any, headers: Dict[str, str]
+    ) -> tuple[int, Any, Dict[str, str]]:
         if not self._sweeper_running:
             self.start_sweeper()
 
@@ -225,9 +243,12 @@ class CentralHub:
                     return 400, {"error": "Missing worker_id"}, {}
                 if roles is None:
                     return 400, {"error": "Missing roles"}, {}
-                if len(self.workers) >= self.config["max_workers"] and worker_id not in self.workers:
+                if (
+                    len(self.workers) >= self.config["max_workers"]
+                    and worker_id not in self.workers
+                ):
                     return 503, {"error": "Max workers reached"}, {}
-                
+
                 # If worker is already registered, preserve its ws connection and state
                 status = "idle"
                 existing_ws = None
@@ -235,10 +256,13 @@ class CentralHub:
                     existing_ws = self.workers[worker_id].get("ws")
                     if self.workers[worker_id].get("status") == "busy":
                         status = "busy"
-                
+
                 # Verify if there are active tasks assigned to it
                 for t_info in self.tasks.values():
-                    if t_info.get("worker_id") == worker_id and t_info.get("status") == "running":
+                    if (
+                        t_info.get("worker_id") == worker_id
+                        and t_info.get("status") == "running"
+                    ):
                         status = "busy"
                         break
 
@@ -246,7 +270,7 @@ class CentralHub:
                     "roles": roles,
                     "last_heartbeat": time.time(),
                     "status": status,
-                    "ws": existing_ws
+                    "ws": existing_ws,
                 }
                 await self._process_queue()
                 return 200, {"status": "registered", "worker_id": worker_id}, {}
@@ -255,7 +279,9 @@ class CentralHub:
                 worker_id = payload.get("worker_id")
                 if worker_id not in self.workers:
                     return 404, {"error": "Worker not found"}, {}
-                self.workers[worker_id]["last_heartbeat"] = max(time.time(), self.workers[worker_id]["last_heartbeat"] + 0.001)
+                self.workers[worker_id]["last_heartbeat"] = max(
+                    time.time(), self.workers[worker_id]["last_heartbeat"] + 0.001
+                )
                 return 200, {"status": "alive"}, {}
 
             elif endpoint == "/dispatch":
@@ -273,9 +299,9 @@ class CentralHub:
                     "status": "pending",
                     "result": None,
                     "created_at": time.time(),
-                    "worker_id": None
+                    "worker_id": None,
                 }
-                
+
                 # Find eligible idle worker
                 eligible_worker = self._find_eligible_worker(role)
                 if eligible_worker:
@@ -283,7 +309,9 @@ class CentralHub:
                     self.tasks[task_id]["status"] = "running"
                     self.tasks[task_id]["worker_id"] = eligible_worker
                     self.tasks[task_id]["started_at"] = time.time()
-                    asyncio.create_task(self._dispatch_to_worker(eligible_worker, task_id))
+                    asyncio.create_task(
+                        self._dispatch_to_worker(eligible_worker, task_id)
+                    )
                     return 202, {"task_id": task_id, "status": "running"}, {}
                 else:
                     self.task_queue.append(task_id)
@@ -296,7 +324,15 @@ class CentralHub:
                 if task_id not in self.tasks:
                     return 404, {"error": "Task not found"}, {}
                 task = self.tasks[task_id]
-                return 200, {"task_id": task_id, "status": task["status"], "result": task["result"]}, {}
+                return (
+                    200,
+                    {
+                        "task_id": task_id,
+                        "status": task["status"],
+                        "result": task["result"],
+                    },
+                    {},
+                )
 
             elif endpoint == "/update_config":
                 new_config = payload.get("config", {})
@@ -305,7 +341,11 @@ class CentralHub:
                         if not isinstance(v, (int, float)):
                             return 400, {"error": f"Invalid type for {k}"}, {}
                         if v < 0:
-                            return 400, {"error": f"Value for {k} cannot be negative"}, {}
+                            return (
+                                400,
+                                {"error": f"Value for {k} cannot be negative"},
+                                {},
+                            )
                 self.config.update(new_config)
                 return 200, {"status": "config_updated", "config": self.config}, {}
 
@@ -319,14 +359,18 @@ class CentralHub:
                 if task_id not in self.tasks:
                     return 404, {"error": "Task not found"}, {}
                 if self.tasks[task_id]["worker_id"] != worker_id:
-                    return 403, {"error": "Forbidden: Worker ID does not match assigned task"}, {}
-                
+                    return (
+                        403,
+                        {"error": "Forbidden: Worker ID does not match assigned task"},
+                        {},
+                    )
+
                 # Update task only if it is still running
                 if self.tasks[task_id]["status"] == "running":
                     self.tasks[task_id]["status"] = status
                     self.tasks[task_id]["result"] = result
                 self.workers[worker_id]["status"] = "idle"
-                
+
                 await self._process_queue()
                 return 200, {"status": "result_acknowledged"}, {}
 
@@ -335,7 +379,10 @@ class CentralHub:
                 if worker_id in self.workers:
                     # Fail running tasks
                     for t_id, t_info in list(self.tasks.items()):
-                        if t_info["worker_id"] == worker_id and t_info["status"] == "running":
+                        if (
+                            t_info["worker_id"] == worker_id
+                            and t_info["status"] == "running"
+                        ):
                             t_info["status"] = "failed"
                             t_info["result"] = {"error": "Worker disconnected"}
                     del self.workers[worker_id]
@@ -351,7 +398,7 @@ class CentralHub:
                     serialized_workers[w_id] = {
                         "roles": w_info.get("roles"),
                         "status": w_info.get("status"),
-                        "last_heartbeat": w_info.get("last_heartbeat")
+                        "last_heartbeat": w_info.get("last_heartbeat"),
                     }
                 return 200, serialized_workers, {}
 
@@ -364,6 +411,7 @@ class CentralHub:
                 if not path or ".." in path or path.startswith("/") or ":" in path:
                     return 400, {"error": "Path traversal detected"}, {}
                 import os
+
                 dirname = os.path.dirname(path)
                 if dirname:
                     os.makedirs(dirname, exist_ok=True)
@@ -391,12 +439,13 @@ class CentralHub:
             ws = w_info["ws"]
             task_data = self.tasks[task_id]["task_data"]
             from ag_core.utils.security import calculate_checksum
+
             checksum = calculate_checksum(task_data, self.api_key)
             payload = {
                 "type": "run_task",
                 "task_id": task_id,
                 "task_data": task_data,
-                "checksum": checksum
+                "checksum": checksum,
             }
             try:
                 await ws.send_json(payload)
@@ -404,7 +453,9 @@ class CentralHub:
             except Exception as e:
                 async with self.lock:
                     self.tasks[task_id]["status"] = "failed"
-                    self.tasks[task_id]["result"] = {"error": f"WS Dispatch error: {str(e)}"}
+                    self.tasks[task_id]["result"] = {
+                        "error": f"WS Dispatch error: {str(e)}"
+                    }
                     if worker_id in self.workers:
                         self.workers[worker_id]["status"] = "idle"
                     await self._process_queue()
@@ -416,18 +467,24 @@ class CentralHub:
         payload = {"task_id": task_id, "task_data": self.tasks[task_id]["task_data"]}
         headers = self.create_headers(payload)
         try:
-            status_code, body = await self.network.send_to_worker(worker_id, "/run_task", payload, headers)
+            status_code, body = await self.network.send_to_worker(
+                worker_id, "/run_task", payload, headers
+            )
             if status_code != 200:
                 async with self.lock:
                     self.tasks[task_id]["status"] = "failed"
-                    self.tasks[task_id]["result"] = {"error": f"Worker rejected task: {body}"}
+                    self.tasks[task_id]["result"] = {
+                        "error": f"Worker rejected task: {body}"
+                    }
                     if worker_id in self.workers:
                         self.workers[worker_id]["status"] = "idle"
                     await self._process_queue()
         except Exception as e:
             async with self.lock:
                 self.tasks[task_id]["status"] = "failed"
-                self.tasks[task_id]["result"] = {"error": f"Dispatch communication error: {str(e)}"}
+                self.tasks[task_id]["result"] = {
+                    "error": f"Dispatch communication error: {str(e)}"
+                }
                 if worker_id in self.workers:
                     self.workers[worker_id]["status"] = "idle"
                 await self._process_queue()
@@ -442,8 +499,10 @@ class CentralHub:
         now = time.time()
         # Find all idle and live workers
         idle_workers = [
-            w_id for w_id, w_info in self.workers.items()
-            if w_info["status"] == "idle" and (now - w_info["last_heartbeat"] < self.config["heartbeat_timeout"])
+            w_id
+            for w_id, w_info in self.workers.items()
+            if w_info["status"] == "idle"
+            and (now - w_info["last_heartbeat"] < self.config["heartbeat_timeout"])
         ]
         if not idle_workers or not self.task_queue:
             return
@@ -454,7 +513,7 @@ class CentralHub:
             if not task or task["status"] != "pending":
                 processed_tasks.append(task_id)
                 continue
-            
+
             # Find an idle worker that matches
             target_worker = None
             for w_id in idle_workers:
@@ -462,7 +521,7 @@ class CentralHub:
                 if task["role"] in w_info["roles"]:
                     target_worker = w_id
                     break
-            
+
             if target_worker:
                 self.workers[target_worker]["status"] = "busy"
                 task["status"] = "running"
@@ -480,8 +539,6 @@ class CentralHub:
 
     def create_headers(self, payload: Any) -> Dict[str, str]:
         from ag_core.utils.security import calculate_checksum
+
         checksum = calculate_checksum(payload, self.api_key)
-        return {
-            "X-API-Key": self.api_key,
-            "X-Payload-SHA256": checksum
-        }
+        return {"X-API-Key": self.api_key, "X-Payload-SHA256": checksum}
