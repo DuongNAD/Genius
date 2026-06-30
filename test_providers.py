@@ -1,7 +1,5 @@
-import pytest
 import asyncio
 import json
-import shutil
 from unittest.mock import AsyncMock, patch
 from ag_core.providers.openai_provider import OpenAIProvider
 from ag_core.providers.anthropic_provider import AnthropicProvider

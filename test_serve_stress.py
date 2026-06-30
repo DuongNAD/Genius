@@ -5,8 +5,6 @@ import pytest
 import pytest_asyncio
 import websockets
 import uvicorn
-from fastapi import WebSocket
-from starlette.websockets import WebSocketDisconnect
 
 import serve as serve_mod
 

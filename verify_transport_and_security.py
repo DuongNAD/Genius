@@ -3,16 +3,13 @@ import sys
 import time
 import json
 import hashlib
-import httpx
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 
 # Add project root to sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from serve import app, worker_registry
+from serve import app
 import serve
-from ag_core.config import load_config
 from ag_core.utils.jwt import encode_jwt
 
 

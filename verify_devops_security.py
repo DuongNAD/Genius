@@ -4,12 +4,7 @@ import sys
 import time
 import json
 import hashlib
-import asyncio
-import threading
-import httpx
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
-import uvicorn
 
 # Ensure the root directory is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

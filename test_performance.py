@@ -1,16 +1,13 @@
 import os
 import sys
 import pytest
-import asyncio
-import hashlib
-import json
 import httpx
 from unittest.mock import patch, MagicMock, AsyncMock
 
 # Add current workspace to path to import orchestrator and ag_core
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from orchestrator import call_api, run_pipeline, PipelineError, _API_RESPONSE_CACHE
+from orchestrator import call_api, run_pipeline, _API_RESPONSE_CACHE
 from ag_core.utils.rate_limiter import (
     TokenBucketRateLimiter,
     limiter,

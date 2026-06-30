@@ -13,12 +13,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from test_e2e import (
     get_valid_api_key,
-    make_mock_http_response,
-    client_post,
-    client_get,
 )
 
-from ag_core.memory.vector_store import VectorMemory, SimpleTFIDFEmbedding
+from ag_core.memory.vector_store import VectorMemory
 
 # Helper functions to check implementation existence
 
@@ -597,7 +594,6 @@ async def test_t2_security_rate_limit_429_retry():
     check_security_agent_implemented()
     check_orchestrator_routing_implemented()
 
-    import orchestrator
     from orchestrator import call_api
 
     call_count = 0
@@ -629,7 +625,6 @@ async def test_t2_devops_rate_limit_429_retry():
     check_devops_agent_implemented()
     check_orchestrator_routing_implemented()
 
-    import orchestrator
     from orchestrator import call_api
 
     call_count = 0

@@ -1,6 +1,5 @@
 import asyncio
 import threading
-import time
 import pytest
 from ag_core.utils.rate_limiter import TokenBucketRateLimiter
 

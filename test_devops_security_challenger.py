@@ -12,7 +12,6 @@ from fastapi.testclient import TestClient
 # Ensure workspace root is in python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ag_core.config import load_config
 from ag_core.utils.jwt import encode_jwt
 from test_e2e import get_valid_api_key
 

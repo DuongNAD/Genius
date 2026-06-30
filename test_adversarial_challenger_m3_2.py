@@ -1,11 +1,9 @@
 # test_adversarial_challenger_m3_2.py
 import os
 import sqlite3
-import json
 import pytest
-import time
 import threading
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from ag_core.memory.vector_store import SimpleTFIDFEmbedding, VectorMemory
 import orchestrator

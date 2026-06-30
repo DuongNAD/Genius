@@ -1,14 +1,13 @@
 import os
 import sys
 import pytest
-import subprocess
 import shutil
 import stat
 import httpx
 import asyncio
 import hashlib
 import json
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 # Add workspace root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

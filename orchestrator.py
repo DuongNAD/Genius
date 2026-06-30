@@ -117,13 +117,9 @@ ROUTING_TABLE = {
 class PipelineError(Exception):
     """Custom exception raised when a pipeline stage fails or validation fails."""
 
-    pass
-
 
 class ChecksumMismatchError(Exception):
     """Custom exception raised when payload checksum validation fails."""
-
-    pass
 
 
 def resolve_grok_cmd():

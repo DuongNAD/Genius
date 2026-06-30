@@ -1,8 +1,7 @@
 import os
-import sqlite3
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 
 # Force environment variable before importing dashboard

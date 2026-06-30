@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
-import json
 import os
 import sys
 import time
 import uuid
-import websockets
 
 # Add project root to sys.path
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

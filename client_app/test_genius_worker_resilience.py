@@ -1,6 +1,5 @@
 import asyncio
 import json
-import time
 import os
 import base64
 import pytest
@@ -14,11 +13,9 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 from client_app.genius_worker import run_worker
-from ag_core.utils.jwt import decode_jwt
 
 class StopTestException(Exception):
     """Exception to break the reconnect loop."""
-    pass
 
 class MockWebSocket:
     def __init__(self):

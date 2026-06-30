@@ -1,12 +1,11 @@
 import os
 import sys
 import pytest
-import asyncio
 from unittest.mock import patch, MagicMock
 
 # Add current workspace to path to import orchestrator
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from orchestrator import run_pipeline, PipelineError
+from orchestrator import run_pipeline
 
 
 @pytest.fixture

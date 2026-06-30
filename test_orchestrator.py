@@ -1,7 +1,6 @@
 import os
 import sys
 import pytest
-import asyncio
 import httpx
 from unittest.mock import patch, MagicMock
 

@@ -1,6 +1,4 @@
 import pytest
-import asyncio
-import json
 from unittest.mock import AsyncMock, patch
 from ag_core.providers.openai_provider import OpenAIProvider
 
