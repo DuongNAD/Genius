@@ -16,10 +16,11 @@ Genius là một hệ thống siêu tác tử (Agentic Framework) tự trị chu
    - Cơ chế nội bộ cho phép các tác tử gửi và nhận tin nhắn chéo cho nhau (Agent-to-Agent) qua Mailbox, được quản lý độc lập.
 
 4. **Vector Store & RAG (Retrieval-Augmented Generation):**
-   - Tích hợp `sentence-transformers` (tf-keras) để Agent tự động ghi nhớ và tìm kiếm theo ngữ cảnh semantic.
+   - Mặc định Agent dùng bộ nhớ semantic qua SQLite + embedding TF-IDF nội bộ (không cần cài thêm gì).
+   - **Tùy chọn nâng cao:** cài thêm `chromadb` và `sentence-transformers` (không nằm trong `requirements.txt`) để bật embedding mạnh hơn; thiếu chúng hệ thống tự fallback về TF-IDF/SQLite.
 
-5. **TUI Dashboard Giám sát theo thời gian thực:**
-   - Khởi chạy `dashboard.py` để xem trực tiếp trạng thái, log, CPU/RAM usage và mailbox của từng Agent dưới dạng giao diện Terminal UI.
+5. **Web Dashboard Giám sát theo thời gian thực:**
+   - Khởi chạy `dashboard.py` (FastAPI + WebSocket, mặc định port 8080) để xem trực tiếp trạng thái, log và mailbox của từng Agent qua trình duyệt.
 
 6. **Bảo mật & Rate Limiting:**
    - Áp dụng thuật toán TokenBucketRateLimiter có lock-safety cho asyncio loop, giới hạn tốc độ call mô hình và chống spam.
@@ -61,7 +62,7 @@ python serve.py
 python orchestrator.py
 ```
 
-**Cách 3: Khởi động Bảng điều khiển (TUI Dashboard)**
+**Cách 3: Khởi động Bảng điều khiển (Web Dashboard, port 8080)**
 Mở Terminal mới và chạy để theo dõi toàn bộ hệ thống đang làm việc:
 ```bash
 python dashboard.py
