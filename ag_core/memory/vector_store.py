@@ -10,18 +10,38 @@ from typing import List, Dict, Any
 _CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT_DIR = os.path.abspath(os.path.join(_CURRENT_DIR, "..", ".."))
 
-try:
-    import chromadb
-    from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
-    CHROMA_AVAILABLE = True
-except ImportError:
-    CHROMA_AVAILABLE = False
+import importlib.util
 
-try:
-    from sentence_transformers import SentenceTransformer
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-except Exception:
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
+
+def _module_available(name: str) -> bool:
+    """Cheaply probe whether an optional dependency is installed.
+
+    Uses find_spec so we do NOT trigger the heavy import (e.g. torch via
+    sentence_transformers) at module load — that import is what makes the MCP
+    server boot slowly. The actual import is deferred to first use.
+    """
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+# Availability flags are determined cheaply; the heavy modules are imported
+# lazily by the loaders below only when a VectorMemory actually needs them.
+CHROMA_AVAILABLE = _module_available("chromadb")
+SENTENCE_TRANSFORMERS_AVAILABLE = _module_available("sentence_transformers")
+
+# Populated on first use; kept module-level so tests can still patch them.
+SentenceTransformer = None
+
+
+def _load_sentence_transformer_class():
+    """Import and cache the SentenceTransformer class on first use."""
+    global SentenceTransformer
+    if SentenceTransformer is None:
+        from sentence_transformers import SentenceTransformer as _ST
+        SentenceTransformer = _ST
+    return SentenceTransformer
 
 class SimpleTFIDFEmbedding:
     """Offline-safe term frequency-based embedding generator."""
@@ -54,12 +74,18 @@ class SimpleTFIDFEmbedding:
             embeddings.append(vector)
         return embeddings
 
-if CHROMA_AVAILABLE:
+def _make_chroma_embedding_fn(vector_memory):
+    """Build a Chroma EmbeddingFunction lazily (imports chromadb on first use)."""
+    from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
+
     class ChromaEmbeddingFunctionWrapper(EmbeddingFunction):
-        def __init__(self, vector_memory):
-            self.vector_memory = vector_memory
+        def __init__(self, vm):
+            self.vector_memory = vm
+
         def __call__(self, input: Documents) -> Embeddings:
             return self.vector_memory.get_embeddings(input)
+
+    return ChromaEmbeddingFunctionWrapper(vector_memory)
 
 _cached_sentence_transformer = None
 _sentence_transformer_failed = False
@@ -76,7 +102,7 @@ class VectorMemory:
                 self.sentence_transformer_model = _cached_sentence_transformer
             else:
                 try:
-                    _cached_sentence_transformer = SentenceTransformer('all-MiniLM-L6-v2')
+                    _cached_sentence_transformer = _load_sentence_transformer_class()('all-MiniLM-L6-v2')
                     self.sentence_transformer_model = _cached_sentence_transformer
                 except Exception as e:
                     print(f"Warning: Failed to load SentenceTransformer ({e}). Falling back to TF-IDF.")
@@ -87,9 +113,10 @@ class VectorMemory:
         self.use_chroma = use_chroma and CHROMA_AVAILABLE
         if self.use_chroma:
             try:
+                import chromadb
                 self.chroma_dir = chroma_persist_dir or os.environ.get("GENIUS_CHROMA_DIR") or os.path.join(_ROOT_DIR, ".chroma")
                 self.client = chromadb.PersistentClient(path=self.chroma_dir)
-                emb_fn = ChromaEmbeddingFunctionWrapper(self)
+                emb_fn = _make_chroma_embedding_fn(self)
                 self.collection = self.client.get_or_create_collection(
                      name=collection_name, 
                      embedding_function=emb_fn

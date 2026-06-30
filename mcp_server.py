@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import uuid
 import asyncio
 from typing import Any, Dict, List
 from fastapi import FastAPI, HTTPException
@@ -126,8 +127,125 @@ TOOLS = [
             },
             "required": ["prompt"]
         }
+    },
+    {
+        "name": "orchestrate",
+        "description": ("Run the FULL multi-agent pipeline (research -> design -> code -> "
+                        "test + security + deploy) for a build request. Returns a job_id "
+                        "immediately; poll orchestrate_status to retrieve the artifacts. "
+                        "Requires the Genius skill servers to be running (python serve.py)."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "The build/refactor request to orchestrate"},
+                "pipeline": {"type": "string", "enum": ["sequential", "e2e"],
+                             "description": "Pipeline variant (default 'sequential')"},
+                "workspace": {"type": "string",
+                              "description": "Optional absolute path where artifacts are written (default: server cwd)"}
+            },
+            "required": ["prompt"]
+        }
+    },
+    {
+        "name": "orchestrate_status",
+        "description": ("Poll the status of a pipeline started by orchestrate. Returns status "
+                        "(running|completed|failed) and, when completed, the generated artifacts."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": "The job_id returned by orchestrate"}
+            },
+            "required": ["job_id"]
+        }
     }
 ]
+
+# --- Full-pipeline orchestration (the "điều phối viên" entrypoint) ---------
+# The pipeline is long-running, so orchestrate launches it as a background job
+# and returns a job_id; clients poll orchestrate_status for the result.
+ORCHESTRATION_JOBS: Dict[str, Dict[str, Any]] = {}
+
+# Root-level artifact files produced by the pipeline, keyed by logical stage.
+_ARTIFACT_FILES = {
+    "research": "research.md",
+    "design": "design.md",
+    "code": "app.py",
+    "review": "review.md",
+    "tests": "test_generated.py",
+    "security": "audit.md",
+    "deploy": "deploy.md",
+}
+
+
+def _collect_artifacts(workspace: str) -> Dict[str, str]:
+    """Read back the pipeline's root-level output files that exist."""
+    artifacts: Dict[str, str] = {}
+    for key, fname in _ARTIFACT_FILES.items():
+        path = os.path.join(workspace, fname)
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    artifacts[key] = f.read()
+            except OSError:
+                pass
+    return artifacts
+
+
+async def _run_orchestration(job_id: str, prompt: str, pipeline: str, workspace: str = None) -> None:
+    job = ORCHESTRATION_JOBS[job_id]
+    try:
+        # Imported lazily so the MCP server boots fast (initialize/tools-list
+        # must respond before Antigravity's connect timeout).
+        from orchestrator import run_pipeline, run_e2e_pipeline
+        if pipeline == "e2e":
+            await run_e2e_pipeline(prompt, workspace=workspace)
+        else:
+            await run_pipeline(prompt, workspace=workspace)
+        job["artifacts"] = _collect_artifacts(workspace or os.getcwd())
+        job["status"] = "completed"
+    except Exception as e:  # noqa: BLE001 - surface any pipeline failure to the client
+        job["status"] = "failed"
+        job["error"] = str(e)
+
+
+async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
+    """Route a tool call to either the full pipeline or a single agent.
+
+    Returns the text payload for the MCP `content` block.
+    """
+    if name == "orchestrate":
+        prompt = (arguments.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError("orchestrate requires a non-empty 'prompt'.")
+        pipeline = arguments.get("pipeline", "sequential")
+        if pipeline not in ("sequential", "e2e"):
+            raise ValueError("pipeline must be 'sequential' or 'e2e'.")
+        workspace = arguments.get("workspace")
+        job_id = uuid.uuid4().hex
+        ORCHESTRATION_JOBS[job_id] = {
+            "job_id": job_id, "status": "running", "pipeline": pipeline,
+            "prompt": prompt, "error": None, "artifacts": None,
+        }
+        asyncio.create_task(_run_orchestration(job_id, prompt, pipeline, workspace))
+        return json.dumps({
+            "job_id": job_id, "status": "running",
+            "message": "Pipeline started. Poll orchestrate_status with this job_id.",
+        })
+
+    if name == "orchestrate_status":
+        job_id = arguments.get("job_id", "")
+        job = ORCHESTRATION_JOBS.get(job_id)
+        if job is None:
+            raise ValueError(f"Unknown job_id: {job_id}")
+        view = {k: job[k] for k in ("job_id", "status", "pipeline", "error")}
+        if job["status"] == "completed":
+            view["artifacts"] = job["artifacts"]
+        return json.dumps(view)
+
+    prompt = arguments.get("prompt", "")
+    context = arguments.get("context")
+    return await execute_agent(name, prompt, context)
+
 
 @app.get("/tools")
 async def list_tools():
@@ -138,15 +256,54 @@ async def call_tool(req: CallToolRequest):
     valid_tool_names = {t["name"] for t in TOOLS}
     if req.name not in valid_tool_names:
         raise HTTPException(status_code=400, detail=f"Tool {req.name} not found")
-        
-    prompt = req.arguments.get("prompt", "")
-    context = req.arguments.get("context")
-    
+
     try:
-        result = await execute_agent(req.name, prompt, context)
+        result = await dispatch_tool(req.name, req.arguments)
         return {"content": [{"type": "text", "text": result}]}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+PROTOCOL_VERSION = "2024-11-05"
+SERVER_INFO = {"name": "genius", "version": "1.0.0"}
+
+
+async def handle_request(req: Dict[str, Any]):
+    """Handle one JSON-RPC request. Returns a response dict, or None for
+    notifications (which must not be answered)."""
+    req_id = req.get("id")
+    method = req.get("method")
+    params = req.get("params", {}) or {}
+
+    if method == "initialize":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {
+            "protocolVersion": params.get("protocolVersion", PROTOCOL_VERSION),
+            "capabilities": {"tools": {}},
+            "serverInfo": SERVER_INFO,
+        }}
+    if method in ("notifications/initialized", "initialized"):
+        return None  # notification: no response
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {}}
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+    if method == "tools/call":
+        name = params.get("name")
+        arguments = params.get("arguments", {}) or {}
+        try:
+            content = await dispatch_tool(name, arguments)
+            return {"jsonrpc": "2.0", "id": req_id,
+                    "result": {"content": [{"type": "text", "text": content}]}}
+        except Exception as e:  # noqa: BLE001 - report as JSON-RPC error
+            return {"jsonrpc": "2.0", "id": req_id,
+                    "error": {"code": -32000, "message": str(e)}}
+
+    if req_id is None:
+        return None  # unknown notification: stay silent
+    return {"jsonrpc": "2.0", "id": req_id,
+            "error": {"code": -32601, "message": "Method not found"}}
+
 
 async def run_stdio_mcp():
     import logging
@@ -175,29 +332,17 @@ async def run_stdio_mcp():
             if not line_bytes:
                 break
             line_str = line_bytes.decode('utf-8')
+        # Strip a leading UTF-8 BOM (some clients/Windows pipes prepend one to
+        # the first line) and surrounding whitespace before parsing.
+        line_str = line_str.lstrip("﻿").strip()
+        if not line_str:
+            continue
         try:
             req = json.loads(line_str)
-            req_id = req.get("id")
-            method = req.get("method")
-            params = req.get("params", {})
-            
-            if method == "tools/list":
-                res = {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
-            elif method == "tools/call":
-                name = params.get("name")
-                arguments = params.get("arguments", {})
-                prompt = arguments.get("prompt", "")
-                context = arguments.get("context")
-                try:
-                    content = await execute_agent(name, prompt, context)
-                    res = {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": content}]}}
-                except Exception as e:
-                    res = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": str(e)}}
-            else:
-                res = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": "Method not found"}}
-                
-            real_stdout.write(json.dumps(res) + "\n")
-            real_stdout.flush()
+            res = await handle_request(req)
+            if res is not None:
+                real_stdout.write(json.dumps(res) + "\n")
+                real_stdout.flush()
         except Exception as e:
             sys.stderr.write(f"Error handling request: {e}\n")
             sys.stderr.flush()
