@@ -28,6 +28,19 @@ def make_http_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(limits=limits, timeout=timeout)
 
 
+async def gather_or_raise(*awaitables):
+    """Run awaitables concurrently like asyncio.gather, but always let every
+    branch finish (return_exceptions=True) so a failure in one does not leave
+    the siblings running as orphaned tasks. The first exception (in argument
+    order) is re-raised afterwards to preserve fail-fast propagation; otherwise
+    the list of results is returned."""
+    results = await asyncio.gather(*awaitables, return_exceptions=True)
+    for r in results:
+        if isinstance(r, BaseException):
+            raise r
+    return results
+
+
 def write_progress_md(progress_file_path: str, status_dict: dict) -> None:
     """Write the per-file pipeline progress as a markdown checklist. Failures
     are logged but non-fatal."""
@@ -1077,7 +1090,7 @@ async def process_single_file(
                 poll_timeout=poll_timeout,
             )
 
-            tester_tests_raw, security_report = await asyncio.gather(
+            tester_tests_raw, security_report = await gather_or_raise(
                 tester_task, security_task
             )
 
@@ -1885,7 +1898,7 @@ async def run_pipeline(
             poll_timeout=poll_timeout,
         )
 
-        tester_content, security_content, devops_content = await asyncio.gather(
+        tester_content, security_content, devops_content = await gather_or_raise(
             tester_task, security_task, devops_task
         )
 
@@ -2323,7 +2336,7 @@ async def run_e2e_pipeline(
                 update_progress_md(status_dict)
 
         tasks_list = [process_e2e_file(f) for f in files_to_implement]
-        await asyncio.gather(*tasks_list)
+        await gather_or_raise(*tasks_list)
 
         logger.info(
             "E2E Pipeline executed successfully and all files implemented, verified, and tested."
