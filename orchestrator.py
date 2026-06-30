@@ -2215,24 +2215,19 @@ async def run_e2e_pipeline(
                         )
                         flake8_code, flake8_out = 0, ""
 
-                    # Check tests with pytest
-                    has_tests = False
-                    tests_dir = os.path.join(project_dir, "tests")
-                    if os.path.exists(tests_dir):
-                        for r, d, fs in os.walk(tests_dir):
-                            if any(
-                                f.startswith("test_") and f.endswith(".py") for f in fs
-                            ):
-                                has_tests = True
-                                break
-
-                    if has_tests:
-                        pytest_cmd = [sys.executable, "-m", "pytest", tests_dir]
+                    # Check tests with pytest, scoped to THIS file's own test
+                    # file rather than the whole tests/ directory. Running the
+                    # whole dir is racy: process_e2e_file runs concurrently per
+                    # file, so a sibling's not-yet-implemented or mid-write test
+                    # would fail our verification non-deterministically. Each
+                    # sibling's test is verified by its own task.
+                    if os.path.exists(test_file_path):
+                        pytest_cmd = [sys.executable, "-m", "pytest", test_file_path]
                         pytest_code, pytest_out = await run_subprocess(
                             pytest_cmd, env=env
                         )
                     else:
-                        pytest_code, pytest_out = 0, "No tests found to run yet."
+                        pytest_code, pytest_out = 0, "No test for this file yet."
 
                     if flake8_code == 0 and pytest_code == 0:
                         logger.info(
