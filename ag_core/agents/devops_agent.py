@@ -1,8 +1,6 @@
-import os
 from typing import Any
 from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
-from ag_core.scanner.project_scanner import ProjectScanner
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
 from ag_core.utils.prompt_templates import AGENT_CORE_RULES
@@ -38,18 +36,7 @@ class DevOpsAgent(BaseAgent):
             if cmd == "/deploy":
                 user_prompt = f"Generate a robust CI/CD deployment configuration and deployment steps for the following requirements:\n\n{query}"
 
-        root_dir = os.getcwd()
-        exclude_patterns = self.config.scanner.exclude_patterns
-
-        if context_data is not None:
-            scanned_files = context_data
-        else:
-            scanner = ProjectScanner(root_dir=root_dir, extra_ignores=exclude_patterns)
-            scanned_files = scanner.scan()
-
-        context = ""
-        for filepath, file_content in scanned_files.items():
-            context += f"\n--- File: {filepath} ---\n{file_content}\n"
+        context = self.scan_context(context_data)
 
         # Retrieve matching past interactions
         past_memories = self.retrieve_memory(user_prompt, limit=3)
@@ -59,14 +46,7 @@ class DevOpsAgent(BaseAgent):
             for i, mem in enumerate(past_memories, 1):
                 memory_context += f"Interaction #{i}:\n{mem['text']}\n"
 
-        history_context = ""
-        if self.history:
-            history_context += "Previous conversation history:\n"
-            for turn in self.history:
-                history_context += (
-                    f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
-                )
-            history_context += "\n"
+        history_context = self.format_history()
 
         full_prompt = f"{history_context}{user_prompt}\n"
         if memory_context:

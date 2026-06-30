@@ -1,8 +1,6 @@
-import os
 from typing import Any
 from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
-from ag_core.scanner.project_scanner import ProjectScanner
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
 from ag_core.utils.prompt_templates import AGENT_CORE_RULES
@@ -41,30 +39,9 @@ class GrokResearcherAgent(BaseAgent):
             elif cmd == "/fact-check":
                 user_prompt = f"Verify facts, check assumptions, and identify potential logical gaps or factual errors in the following query against the project files context:\n\n{query}"
 
-        # Determine scanning root
-        root_dir = os.getcwd()
-        exclude_patterns = self.config.scanner.exclude_patterns
+        context = self.scan_context(context_data)
 
-        # Scan files or use provided context_data
-        if context_data is not None:
-            scanned_files = context_data
-        else:
-            scanner = ProjectScanner(root_dir=root_dir, extra_ignores=exclude_patterns)
-            scanned_files = scanner.scan()
-
-        # Format scanned files as input context
-        context = ""
-        for filepath, content in scanned_files.items():
-            context += f"\n--- File: {filepath} ---\n{content}\n"
-
-        history_context = ""
-        if self.history:
-            history_context += "Previous conversation history:\n"
-            for turn in self.history:
-                history_context += (
-                    f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
-                )
-            history_context += "\n"
+        history_context = self.format_history()
 
         full_prompt = (
             f"{history_context}{user_prompt}\n\nProject files context:\n{context}"

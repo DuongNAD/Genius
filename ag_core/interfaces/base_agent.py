@@ -95,6 +95,38 @@ class BaseAgent(abc.ABC):
                 print(f"Warning: Failed to write output file {output_file}: {e}")
         return output_file
 
+    def scan_context(self, context_data: Any = None) -> str:
+        """Return project files formatted as prompt context.
+
+        Uses ``context_data`` verbatim when provided (stateless mode),
+        otherwise scans the current working directory using the agent's
+        configured exclude patterns.
+        """
+        if context_data is not None:
+            scanned_files = context_data
+        else:
+            from ag_core.scanner.project_scanner import ProjectScanner
+
+            config = getattr(self, "config", None)
+            exclude = config.scanner.exclude_patterns if config else []
+            scanner = ProjectScanner(root_dir=os.getcwd(), extra_ignores=exclude)
+            scanned_files = scanner.scan()
+
+        context = ""
+        for filepath, file_content in scanned_files.items():
+            context += f"\n--- File: {filepath} ---\n{file_content}\n"
+        return context
+
+    def format_history(self) -> str:
+        """Return the prior conversation turns formatted as prompt context."""
+        if not self.history:
+            return ""
+        history_context = "Previous conversation history:\n"
+        for turn in self.history:
+            history_context += f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
+        history_context += "\n"
+        return history_context
+
     @abc.abstractmethod
     async def run(self) -> str:
         """
