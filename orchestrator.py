@@ -51,6 +51,29 @@ def degraded_mode() -> bool:
     return os.getenv("GENIUS_DEGRADED_MODE", "").lower() in ("1", "true", "yes")
 
 
+def resolve_degraded_outcome(paths, results, label):
+    """Decide a degraded fan-out outcome from ``gather(return_exceptions=True)``.
+
+    ``results`` is aligned with ``paths``. If *every* file failed, the first
+    exception is re-raised (a total failure is still fatal, even in degraded
+    mode). If some succeeded, returns ``(failed_paths, summary_str)``; if none
+    failed, returns ``([], None)``. Pure/synchronous so it is unit-testable.
+    """
+    failed = [paths[i] for i, r in enumerate(results) if isinstance(r, BaseException)]
+    if failed and len(failed) == len(paths):
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
+    summary = None
+    if failed:
+        verified = len(paths) - len(failed)
+        summary = (
+            f"{label} completed in degraded mode: {verified}/{len(paths)} files "
+            f"verified. Failed: {', '.join(failed)}."
+        )
+    return failed, summary
+
+
 def write_progress_md(progress_file_path: str, status_dict: dict) -> None:
     """Write the per-file pipeline progress as a markdown checklist. Failures
     are logged but non-fatal."""
@@ -2372,7 +2395,21 @@ async def run_e2e_pipeline(
                 update_progress_md(status_dict)
 
         tasks_list = [process_e2e_file(f) for f in files_to_implement]
-        await gather_or_raise(*tasks_list)
+        if degraded_mode():
+            results = await asyncio.gather(*tasks_list, return_exceptions=True)
+            paths = [f["path"] for f in files_to_implement]
+            failed, summary = resolve_degraded_outcome(paths, results, "E2E Pipeline")
+            if failed:
+                logger.warning(
+                    "Degraded mode: %d/%d files failed in the E2E pipeline; "
+                    "continuing with the rest. Failed: %s",
+                    len(failed),
+                    len(files_to_implement),
+                    ", ".join(failed),
+                )
+                return summary
+        else:
+            await gather_or_raise(*tasks_list)
 
         logger.info(
             "E2E Pipeline executed successfully and all files implemented, verified, and tested."

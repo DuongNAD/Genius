@@ -14,7 +14,7 @@ from ag_core.utils.cli_runner import (
     CLITimeoutError,
 )
 from ag_core import diagnostics
-from orchestrator import degraded_mode
+from orchestrator import degraded_mode, resolve_degraded_outcome
 
 
 class _FakeProc:
@@ -140,3 +140,27 @@ def test_degraded_mode_toggle():
         assert degraded_mode() is True
     with patch.dict(os.environ, {"GENIUS_DEGRADED_MODE": "0"}):
         assert degraded_mode() is False
+
+
+def test_degraded_outcome_partial_failure_summarizes():
+    paths = ["a.py", "b.py", "c.py"]
+    results = [None, RuntimeError("boom"), None]
+    failed, summary = resolve_degraded_outcome(paths, results, "E2E Pipeline")
+    assert failed == ["b.py"]
+    assert "2/3 files verified" in summary
+    assert "b.py" in summary
+
+
+def test_degraded_outcome_no_failure_returns_none():
+    paths = ["a.py", "b.py"]
+    failed, summary = resolve_degraded_outcome(paths, [None, None], "E2E Pipeline")
+    assert failed == []
+    assert summary is None
+
+
+def test_degraded_outcome_total_failure_reraises_first():
+    paths = ["a.py", "b.py"]
+    first = RuntimeError("first failure")
+    results = [first, RuntimeError("second")]
+    with pytest.raises(RuntimeError, match="first failure"):
+        resolve_degraded_outcome(paths, results, "E2E Pipeline")
