@@ -173,8 +173,14 @@ class CentralHub:
     def verify_auth(self, headers: Dict[str, str]) -> bool:
         auth_header = headers.get("X-API-Key") or headers.get("x-api-key")
         if not auth_header and hasattr(headers, "items"):
-            auth_header = next((v for k, v in headers.items() if k.lower() == "x-api-key"), None)
-        return auth_header == self.api_key
+            auth_header = next(
+                (v for k, v in headers.items() if k.lower() == "x-api-key"), None
+            )
+        if not auth_header or not self.api_key:
+            return False
+        import hmac
+
+        return hmac.compare_digest(str(auth_header), str(self.api_key))
 
     def verify_checksum(self, payload: Any, headers: Dict[str, str]) -> bool:
         checksum = headers.get("X-Payload-SHA256") or headers.get("x-payload-sha256")
@@ -361,14 +367,24 @@ class CentralHub:
             elif endpoint == "/write_workspace_file":
                 path = payload.get("path")
                 content = payload.get("content", "")
-                if not path or ".." in path or path.startswith("/") or ":" in path:
-                    return 400, {"error": "Path traversal detected"}, {}
                 import os
-                dirname = os.path.dirname(path)
+
+                # Reject absolute paths, ".." segments and drive/ADS markers,
+                # then confirm the resolved target stays inside the workspace
+                # root (also defeats symlink escapes).
+                normalized = path.replace("\\", "/").split("/") if path else []
+                if not path or os.path.isabs(path) or ":" in path or ".." in normalized:
+                    return 400, {"error": "Path traversal detected"}, {}
+                base = os.path.realpath(os.getcwd())
+                target = os.path.realpath(os.path.join(base, path))
+                if target != base and not target.startswith(base + os.sep):
+                    return 400, {"error": "Path traversal detected"}, {}
+
+                dirname = os.path.dirname(target)
                 if dirname:
                     os.makedirs(dirname, exist_ok=True)
                 try:
-                    with open(path, "w", encoding="utf-8") as f:
+                    with open(target, "w", encoding="utf-8") as f:
                         f.write(content)
                 except Exception as e:
                     return 500, {"error": f"Failed to write file: {str(e)}"}, {}

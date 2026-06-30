@@ -274,8 +274,12 @@ def verify_response_checksum(response) -> None:
 
 
 def is_transient_error(exception) -> bool:
-    logger.debug(f"Retry predicate evaluating exception: type={type(exception)} msg={exception}")
+    logger.debug("Evaluating retryability: %s", type(exception).__name__)
     if isinstance(exception, ChecksumMismatchError):
+        # Intentionally retryable: a mismatch may be a transient corruption,
+        # and call_api still fails fast after the bounded retry count. This
+        # behaviour is locked by
+        # test_integration.test_orchestrator_checksum_mismatch_response_retries.
         return True
     if isinstance(exception, httpx.HTTPStatusError):
         # Retry on 429 (Rate Limit) and 5xx (Server Error)
