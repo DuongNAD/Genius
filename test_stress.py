@@ -1,7 +1,6 @@
 import os
 import sys
 import pytest
-import shutil
 import stat
 import json
 import hashlib

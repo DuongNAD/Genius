@@ -1,8 +1,6 @@
 import os
 import sys
 import pytest
-import asyncio
-import httpx
 import importlib.util
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -13,7 +11,7 @@ from ag_core.agents.grok_researcher import GrokResearcherAgent
 from ag_core.agents.claude_architect import ClaudeArchitectAgent
 from ag_core.agents.codex_reviewer import CodexReviewerAgent
 from ag_core.agents.tester import TesterAgent
-from orchestrator import run_pipeline, ROUTING_TABLE
+from orchestrator import run_pipeline
 from serve import main_async as serve_main_async
 
 

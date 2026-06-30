@@ -12,7 +12,6 @@ from fastapi.testclient import TestClient
 # Ensure workspace root is in python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ag_core.config import load_config
 from ag_core.utils.jwt import encode_jwt
 from test_e2e import get_valid_api_key
 
@@ -424,7 +423,6 @@ def test_rate_limiter_active_and_retry_after(get_app, role):
     """Verify that endpoints return HTTP 429 and Retry-After header under load with ENABLE_RATE_LIMITER=true."""
     app = get_app()
     client = TestClient(app)
-    jwt_token = get_valid_api_key()
 
     # Import limiter instance and reset it
     from ag_core.utils.rate_limiter import limiter

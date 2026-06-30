@@ -3,7 +3,7 @@ import sys
 import json
 import uuid
 import asyncio
-from typing import Any, Dict, List
+from typing import Any, Dict
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 

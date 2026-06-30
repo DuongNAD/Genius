@@ -2,7 +2,6 @@ import os
 import sys
 import time
 import json
-import uuid
 import hashlib
 import asyncio
 import threading
@@ -19,7 +18,7 @@ os.environ["PYTEST_CURRENT_TEST"] = "true"
 
 from ag_core.utils.jwt import encode_jwt
 from ag_core.utils.rate_limiter import TokenBucketRateLimiter
-from orchestrator import run_pipeline, run_e2e_pipeline
+from orchestrator import run_pipeline
 
 SKILL_API_KEY = "mock-skill-key"
 valid_payload = {"sub": "orchestrator", "exp": time.time() + 300}
@@ -230,7 +229,7 @@ async def test_orchestrator_concurrency_bounds():
     # We patch call_api, ProjectScanner, and os/file write operations to make it run fast
     with patch("orchestrator.call_api", side_effect=mock_call_api), patch(
         "orchestrator.ProjectScanner"
-    ) as mock_scanner, patch(
+    ), patch(
         "orchestrator.load_config", return_value=mock_config
     ), patch(
         "orchestrator.parse_design_for_files", return_value=files_to_implement

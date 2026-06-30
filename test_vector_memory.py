@@ -1,14 +1,11 @@
 import os
 import sqlite3
-import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from ag_core.memory.vector_store import SimpleTFIDFEmbedding, VectorMemory
-from ag_core.config import Config, load_config
-from ag_core.interfaces.base_agent import BaseAgent
+from ag_core.config import load_config
 from ag_core.agents.claude_architect import ClaudeArchitectAgent
-from ag_core.agents.codex_reviewer import CodexReviewerAgent
 from ag_core.interfaces.base_provider import BaseProvider
 
 
@@ -94,7 +91,7 @@ def test_sqlite_fallback_store(temp_db):
 def test_chroma_store_skip_or_run(tmp_path):
     # Test if Chroma initializes properly if available, else gracefully skip
     try:
-        import chromadb
+        import chromadb  # noqa: F401 - import only probes availability
 
         chroma_available = True
     except ImportError:

@@ -2,16 +2,12 @@ import os
 import sys
 import time
 import json
-import sqlite3
-import hashlib
 import asyncio
 import pytest
 import uvicorn
-import httpx
 import websockets
-from typing import Dict, List, Optional, Any, Callable
+from typing import Any
 from unittest.mock import patch, MagicMock
-from fastapi.testclient import TestClient
 
 # Add project root to sys.path
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -29,7 +25,6 @@ from serve import (
     prune_stale_workers,
 )
 import dashboard
-from dashboard import app as dashboard_app
 
 
 def get_free_port():

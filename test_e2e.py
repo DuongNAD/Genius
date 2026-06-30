@@ -1,14 +1,13 @@
 import os
 import sys
 import pytest
-import subprocess
 import shutil
 import stat
 import httpx
 import asyncio
 import hashlib
 import json
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 # Add workspace root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -200,10 +199,8 @@ def mock_llm_providers():
 def test_f1_grok_server_startup():
     """Attempts to load grok's api.py and verify test client GET /docs or POST /run exists."""
     api = import_skill_api("grok_researcher")
-    from fastapi.testclient import TestClient
 
     assert hasattr(api, "app"), "Grok api.py does not define 'app'"
-    client = TestClient(api.app)
     routes = [r.path for r in api.app.routes]
     assert (
         "/docs" in routes or "/run" in routes
@@ -213,10 +210,8 @@ def test_f1_grok_server_startup():
 def test_f1_claude_server_startup():
     """Attempts to load claude's api.py and verify test client GET /docs or POST /run exists."""
     api = import_skill_api("claude_architect")
-    from fastapi.testclient import TestClient
 
     assert hasattr(api, "app"), "Claude api.py does not define 'app'"
-    client = TestClient(api.app)
     routes = [r.path for r in api.app.routes]
     assert (
         "/docs" in routes or "/run" in routes
@@ -226,10 +221,8 @@ def test_f1_claude_server_startup():
 def test_f1_codex_server_startup():
     """Attempts to load codex's api.py and verify test client GET /docs or POST /run exists."""
     api = import_skill_api("codex_reviewer")
-    from fastapi.testclient import TestClient
 
     assert hasattr(api, "app"), "Codex api.py does not define 'app'"
-    client = TestClient(api.app)
     routes = [r.path for r in api.app.routes]
     assert (
         "/docs" in routes or "/run" in routes
@@ -593,7 +586,7 @@ def test_f5_orchestrator_retries_on_429():
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post, patch(
         "httpx.AsyncClient.get", new_callable=AsyncMock
-    ) as mock_get, patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+    ) as mock_get, patch("asyncio.sleep", new_callable=AsyncMock):
         mock_post.side_effect = [
             make_mock_http_response(429, headers={"Retry-After": "1"}),
             make_mock_http_response(200, {"task_id": "t-1", "status": "processing"}),
@@ -1146,7 +1139,7 @@ def test_f5_concurrent_requests_all_429():
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post, patch(
         "httpx.AsyncClient.get", new_callable=AsyncMock
-    ) as mock_get, patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+    ) as mock_get, patch("asyncio.sleep", new_callable=AsyncMock):
         mock_post.side_effect = [
             make_mock_http_response(429, headers={"Retry-After": "0"}),
             make_mock_http_response(200, {"task_id": "t-1", "status": "processing"}),
@@ -1456,7 +1449,7 @@ def test_t4_real_world_network_jitter_recovery():
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post, patch(
         "httpx.AsyncClient.get", new_callable=AsyncMock
-    ) as mock_get, patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+    ) as mock_get, patch("asyncio.sleep", new_callable=AsyncMock):
 
         mock_post.side_effect = [
             make_mock_http_response(429, headers={"Retry-After": "0"}),

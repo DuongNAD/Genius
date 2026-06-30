@@ -13,7 +13,6 @@ from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
     retry_if_exception,
 )
 
@@ -177,13 +176,9 @@ ROUTING_TABLE = {
 class PipelineError(Exception):
     """Custom exception raised when a pipeline stage fails or validation fails."""
 
-    pass
-
 
 class ChecksumMismatchError(Exception):
     """Custom exception raised when payload checksum validation fails."""
-
-    pass
 
 
 def resolve_grok_cmd():
@@ -419,7 +414,6 @@ async def call_api(
         logger.info(f"Cache hit for URL: {url}")
         return _API_RESPONSE_CACHE[cache_key]
 
-    global DISTRIBUTED_MODE
     if DISTRIBUTED_MODE:
         import uuid
         from serve import (
@@ -1051,7 +1045,7 @@ async def process_single_file(
                 created_by="tester",
                 parent_id=codex_art_id,
             )
-            tester_art_id = message_bus.publish(tester_art)
+            message_bus.publish(tester_art)
 
             security_art = Artifact(
                 name=f"audit_{file_path}",
@@ -1059,7 +1053,7 @@ async def process_single_file(
                 created_by="security",
                 parent_id=codex_art_id,
             )
-            security_art_id = message_bus.publish(security_art)
+            message_bus.publish(security_art)
 
             # 4. Write debug/log files to disk
             try:
@@ -1647,7 +1641,7 @@ async def run_pipeline(
             )
 
             # Publish DevOps to MessageBus
-            devops_art_id = message_bus.publish(
+            message_bus.publish(
                 Artifact(
                     name="devops_deploy",
                     content=devops_content,
@@ -1763,7 +1757,7 @@ async def run_pipeline(
                     )
             else:
                 logger.warning(
-                    f"No stdout captured and output file was not created for 'Antigravity'"
+                    "No stdout captured and output file was not created for 'Antigravity'"
                 )
 
         if os.path.exists(app_file):
@@ -1880,7 +1874,7 @@ async def run_pipeline(
         )
 
         # Publish to MessageBus
-        tester_art_id = message_bus.publish(
+        message_bus.publish(
             Artifact(
                 name="test_code",
                 content=tester_content,
@@ -1888,7 +1882,7 @@ async def run_pipeline(
                 parent_id=codex_art_id,
             )
         )
-        security_art_id = message_bus.publish(
+        message_bus.publish(
             Artifact(
                 name="security_audit",
                 content=security_content,
@@ -1896,7 +1890,7 @@ async def run_pipeline(
                 parent_id=codex_art_id,
             )
         )
-        devops_art_id = message_bus.publish(
+        message_bus.publish(
             Artifact(
                 name="devops_deploy",
                 content=devops_content,

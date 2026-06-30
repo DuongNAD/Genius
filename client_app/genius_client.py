@@ -12,13 +12,9 @@ import requests
 class ChecksumMismatchError(Exception):
     """Raised when the response checksum does not match X-Payload-SHA256."""
 
-    pass
-
 
 class TaskFailedError(Exception):
     """Raised when the remote task status is 'failed'."""
-
-    pass
 
 
 def base64url_encode(data: bytes) -> str:

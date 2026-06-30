@@ -1,11 +1,8 @@
 import asyncio
 import json
-import time
-import hashlib
 import socket
 import pytest
 import pytest_asyncio
-import websockets
 import uvicorn
 from unittest.mock import patch, AsyncMock
 
@@ -13,7 +10,6 @@ import serve as serve_mod
 from serve import app, worker_registry, pending_tasks
 from orchestrator import call_api, PipelineError
 from ag_core.distributed.worker import ClientWorker
-from ag_core.utils.jwt import encode_jwt
 
 JWT_SECRET = "mock-skill-key"
 HOST = "127.0.0.1"

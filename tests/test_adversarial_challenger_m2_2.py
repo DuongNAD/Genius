@@ -1,5 +1,4 @@
 # tests/test_adversarial_challenger_m2_2.py
-import os
 import asyncio
 import json
 import time
@@ -9,7 +8,6 @@ import pytest
 import pytest_asyncio
 import websockets
 import uvicorn
-from unittest.mock import patch, AsyncMock, MagicMock
 
 import serve as serve_mod
 from serve import app, worker_registry, pending_tasks, WorkerDisconnectedError
@@ -128,7 +126,7 @@ async def test_concurrent_dispatches_under_load(run_server):
         # Verify correctness
         assert len(results) == 15
         for i in range(15):
-            assert f"Processed" in results[i]
+            assert "Processed" in results[i]
 
         # Verify no future resolution memory leaks: pending_tasks dict must be empty
         assert (
@@ -167,7 +165,6 @@ async def test_worker_unexpected_websocket_close(run_server):
     """
     port = run_server
     worker_id = "flaky-worker"
-    worker = ClientWorker(worker_id=worker_id, roles=["grok"])
 
     # We will connect and listen manually
     token = encode_jwt({"sub": worker_id, "exp": time.time() + 300}, JWT_SECRET)

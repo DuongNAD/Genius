@@ -1,8 +1,6 @@
 import asyncio
 import json
-import shutil
 from unittest.mock import AsyncMock, patch
-import os
 
 from ag_core.providers.grok_provider import GrokProvider
 
@@ -30,12 +28,9 @@ async def run_test():
         # Override self.api_key to None explicitly to ensure it enters
         provider.api_key = None
 
-        # We can hook into the send_prompt method to catch exceptions and print
-        orig_send_prompt = provider.send_prompt
-
         # Let's inspect create_subprocess_exec calls
         try:
-            response = await provider.send_prompt("Test prompt")
+            await provider.send_prompt("Test prompt")
         except Exception as ex:
             print("OUTER EXCEPTION:", repr(ex))
 

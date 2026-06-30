@@ -9,20 +9,16 @@ sys.modules["tensorflow"] = None
 
 import asyncio
 import json
-import time
-import hashlib
 import socket
 import pytest
 import pytest_asyncio
-import websockets
 import uvicorn
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch
 
 import serve as serve_mod
 from serve import app, worker_registry, pending_tasks
 from orchestrator import call_api, PipelineError
 from ag_core.distributed.worker import ClientWorker
-from ag_core.utils.jwt import encode_jwt
 
 JWT_SECRET = "mock-skill-key"
 HOST = "127.0.0.1"
@@ -208,7 +204,6 @@ async def test_result_tampering_corrupted_checksum(run_server):
     worker_id = "tamper-worker"
 
     # We will mock the worker's execute_task to send a bad result checksum
-    original_execute = ClientWorker.execute_task
 
     # We want to override the execute_task behaviour to send a tampered checksum
     async def mock_execute_task(self, task_id, task_data):

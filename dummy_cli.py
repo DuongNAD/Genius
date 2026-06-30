@@ -26,7 +26,6 @@ def main():
                 input_val = f.read().strip()
         except Exception as e:
             sys.stderr.write(f"Error reading file {input_val}: {e}\n")
-            pass
 
     print(f"Dummy CLI executed successfully. Input: {input_val}")
 

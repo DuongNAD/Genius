@@ -13,3 +13,6 @@ exclude =
     dist
 # Keep the signal on real defects (unused imports/names, undefined names,
 # f-strings without placeholders, redefinitions) rather than whitespace noise.
+per-file-ignores =
+    # Whitespace flagged inside the embedded HTML/JS dashboard template string.
+    dashboard.py: W291, W293

@@ -2,9 +2,8 @@ import sqlite3
 import json
 import time
 import uuid
-import contextlib
 import threading
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 
 
 class Artifact:

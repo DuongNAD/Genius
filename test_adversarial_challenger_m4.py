@@ -2,8 +2,6 @@ import os
 import sys
 import pytest
 import hashlib
-import json
-import asyncio
 from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 
@@ -11,7 +9,6 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from orchestrator import call_api, PipelineError
-from ag_core.config import MemoryConfig, load_config
 from ag_core.memory.vector_store import VectorMemory
 import serve
 
@@ -100,7 +97,7 @@ async def test_serve_cli_prompt_does_not_block_and_defaults_role():
         "serve.run_pipeline", new_callable=AsyncMock
     ) as mock_run_pipeline, patch(
         "serve.start_server", new_callable=AsyncMock
-    ) as mock_start_server:
+    ):
 
         await serve.main_async()
         mock_interactive.assert_not_called()

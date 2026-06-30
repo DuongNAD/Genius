@@ -10,7 +10,7 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from ag_core.utils.jwt import encode_jwt
 from ag_core.distributed import CentralHub, ClientWorker
-from test_distributed import MockNetworkProtocol, call_api_with_retry
+from test_distributed import MockNetworkProtocol
 from serve import app, worker_registry
 
 JWT_SECRET = os.getenv("SKILL_API_KEY", "mock-skill-key")
@@ -57,7 +57,6 @@ async def test_graceful_deregistration_task_stall(network, hub):
     assigned_worker_id = hub.tasks[task_id]["worker_id"]
     idle_worker_id = "w2" if assigned_worker_id == "w1" else "w1"
     idle_worker = w2 if assigned_worker_id == "w1" else w1
-    assigned_worker = w1 if assigned_worker_id == "w1" else w2
 
     assert assigned_worker_id is not None
     assert hub.tasks[task_id]["status"] == "running"

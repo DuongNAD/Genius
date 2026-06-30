@@ -2,7 +2,7 @@ import json
 import hmac
 import hashlib
 import os
-from typing import Any, Tuple, Union, Optional
+from typing import Any, Tuple, Optional
 
 
 def calculate_checksum(payload: Any, secret: str) -> str:

@@ -1,7 +1,6 @@
 import os
 import sys
 import pytest
-import asyncio
 import httpx
 from unittest.mock import patch, MagicMock
 
@@ -145,7 +144,8 @@ async def test_e2e_codex_self_healing_success(
 
     async def post_side_effect(url, **kwargs):
         body = {"status": "processing", "task_id": "generic-task"}
-        import json, hashlib
+        import json
+        import hashlib
 
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
         checksum = hashlib.sha256(body_bytes).hexdigest()
@@ -220,7 +220,8 @@ async def test_e2e_codex_self_healing_failure(
 
     async def post_side_effect(url, **kwargs):
         body = {"status": "processing", "task_id": "generic-task"}
-        import json, hashlib
+        import json
+        import hashlib
 
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
         checksum = hashlib.sha256(body_bytes).hexdigest()
@@ -276,7 +277,8 @@ async def test_e2e_tester_self_healing_success(
 
     async def post_side_effect(url, **kwargs):
         body = {"status": "processing", "task_id": "generic-task"}
-        import json, hashlib
+        import json
+        import hashlib
 
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
         checksum = hashlib.sha256(body_bytes).hexdigest()
@@ -349,7 +351,8 @@ async def test_e2e_tester_self_healing_failure(
 
     async def post_side_effect(url, **kwargs):
         body = {"status": "processing", "task_id": "generic-task"}
-        import json, hashlib
+        import json
+        import hashlib
 
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
         checksum = hashlib.sha256(body_bytes).hexdigest()
@@ -409,7 +412,8 @@ async def test_e2e_pythonpath_setting(
 
     async def post_side_effect(url, **kwargs):
         body = {"status": "processing", "task_id": "generic-task"}
-        import json, hashlib
+        import json
+        import hashlib
 
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
         checksum = hashlib.sha256(body_bytes).hexdigest()

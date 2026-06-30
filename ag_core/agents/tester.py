@@ -174,7 +174,7 @@ class TesterAgent(BaseAgent):
             try:
                 with open(output_file, "w", encoding="utf-8") as f:
                     f.write(code_to_write)
-            except Exception as e:
+            except Exception:
                 pass
 
             # Append the test execution evidence (pytest stdout/stderr) to the returned markdown response

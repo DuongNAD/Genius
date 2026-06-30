@@ -11,7 +11,6 @@ from unittest.mock import patch, MagicMock
 # Add current directory to path if not present
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import genius_client
 from genius_client import (
     ChecksumMismatchError,
     TaskFailedError,

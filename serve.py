@@ -235,7 +235,6 @@ IS_DISTRIBUTED = False
 
 @app.websocket("/ws/connect")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
-    global IS_DISTRIBUTED
     import sys
 
     is_pytest = "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST") is not None
@@ -307,7 +306,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     await websocket.send_json({"type": "pong"})
 
             elif msg_type in ("report_result", "result"):
-                import hashlib
+                pass
 
                 task_id = data.get("task_id")
                 payload_worker_id = data.get("worker_id")
@@ -322,7 +321,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 result = data.get("result")
                 checksum = data.get("checksum")
                 if not checksum:
-                    print(f"[Hub] Missing result checksum from worker!")
+                    print("[Hub] Missing result checksum from worker!")
                     if worker_id and worker_id in worker_registry.workers:
                         worker_registry.workers[worker_id]["status"] = "idle"
                     if task_id and task_id in central_hub.tasks:

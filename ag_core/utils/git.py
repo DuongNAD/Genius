@@ -11,8 +11,6 @@ logger = logging.getLogger("ag_core.utils.git")
 class GitError(Exception):
     """Exception raised for errors in Git operations."""
 
-    pass
-
 
 class GitManager:
     def __init__(self, username: Optional[str] = None, token: Optional[str] = None):

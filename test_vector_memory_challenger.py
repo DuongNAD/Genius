@@ -1,6 +1,5 @@
 import os
 import sqlite3
-import json
 import pytest
 import time
 import threading
