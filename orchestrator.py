@@ -21,6 +21,13 @@ from tenacity import (
 from ag_core.utils.code_extract import extract_code
 
 
+def make_http_client() -> httpx.AsyncClient:
+    """Build an AsyncClient with the shared connection-pool limits and timeouts."""
+    limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
+    timeout = httpx.Timeout(10.0, connect=5.0)
+    return httpx.AsyncClient(limits=limits, timeout=timeout)
+
+
 def parse_design_for_files(design_content: str) -> list:
     """
     Parses design_content for a list of files to implement.
@@ -808,9 +815,7 @@ async def call_api(
     if client is not None:
         result = await _execute(client)
     else:
-        limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
-        timeout = httpx.Timeout(10.0, connect=5.0)
-        async with httpx.AsyncClient(limits=limits, timeout=timeout) as local_client:
+        async with make_http_client() as local_client:
             result = await _execute(local_client)
 
     if use_cache:
@@ -1256,9 +1261,7 @@ async def run_pipeline(
         logger.warning(f"Failed to scan workspace: {e}")
         scanned_files = {}
 
-    limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
-    timeout = httpx.Timeout(10.0, connect=5.0)
-    client = httpx.AsyncClient(limits=limits, timeout=timeout)
+    client = make_http_client()
     try:
         if is_slash_cmd:
             agent_key, output_name = ROUTING_TABLE[first_word]
@@ -2021,9 +2024,7 @@ async def run_e2e_pipeline(
         logger.warning(f"Failed to scan workspace: {e}")
         scanned_files = {}
 
-    limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
-    timeout = httpx.Timeout(10.0, connect=5.0)
-    client = httpx.AsyncClient(limits=limits, timeout=timeout)
+    client = make_http_client()
 
     try:
         # Step 1: Claude (Architect) - Call API
