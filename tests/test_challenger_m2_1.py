@@ -1,12 +1,10 @@
 import sys
+
 sys.modules["sentence_transformers"] = None
 sys.modules["transformers"] = None
 sys.modules["peft"] = None
 sys.modules["torch"] = None
 sys.modules["tensorflow"] = None
-
-
-
 
 
 import asyncio
@@ -31,6 +29,7 @@ HOST = "127.0.0.1"
 PORT = 8020
 WS_URL = f"ws://{HOST}:{PORT}/ws/connect"
 
+
 @pytest_asyncio.fixture
 async def run_server():
     # Start serve FastAPI app on a distinct port in background
@@ -42,6 +41,7 @@ async def run_server():
     server.should_exit = True
     await server_task
 
+
 @pytest.fixture(autouse=True)
 def clean_registry_and_tasks():
     worker_registry.workers.clear()
@@ -50,9 +50,11 @@ def clean_registry_and_tasks():
     serve_mod.central_hub.tasks.clear()
     yield
 
+
 # =============================================================================
 # TEST GROUP 1: Concurrency, Future Resolution, and Memory Leaks
 # =============================================================================
+
 
 @pytest.mark.asyncio
 async def test_concurrent_task_dispatches_resolution_and_no_leaks(run_server):
@@ -62,7 +64,10 @@ async def test_concurrent_task_dispatches_resolution_and_no_leaks(run_server):
     or memory leaks in the future map (pending_tasks).
     """
     import sys, orchestrator
-    print("LOADED MODULES:", [m for m in sys.modules if "torch" in m or "tensorflow" in m])
+
+    print(
+        "LOADED MODULES:", [m for m in sys.modules if "torch" in m or "tensorflow" in m]
+    )
     orchestrator.DISTRIBUTED_MODE = True
 
     # Start 3 workers in parallel
@@ -84,7 +89,9 @@ async def test_concurrent_task_dispatches_resolution_and_no_leaks(run_server):
         await asyncio.sleep(0.05)  # Simulate small execution time
         return f"Result for: {prompt}"
 
-    with patch("ag_core.agents.grok_researcher.GrokResearcherAgent.run", new=mock_agent_run):
+    with patch(
+        "ag_core.agents.grok_researcher.GrokResearcherAgent.run", new=mock_agent_run
+    ):
         # Dispatch 15 tasks concurrently
         tasks = []
         for i in range(15):
@@ -94,7 +101,7 @@ async def test_concurrent_task_dispatches_resolution_and_no_leaks(run_server):
                     api_key="mock-key",
                     prompt=f"Task prompt {i}",
                     context={},
-                    poll_timeout=5.0
+                    poll_timeout=5.0,
                 )
             )
 
@@ -129,6 +136,7 @@ async def test_concurrency_error_cleanup(run_server):
     so that no memory leaks occur.
     """
     import orchestrator
+
     orchestrator.DISTRIBUTED_MODE = True
 
     # Start 2 workers
@@ -145,7 +153,10 @@ async def test_concurrency_error_cleanup(run_server):
         await asyncio.sleep(0.02)
         raise RuntimeError(f"Agent failed on prompt: {prompt}")
 
-    with patch("ag_core.agents.grok_researcher.GrokResearcherAgent.run", new=mock_agent_run_fail):
+    with patch(
+        "ag_core.agents.grok_researcher.GrokResearcherAgent.run",
+        new=mock_agent_run_fail,
+    ):
         # Dispatch 6 failing tasks concurrently
         tasks = []
         for i in range(6):
@@ -155,7 +166,7 @@ async def test_concurrency_error_cleanup(run_server):
                     api_key="mock-key",
                     prompt=f"Fail prompt {i}",
                     context={},
-                    poll_timeout=5.0
+                    poll_timeout=5.0,
                 )
             )
 
@@ -186,6 +197,7 @@ async def test_concurrency_error_cleanup(run_server):
 # TEST GROUP 2: Network Failures and Disconnection
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_network_failure_websocket_disconnect_requeue(run_server):
     """
@@ -195,6 +207,7 @@ async def test_network_failure_websocket_disconnect_requeue(run_server):
     3. The task can be successfully processed by another worker when it registers.
     """
     import orchestrator
+
     orchestrator.DISTRIBUTED_MODE = True
 
     # Start Worker 1
@@ -209,7 +222,9 @@ async def test_network_failure_websocket_disconnect_requeue(run_server):
         await asyncio.sleep(1.0)
         return "Slow completed"
 
-    with patch("ag_core.agents.grok_researcher.GrokResearcherAgent.run", new=slow_mock_run):
+    with patch(
+        "ag_core.agents.grok_researcher.GrokResearcherAgent.run", new=slow_mock_run
+    ):
         # Dispatch task to Worker 1
         dispatch_fut = asyncio.create_task(
             call_api(
@@ -217,7 +232,7 @@ async def test_network_failure_websocket_disconnect_requeue(run_server):
                 api_key="mock-key",
                 prompt="Run slow task",
                 context={},
-                poll_timeout=5.0
+                poll_timeout=5.0,
             )
         )
 
@@ -244,11 +259,14 @@ async def test_network_failure_websocket_disconnect_requeue(run_server):
 
         # Assert task is failed (status goes to failed)
         assert serve_mod.central_hub.tasks[task_id]["status"] == "failed"
-        assert serve_mod.central_hub.tasks[task_id]["result"] == {"error": "Worker disconnected"}
+        assert serve_mod.central_hub.tasks[task_id]["result"] == {
+            "error": "Worker disconnected"
+        }
         assert task_id not in serve_mod.central_hub.task_queue
 
         # Assert the original call_api raises WorkerDisconnectedError
         from serve import WorkerDisconnectedError
+
         with pytest.raises(WorkerDisconnectedError):
             await dispatch_fut
 
@@ -261,18 +279,24 @@ async def test_unexpected_websocket_close_server_cleanup(run_server):
     Verify that an unexpected connection close is fully cleaned up on the server
     without leaving orphaned registries or resources.
     """
-    token = encode_jwt({"sub": "sudden-death-worker", "exp": time.time() + 60}, JWT_SECRET)
-    
+    token = encode_jwt(
+        {"sub": "sudden-death-worker", "exp": time.time() + 60}, JWT_SECRET
+    )
+
     # Establish a raw WebSocket connection to simulate unexpected disconnects
     async with websockets.connect(f"{WS_URL}?token={token}") as ws:
         # Register
-        reg_payload = {"type": "register", "worker_id": "sudden-death-worker", "roles": ["grok"]}
+        reg_payload = {
+            "type": "register",
+            "worker_id": "sudden-death-worker",
+            "roles": ["grok"],
+        }
         await ws.send(json.dumps(reg_payload))
         resp = await ws.recv()
         assert json.loads(resp)["type"] == "registered"
 
         assert "sudden-death-worker" in worker_registry.workers
-        
+
         # Unexpectedly close the WebSocket connection by exiting context
         # (This triggers a ConnectionClosed exception on the server)
         pass
@@ -289,6 +313,7 @@ async def test_unexpected_websocket_close_server_cleanup(run_server):
 # TEST GROUP 3: Payload Tampering
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_payload_tampering_corrupted_checksum_worker_rejection(run_server):
     """
@@ -297,6 +322,7 @@ async def test_payload_tampering_corrupted_checksum_worker_rejection(run_server)
     to the hub, and the hub fails the task with a PipelineError.
     """
     import orchestrator
+
     orchestrator.DISTRIBUTED_MODE = True
 
     worker_id = "checksum-tamper-worker"
@@ -306,6 +332,7 @@ async def test_payload_tampering_corrupted_checksum_worker_rejection(run_server)
 
     # We intercept the hub sending WS message to corrupt the checksum
     from fastapi import WebSocket
+
     original_send_json = WebSocket.send_json
 
     async def mock_send_corrupted_json(self, data, *args, **kwargs):
@@ -323,7 +350,7 @@ async def test_payload_tampering_corrupted_checksum_worker_rejection(run_server)
                     api_key="mock-key",
                     prompt="Verify checksum integrity stress test",
                     context={},
-                    poll_timeout=3.0
+                    poll_timeout=3.0,
                 )
             assert "Bad Checksum validation on worker node" in str(exc_info.value)
     finally:
@@ -343,11 +370,12 @@ async def test_payload_tampering_corrupted_result_checksum_hub_rejection(run_ser
     and handles it cleanly.
     """
     import orchestrator
+
     orchestrator.DISTRIBUTED_MODE = True
 
     worker_id = "result-tamper-worker"
     worker = ClientWorker(worker_id=worker_id, roles=["grok"])
-    
+
     # We will hook into the worker's execute_task reporting or websocket send
     # to corrupt the result checksum reported back to the hub.
     original_execute_task = worker.execute_task
@@ -355,8 +383,8 @@ async def test_payload_tampering_corrupted_result_checksum_hub_rejection(run_ser
     async def mock_corrupt_result_execute_task(task_id, task_data):
         # Execute task normally to transition to idle status
         await original_execute_task(task_id, task_data)
-        
-        # But wait! The worker will send the normal result over WS. 
+
+        # But wait! The worker will send the normal result over WS.
         # So instead of mocking execute_task, we should mock the ws.send call on the worker
         # to send a corrupted result checksum!
 
@@ -365,6 +393,7 @@ async def test_payload_tampering_corrupted_result_checksum_hub_rejection(run_ser
 
     # Let's mock worker's ws.send to corrupt checksum of 'result' message
     original_ws_send = worker.ws.send
+
     async def mock_ws_send(msg_str):
         try:
             data = json.loads(msg_str)
@@ -379,14 +408,17 @@ async def test_payload_tampering_corrupted_result_checksum_hub_rejection(run_ser
     # Patch the worker ws connection send method
     worker.ws.send = mock_ws_send
 
-    with patch("ag_core.agents.grok_researcher.GrokResearcherAgent.run", new=AsyncMock(return_value="Valid result content")):
+    with patch(
+        "ag_core.agents.grok_researcher.GrokResearcherAgent.run",
+        new=AsyncMock(return_value="Valid result content"),
+    ):
         with pytest.raises(PipelineError) as exc_info:
             await call_api(
                 url="http://localhost:8001",
                 api_key="mock-key",
                 prompt="Result checksum tamper test",
                 context={},
-                poll_timeout=3.0
+                poll_timeout=3.0,
             )
         assert "Result checksum validation failed" in str(exc_info.value)
 
@@ -394,5 +426,9 @@ async def test_payload_tampering_corrupted_result_checksum_hub_rejection(run_ser
     worker_task.cancel()
     try:
         await worker_task
-    except asyncio.save_canceled_error if hasattr(asyncio, "save_canceled_error") else asyncio.CancelledError:
+    except (
+        asyncio.save_canceled_error
+        if hasattr(asyncio, "save_canceled_error")
+        else asyncio.CancelledError
+    ):
         pass

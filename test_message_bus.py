@@ -3,14 +3,10 @@ from ag_core.utils.message_bus import MessageBus, Artifact
 
 def test_artifact_content_type_coercion():
     # Test coercion during Artifact instantiation
-    art_dict = Artifact(
-        name="test_dict", content={"key": "val"}, created_by="test"
-    )
+    art_dict = Artifact(name="test_dict", content={"key": "val"}, created_by="test")
     assert art_dict.content_type == "json"
 
-    art_list = Artifact(
-        name="test_list", content=[1, 2, 3], created_by="test"
-    )
+    art_list = Artifact(name="test_list", content=[1, 2, 3], created_by="test")
     assert art_list.content_type == "json"
 
     art_text = Artifact(name="test_text", content="hello", created_by="test")
@@ -41,9 +37,7 @@ def test_message_bus_fifo_eviction(tmp_path):
     # Publish 105 artifacts
     published_ids = []
     for i in range(105):
-        art = Artifact(
-            name=f"art_{i}", content=f"content_{i}", created_by="test"
-        )
+        art = Artifact(name=f"art_{i}", content=f"content_{i}", created_by="test")
         art_id = bus.publish(art)
         published_ids.append((art_id, f"content_{i}"))
 
@@ -74,9 +68,7 @@ def test_message_bus_no_eviction_without_db():
     # Publish 105 artifacts without persistent DB
     published_ids = []
     for i in range(105):
-        art = Artifact(
-            name=f"art_{i}", content=f"content_{i}", created_by="test"
-        )
+        art = Artifact(name=f"art_{i}", content=f"content_{i}", created_by="test")
         art_id = bus.publish(art)
         published_ids.append(art_id)
 

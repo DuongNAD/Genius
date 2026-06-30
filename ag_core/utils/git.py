@@ -7,15 +7,20 @@ from ag_core.config import load_config
 
 logger = logging.getLogger("ag_core.utils.git")
 
+
 class GitError(Exception):
     """Exception raised for errors in Git operations."""
+
     pass
+
 
 class GitManager:
     def __init__(self, username: Optional[str] = None, token: Optional[str] = None):
         try:
             config = load_config()
-            self.username = username or config.git_username or os.getenv("GIT_USERNAME", "")
+            self.username = (
+                username or config.git_username or os.getenv("GIT_USERNAME", "")
+            )
             self.token = token or config.git_token or os.getenv("GIT_TOKEN", "")
         except Exception:
             self.username = username or os.getenv("GIT_USERNAME", "")
@@ -25,9 +30,9 @@ class GitManager:
         if not text:
             return text
         # Mask URL basic auth: https://user:pass@domain -> https://***:***@domain
-        text = re.sub(r'(https?://)[^/:]+:[^/@]+@', r'\1***:***@', text)
+        text = re.sub(r"(https?://)[^/:]+:[^/@]+@", r"\1***:***@", text)
         # Mask URL token auth: https://token@domain -> https://***@domain
-        text = re.sub(r'(https?://)[^/:@]+@', r'\1***@', text)
+        text = re.sub(r"(https?://)[^/:@]+@", r"\1***@", text)
         if self.token:
             text = text.replace(self.token, "***")
         return text
@@ -39,17 +44,17 @@ class GitManager:
             return url
         if not self.username and not self.token:
             return url
-        
+
         # Remove any existing credentials in the URL
-        clean_url = re.sub(r'(https?://)[^/]+@', r'\1', url)
-        
+        clean_url = re.sub(r"(https?://)[^/]+@", r"\1", url)
+
         if self.username and self.token:
             auth_part = f"{self.username}:{self.token}@"
         elif self.token:
             auth_part = f"{self.token}@"
         else:
             auth_part = f"{self.username}@"
-            
+
         if clean_url.startswith("https://"):
             return clean_url.replace("https://", f"https://{auth_part}", 1)
         elif clean_url.startswith("http://"):
@@ -59,10 +64,13 @@ class GitManager:
     async def _get_remote_url(self, cwd: Optional[str]) -> Optional[str]:
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "remote", "get-url", "origin",
+                "git",
+                "remote",
+                "get-url",
+                "origin",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=cwd
+                cwd=cwd,
             )
             stdout, _ = await proc.communicate()
             if proc.returncode == 0:
@@ -74,10 +82,13 @@ class GitManager:
     async def _get_current_branch(self, cwd: Optional[str]) -> Optional[str]:
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "rev-parse", "--abbrev-ref", "HEAD",
+                "git",
+                "rev-parse",
+                "--abbrev-ref",
+                "HEAD",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=cwd
+                cwd=cwd,
             )
             stdout, _ = await proc.communicate()
             if proc.returncode == 0:
@@ -86,10 +97,12 @@ class GitManager:
             pass
         return None
 
-    async def _run_git(self, args: List[str], cwd: Optional[str] = None, env: Optional[dict] = None) -> str:
+    async def _run_git(
+        self, args: List[str], cwd: Optional[str] = None, env: Optional[dict] = None
+    ) -> str:
         masked_cmd = "git " + " ".join(self._mask(arg) for arg in args)
         logger.info(f"Running command: {masked_cmd}")
-        
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 "git",
@@ -97,16 +110,16 @@ class GitManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
-                env=env
+                env=env,
             )
             stdout_bytes, stderr_bytes = await proc.communicate()
             stdout = stdout_bytes.decode(errors="replace")
             stderr = stderr_bytes.decode(errors="replace")
-            
+
             if proc.returncode != 0:
                 error_msg = f"Git command failed: {masked_cmd}\nExit code: {proc.returncode}\nStdout: {stdout}\nStderr: {stderr}"
                 raise GitError(self._mask(error_msg))
-                
+
             return self._mask(stdout)
         except Exception as e:
             if isinstance(e, GitError):
@@ -127,7 +140,13 @@ class GitManager:
             args = ["add"] + list(files)
         return await self._run_git(args, cwd=cwd)
 
-    async def commit(self, message: str, cwd: Optional[str] = None, author_name: Optional[str] = None, author_email: Optional[str] = None) -> str:
+    async def commit(
+        self,
+        message: str,
+        cwd: Optional[str] = None,
+        author_name: Optional[str] = None,
+        author_email: Optional[str] = None,
+    ) -> str:
         env = os.environ.copy()
         if author_name:
             env["GIT_AUTHOR_NAME"] = author_name

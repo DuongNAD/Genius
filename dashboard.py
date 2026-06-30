@@ -15,12 +15,15 @@ from ag_core.utils.db import get_db_connection, init_db
 
 from contextlib import asynccontextmanager
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     yield
 
+
 app = FastAPI(title="Genius Agent Dashboard", lifespan=lifespan)
+
 
 def check_port(host: str, port: int) -> bool:
     try:
@@ -29,6 +32,7 @@ def check_port(host: str, port: int) -> bool:
             return True
     except (socket.timeout, ConnectionRefusedError, OSError):
         return False
+
 
 def check_agent_busy(agent_name: str) -> str:
     names_to_check = [agent_name]
@@ -47,7 +51,7 @@ def check_agent_busy(agent_name: str) -> str:
             placeholders = ",".join("?" for _ in names_to_check)
             cursor.execute(
                 f"SELECT 1 FROM agent_logs WHERE agent_name IN ({placeholders}) AND status IN ('processing', 'started') LIMIT 1",
-                names_to_check
+                names_to_check,
             )
             if cursor.fetchone():
                 return "busy"
@@ -55,19 +59,22 @@ def check_agent_busy(agent_name: str) -> str:
         pass
     return "idle"
 
+
 IS_DISTRIBUTED = "--distributed" in sys.argv or "GENIUS_DISTRIBUTED" in os.environ
+
 
 def get_distributed_workers() -> dict:
     registry = None
-    if 'serve' in sys.modules:
-        registry = getattr(sys.modules['serve'], 'worker_registry', None)
+    if "serve" in sys.modules:
+        registry = getattr(sys.modules["serve"], "worker_registry", None)
     if not registry:
         try:
             import serve
-            registry = getattr(serve, 'worker_registry', None)
+
+            registry = getattr(serve, "worker_registry", None)
         except Exception:
             pass
-            
+
     if registry:
         try:
             workers = {}
@@ -75,7 +82,7 @@ def get_distributed_workers() -> dict:
                 workers[w_id] = {
                     "roles": w_info.get("roles"),
                     "status": w_info.get("status"),
-                    "online": True
+                    "online": True,
                 }
             return workers
         except Exception:
@@ -92,15 +99,21 @@ def get_distributed_workers() -> dict:
         import httpx
         import hashlib
         import json
+
         payload = {}
-        serialized = json.dumps(payload, sort_keys=True).encode('utf-8')
+        serialized = json.dumps(payload, sort_keys=True).encode("utf-8")
         checksum = hashlib.sha256(serialized).hexdigest()
         headers = {
             "X-API-Key": "valid-api-key",
             "X-Payload-SHA256": checksum,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        response = httpx.post(f"http://127.0.0.1:{hub_port}/workers", json=payload, headers=headers, timeout=1.0)
+        response = httpx.post(
+            f"http://127.0.0.1:{hub_port}/workers",
+            json=payload,
+            headers=headers,
+            timeout=1.0,
+        )
         if response.status_code == 200:
             workers_data = response.json()
             workers = {}
@@ -108,25 +121,26 @@ def get_distributed_workers() -> dict:
                 workers[w_id] = {
                     "roles": w_info.get("roles"),
                     "status": w_info.get("status"),
-                    "online": True
+                    "online": True,
                 }
             return workers
     except Exception as e:
         print(f"Fallback HTTP request to hub failed: {e}")
     return {}
 
+
 @app.get("/api/status")
 def get_status():
     if IS_DISTRIBUTED:
         return get_distributed_workers()
-        
+
     agents = {
         "grok": {"port": 8001, "db_name": "grok", "roles": ["grok"]},
         "claude": {"port": 8002, "db_name": "claude", "roles": ["claude"]},
         "codex": {"port": 8003, "db_name": "codex", "roles": ["codex"]},
-        "tester": {"port": 8004, "db_name": "tester", "roles": ["tester"]}
+        "tester": {"port": 8004, "db_name": "tester", "roles": ["tester"]},
     }
-    
+
     result = {}
     for name, info in agents.items():
         online = check_port("127.0.0.1", info["port"])
@@ -135,9 +149,10 @@ def get_status():
             "port": info["port"],
             "online": online,
             "status": status,
-            "roles": info["roles"]
+            "roles": info["roles"],
         }
     return result
+
 
 @app.get("/api/conversations")
 def get_conversations():
@@ -145,11 +160,14 @@ def get_conversations():
         with get_db_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT id, timestamp, prompt, result FROM conversations ORDER BY id DESC")
+            cursor.execute(
+                "SELECT id, timestamp, prompt, result FROM conversations ORDER BY id DESC"
+            )
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
     except Exception:
         return []
+
 
 @app.get("/api/logs")
 def get_logs():
@@ -157,25 +175,30 @@ def get_logs():
         with get_db_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT id, timestamp, task_id, agent_name, prompt, result, status, error FROM agent_logs ORDER BY id DESC")
+            cursor.execute(
+                "SELECT id, timestamp, task_id, agent_name, prompt, result, status, error FROM agent_logs ORDER BY id DESC"
+            )
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
     except Exception:
         return []
 
+
 @app.websocket("/ws")
 async def ws_dashboard(websocket: WebSocket):
     await websocket.accept()
-    
+
     async def send_updates():
         status_data = get_status()
         conversations_data = get_conversations()
         logs_data = get_logs()
-        await websocket.send_json({
-            "status": status_data,
-            "conversations": conversations_data,
-            "logs": logs_data
-        })
+        await websocket.send_json(
+            {
+                "status": status_data,
+                "conversations": conversations_data,
+                "logs": logs_data,
+            }
+        )
 
     try:
         await send_updates()
@@ -193,7 +216,7 @@ async def ws_dashboard(websocket: WebSocket):
             pass
 
     periodic_task = asyncio.create_task(periodic_updates())
-    
+
     try:
         while True:
             data = await websocket.receive_json()
@@ -205,6 +228,7 @@ async def ws_dashboard(websocket: WebSocket):
         pass
     finally:
         periodic_task.cancel()
+
 
 @app.get("/", response_class=HTMLResponse)
 def get_index():
@@ -553,6 +577,8 @@ def get_index():
 </html>"""
     return HTMLResponse(content=html_content, status_code=200)
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("dashboard:app", host="0.0.0.0", port=8080)

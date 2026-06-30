@@ -3,16 +3,18 @@ import pathspec
 import tiktoken
 from typing import Dict, List, Optional
 
+
 def is_binary_file(filepath: str) -> bool:
     """Detects if a file is binary by looking for null bytes in the first 1KB."""
     try:
         if os.path.isdir(filepath):
             return True
-        with open(filepath, 'rb') as f:
+        with open(filepath, "rb") as f:
             chunk = f.read(1024)
-            return b'\x00' in chunk
+            return b"\x00" in chunk
     except Exception:
         return True
+
 
 class ProjectScanner:
     def __init__(self, root_dir: str, extra_ignores: Optional[List[str]] = None):
@@ -23,78 +25,81 @@ class ProjectScanner:
     def _load_pathspec(self) -> pathspec.PathSpec:
         """Loads .gitignore patterns and merges them with default and extra ignore patterns."""
         patterns: List[str] = [
-            '.git/',
-            '__pycache__/',
-            '*.pyc',
-            '*.pyo',
-            '*.pyd',
-            'node_modules/',
-            'venv/',
-            '.venv/',
-            '.pytest_cache/'
+            ".git/",
+            "__pycache__/",
+            "*.pyc",
+            "*.pyo",
+            "*.pyd",
+            "node_modules/",
+            "venv/",
+            ".venv/",
+            ".pytest_cache/",
         ]
-        
+
         # Load .gitignore if present
-        gitignore_path = os.path.join(self.root_dir, '.gitignore')
+        gitignore_path = os.path.join(self.root_dir, ".gitignore")
         if os.path.exists(gitignore_path):
             try:
-                with open(gitignore_path, 'r', encoding='utf-8') as f:
+                with open(gitignore_path, "r", encoding="utf-8") as f:
                     patterns.extend(f.read().splitlines())
             except Exception:
                 pass
-                
+
         # Append additional runtime ignores
         patterns.extend(self.extra_ignores)
-        
+
         # Build pathspec matcher
-        return pathspec.PathSpec.from_lines('gitignore', patterns)
+        return pathspec.PathSpec.from_lines("gitignore", patterns)
 
     def scan(self) -> Dict[str, str]:
         """Scans the directory recursively and returns a map of relative paths to text contents."""
         scanned_files: Dict[str, str] = {}
-        
+
         for dirpath, dirnames, filenames in os.walk(self.root_dir):
             # Compute relative directory path and standardize separators
             rel_dir = os.path.relpath(dirpath, self.root_dir)
-            if rel_dir == '.':
-                rel_dir = ''
-                
+            if rel_dir == ".":
+                rel_dir = ""
+
             # Prune ignored subdirectories in-place to optimize traversal
             pruned_dirs = []
             for d in dirnames:
                 if rel_dir:
-                    rel_d = os.path.join(rel_dir, d).replace('\\', '/') + '/'
+                    rel_d = os.path.join(rel_dir, d).replace("\\", "/") + "/"
                 else:
-                    rel_d = d + '/'
+                    rel_d = d + "/"
                 if not self.spec.match_file(rel_d):
                     pruned_dirs.append(d)
-            dirnames[:] = pruned_dirs  # Modifying this list in-place alters os.walk traversal
-            
+            dirnames[:] = (
+                pruned_dirs  # Modifying this list in-place alters os.walk traversal
+            )
+
             for filename in filenames:
                 if rel_dir:
-                    rel_file = os.path.join(rel_dir, filename).replace('\\', '/')
+                    rel_file = os.path.join(rel_dir, filename).replace("\\", "/")
                 else:
                     rel_file = filename
-                
+
                 # Check pathspec ignore rules
                 if self.spec.match_file(rel_file):
                     continue
-                    
+
                 abs_path = os.path.join(dirpath, filename)
-                
+
                 # Filter out binary files
                 if is_binary_file(abs_path):
                     continue
-                    
+
                 # Read content safely
                 try:
-                    with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
                         scanned_files[rel_file] = f.read()
                 except Exception:
                     # Skip unreadable or locked files
                     continue
-                    
+
         return scanned_files
+
 
 class ProjectChunker:
     def __init__(self, model_name: str = "gpt-4", max_tokens: int = 8000):
@@ -111,7 +116,10 @@ class ProjectChunker:
                 return tiktoken.get_encoding("cl100k_base")
             except Exception:
                 from ag_core.utils.logger import logger
-                logger.warning("Failed to initialize tiktoken encoding, using fallback token estimator.")
+
+                logger.warning(
+                    "Failed to initialize tiktoken encoding, using fallback token estimator."
+                )
                 return None
 
     def count_tokens(self, text: str) -> int:

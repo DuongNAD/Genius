@@ -19,12 +19,14 @@ from ag_core.utils.jwt import encode_jwt
 JWT_SECRET = "mock-skill-key"
 HOST = "127.0.0.1"
 
+
 def get_free_port():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(('127.0.0.1', 0))
+    s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
     return port
+
 
 @pytest_asyncio.fixture
 async def run_server():
@@ -37,6 +39,7 @@ async def run_server():
     server.should_exit = True
     await server_task
 
+
 @pytest.fixture(autouse=True)
 def clean_registry_and_tasks():
     worker_registry.workers.clear()
@@ -44,6 +47,7 @@ def clean_registry_and_tasks():
     serve_mod.central_hub.workers.clear()
     serve_mod.central_hub.tasks.clear()
     yield
+
 
 @pytest.mark.asyncio
 async def test_duplicate_worker_connection_hijack_prevention(run_server):
@@ -89,10 +93,13 @@ async def test_duplicate_worker_connection_hijack_prevention(run_server):
 
     # Verify Worker-A is STILL registered on the hub (was NOT deregistered by ws1's close)
     w_info_after = await worker_registry.get_worker(worker_id)
-    assert w_info_after is not None, "Worker was incorrectly deregistered by connection 1 closure"
+    assert (
+        w_info_after is not None
+    ), "Worker was incorrectly deregistered by connection 1 closure"
 
     # Verify we can dispatch a task and connection 2 receives it
     import orchestrator
+
     orchestrator.DISTRIBUTED_MODE = True
 
     task_dispatched = asyncio.Event()
@@ -109,12 +116,15 @@ async def test_duplicate_worker_connection_hijack_prevention(run_server):
                     "worker_id": worker_id,
                     "status": "completed",
                     "result": {"output": "Success on Conn 2"},
-                    "checksum": data["checksum"] # re-use/mock checksum or computed checksum
+                    "checksum": data[
+                        "checksum"
+                    ],  # re-use/mock checksum or computed checksum
                 }
                 # Let's compute a valid checksum for result
                 import hashlib
+
                 res_body = {"output": "Success on Conn 2"}
-                serialized = json.dumps(res_body, sort_keys=True).encode('utf-8')
+                serialized = json.dumps(res_body, sort_keys=True).encode("utf-8")
                 computed_chk = hashlib.sha256(serialized).hexdigest()
                 res_payload["checksum"] = computed_chk
                 await ws2.send(json.dumps(res_payload))
@@ -128,7 +138,7 @@ async def test_duplicate_worker_connection_hijack_prevention(run_server):
             api_key="mock-key",
             prompt="Test duplicate connection task",
             context={},
-            poll_timeout=2.0
+            poll_timeout=2.0,
         )
         assert res == "Success on Conn 2"
         assert task_dispatched.is_set()

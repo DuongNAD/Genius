@@ -13,18 +13,22 @@ _ROOT_DIR = os.path.abspath(os.path.join(_CURRENT_DIR, "..", ".."))
 try:
     import chromadb
     from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
+
     CHROMA_AVAILABLE = True
 except ImportError:
     CHROMA_AVAILABLE = False
 
 try:
     from sentence_transformers import SentenceTransformer
+
     SENTENCE_TRANSFORMERS_AVAILABLE = True
 except Exception:
     SENTENCE_TRANSFORMERS_AVAILABLE = False
 
+
 class SimpleTFIDFEmbedding:
     """Offline-safe term frequency-based embedding generator."""
+
     def __init__(self, vector_dim: int = 128):
         if not isinstance(vector_dim, int) or isinstance(vector_dim, bool):
             raise TypeError("vector_dim must be an integer")
@@ -33,7 +37,7 @@ class SimpleTFIDFEmbedding:
         self.vector_dim = vector_dim
 
     def _tokenize(self, text: str) -> List[str]:
-        return re.findall(r'\w+', text.lower())
+        return re.findall(r"\w+", text.lower())
 
     def get_embeddings(self, texts: List[str]) -> List[List[float]]:
         embeddings = []
@@ -45,30 +49,41 @@ class SimpleTFIDFEmbedding:
             if total > 0:
                 for word, count in counter.items():
                     # Deterministic hash to map word to index
-                    word_hash = int(hashlib.md5(word.encode('utf-8')).hexdigest(), 16)
+                    word_hash = int(hashlib.md5(word.encode("utf-8")).hexdigest(), 16)
                     idx = word_hash % self.vector_dim
-                    vector[idx] += (count / total)
+                    vector[idx] += count / total
                 norm = math.sqrt(sum(v * v for v in vector))
                 if norm > 0:
                     vector = [v / norm for v in vector]
             embeddings.append(vector)
         return embeddings
 
+
 if CHROMA_AVAILABLE:
+
     class ChromaEmbeddingFunctionWrapper(EmbeddingFunction):
         def __init__(self, vector_memory):
             self.vector_memory = vector_memory
+
         def __call__(self, input: Documents) -> Embeddings:
             return self.vector_memory.get_embeddings(input)
+
 
 _cached_sentence_transformer = None
 _sentence_transformer_failed = False
 
+
 class VectorMemory:
-    def __init__(self, collection_name: str, use_chroma: bool = False, db_path: str = None, chroma_persist_dir: str = None):
+    def __init__(
+        self,
+        collection_name: str,
+        use_chroma: bool = False,
+        db_path: str = None,
+        chroma_persist_dir: str = None,
+    ):
         self.collection_name = collection_name
         self.embedder = SimpleTFIDFEmbedding()
-        
+
         self.sentence_transformer_model = None
         global _cached_sentence_transformer, _sentence_transformer_failed
         if SENTENCE_TRANSFORMERS_AVAILABLE and not _sentence_transformer_failed:
@@ -76,26 +91,40 @@ class VectorMemory:
                 self.sentence_transformer_model = _cached_sentence_transformer
             else:
                 try:
-                    _cached_sentence_transformer = SentenceTransformer('all-MiniLM-L6-v2')
+                    _cached_sentence_transformer = SentenceTransformer(
+                        "all-MiniLM-L6-v2"
+                    )
                     self.sentence_transformer_model = _cached_sentence_transformer
                 except Exception as e:
-                    print(f"Warning: Failed to load SentenceTransformer ({e}). Falling back to TF-IDF.")
+                    print(
+                        f"Warning: Failed to load SentenceTransformer ({e}). Falling back to TF-IDF."
+                    )
                     _sentence_transformer_failed = True
-                
-        self.db_path = db_path or os.environ.get("GENIUS_MEMORY_DB_PATH") or os.environ.get("GENIUS_DB_PATH") or os.path.join(_ROOT_DIR, "genius.db")
-        
+
+        self.db_path = (
+            db_path
+            or os.environ.get("GENIUS_MEMORY_DB_PATH")
+            or os.environ.get("GENIUS_DB_PATH")
+            or os.path.join(_ROOT_DIR, "genius.db")
+        )
+
         self.use_chroma = use_chroma and CHROMA_AVAILABLE
         if self.use_chroma:
             try:
-                self.chroma_dir = chroma_persist_dir or os.environ.get("GENIUS_CHROMA_DIR") or os.path.join(_ROOT_DIR, ".chroma")
+                self.chroma_dir = (
+                    chroma_persist_dir
+                    or os.environ.get("GENIUS_CHROMA_DIR")
+                    or os.path.join(_ROOT_DIR, ".chroma")
+                )
                 self.client = chromadb.PersistentClient(path=self.chroma_dir)
                 emb_fn = ChromaEmbeddingFunctionWrapper(self)
                 self.collection = self.client.get_or_create_collection(
-                     name=collection_name, 
-                     embedding_function=emb_fn
+                    name=collection_name, embedding_function=emb_fn
                 )
             except Exception as e:
-                print(f"Warning: Failed to initialize Chroma DB ({e}). Falling back to SQLite.")
+                print(
+                    f"Warning: Failed to initialize Chroma DB ({e}). Falling back to SQLite."
+                )
                 self.use_chroma = False
                 self._init_sqlite_db()
         else:
@@ -118,11 +147,14 @@ class VectorMemory:
                     ret.append(v)
                 return ret
             except Exception as e:
-                print(f"Warning: SentenceTransformer encoding failed ({e}). Falling back to TF-IDF.")
+                print(
+                    f"Warning: SentenceTransformer encoding failed ({e}). Falling back to TF-IDF."
+                )
         return self.embedder.get_embeddings(texts)
 
     def _get_connection(self):
         import sqlite3
+
         db_dir = os.path.dirname(self.db_path)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
@@ -135,6 +167,7 @@ class VectorMemory:
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
         import sqlite3
+
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         try:
             conn.execute("PRAGMA journal_mode=WAL;")
@@ -150,31 +183,31 @@ class VectorMemory:
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_collection ON agent_vector_memory_fallback(collection_name)")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_collection ON agent_vector_memory_fallback(collection_name)"
+                )
         finally:
             conn.close()
 
     def add(self, text: str, metadata: dict | None = None, doc_id: str = None) -> str:
         doc_id = doc_id or str(uuid.uuid4())
         metadata = metadata or {}
-        
+
         if self.use_chroma:
-            self.collection.add(
-                documents=[text],
-                metadatas=[metadata],
-                ids=[doc_id]
-            )
+            self.collection.add(documents=[text], metadatas=[metadata], ids=[doc_id])
         else:
             embedding = self.get_embeddings([text])[0]
             from ag_core.utils.db import enqueue_db_write
-            
-            def _add_vector_impl(conn, doc_id, collection_name, text, metadata_json, embedding_json):
+
+            def _add_vector_impl(
+                conn, doc_id, collection_name, text, metadata_json, embedding_json
+            ):
                 conn.execute(
                     "INSERT OR REPLACE INTO agent_vector_memory_fallback (id, collection_name, text, metadata, embedding) VALUES (?, ?, ?, ?, ?)",
-                    (doc_id, collection_name, text, metadata_json, embedding_json)
+                    (doc_id, collection_name, text, metadata_json, embedding_json),
                 )
                 conn.commit()
-                
+
             try:
                 enqueue_db_write(
                     _add_vector_impl,
@@ -183,7 +216,7 @@ class VectorMemory:
                     text,
                     json.dumps(metadata),
                     json.dumps(embedding),
-                    db_path=self.db_path
+                    db_path=self.db_path,
                 )
             except Exception:
                 raise
@@ -192,8 +225,7 @@ class VectorMemory:
     def query(self, query_text: str, n_results: int = 5) -> List[Dict[str, Any]]:
         if self.use_chroma:
             results = self.collection.query(
-                query_texts=[query_text],
-                n_results=n_results
+                query_texts=[query_text], n_results=n_results
             )
             ret = []
             if results and results.get("documents"):
@@ -212,12 +244,12 @@ class VectorMemory:
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT id, text, metadata, embedding FROM agent_vector_memory_fallback WHERE collection_name = ?",
-                    (self.collection_name,)
+                    (self.collection_name,),
                 )
                 rows = cursor.fetchall()
             finally:
                 conn.close()
-            
+
             if not rows:
                 return []
 
@@ -232,7 +264,7 @@ class VectorMemory:
                         score = sum(q * e for q, e in zip(query_vector, emb))
                 except Exception:
                     score = 0.0
-                
+
                 try:
                     meta = json.loads(metadata_str) if metadata_str else {}
                 except Exception:

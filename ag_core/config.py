@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 _original_env = dict(os.environ)
 
+
 # Find and load .env robustly
 def _load_env():
     curr_dir = os.path.abspath(os.getcwd())
@@ -18,16 +19,21 @@ def _load_env():
         if parent == curr_dir:
             break
         curr_dir = parent
-    fallback_env = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    fallback_env = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+    )
     if os.path.exists(fallback_env):
         load_dotenv(fallback_env, override=False)
     else:
         load_dotenv(override=False)
 
+
 _load_env()
+
 
 def _reload_env_safely():
     import sys
+
     if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
         return
     curr_dir = os.path.abspath(os.getcwd())
@@ -42,7 +48,9 @@ def _reload_env_safely():
             break
         curr_dir = parent
     if not env_path:
-        fallback_env = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+        fallback_env = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+        )
         if os.path.exists(fallback_env):
             env_path = fallback_env
 
@@ -61,20 +69,30 @@ def _reload_env_safely():
                     if current_val == original_val:
                         os.environ[k] = v
 
+
 class AppConfig(BaseModel):
     name: str = "Antigravity Core"
     version: str = "2.0"
+
 
 class ModelsConfig(BaseModel):
     openai: str = "gpt-4o"
     anthropic: str = "claude-3-5-sonnet"
     grok: str = "grok-2"
 
+
 class ScannerConfig(BaseModel):
     chunk_size_limit: int = 8000
     exclude_patterns: List[str] = Field(
-        default_factory=lambda: [".git/", "node_modules/", "venv/", ".venv/", ".pytest_cache/"]
+        default_factory=lambda: [
+            ".git/",
+            "node_modules/",
+            "venv/",
+            ".venv/",
+            ".pytest_cache/",
+        ]
     )
+
 
 class ServicesConfig(BaseModel):
     grok_researcher: str = "http://localhost:8001"
@@ -84,11 +102,26 @@ class ServicesConfig(BaseModel):
     security_agent: str = "http://localhost:8005"
     devops_agent: str = "http://localhost:8006"
 
+
 class MemoryConfig(BaseModel):
     enabled: bool = True
     use_chroma: bool = False
-    db_path: str = Field(default_factory=lambda: os.environ.get("GENIUS_MEMORY_DB_PATH") or os.environ.get("GENIUS_DB_PATH") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "genius.db"))
-    chroma_persist_dir: str = Field(default_factory=lambda: os.getenv("CHROMA_PERSIST_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".chroma")))
+    db_path: str = Field(
+        default_factory=lambda: os.environ.get("GENIUS_MEMORY_DB_PATH")
+        or os.environ.get("GENIUS_DB_PATH")
+        or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "genius.db"
+        )
+    )
+    chroma_persist_dir: str = Field(
+        default_factory=lambda: os.getenv(
+            "CHROMA_PERSIST_DIR",
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".chroma"
+            ),
+        )
+    )
+
 
 class Config(BaseModel):
     app: AppConfig = Field(default_factory=AppConfig)
@@ -97,13 +130,16 @@ class Config(BaseModel):
     services: ServicesConfig = Field(default_factory=ServicesConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     skill_api_key: str = Field(default_factory=lambda: os.getenv("SKILL_API_KEY", ""))
-    
+
     # Credentials injected directly from OS Environment
     openai_api_key: str = Field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
-    anthropic_api_key: str = Field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
+    anthropic_api_key: str = Field(
+        default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "")
+    )
     grok_api_key: str = Field(default_factory=lambda: os.getenv("GROK_API_KEY", ""))
     git_username: str = Field(default_factory=lambda: os.getenv("GIT_USERNAME", ""))
     git_token: str = Field(default_factory=lambda: os.getenv("GIT_TOKEN", ""))
+
 
 def load_config(config_path: str = "config.yaml") -> Config:
     """Reads YAML config and binds it alongside environmental secrets into Pydantic models."""
@@ -123,7 +159,9 @@ def load_config(config_path: str = "config.yaml") -> Config:
                 break
             curr_dir = parent
         if not found:
-            fallback_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), config_path)
+            fallback_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), config_path
+            )
             if os.path.exists(fallback_path):
                 actual_path = fallback_path
 
@@ -142,7 +180,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
         "grok_api_key": "GROK_API_KEY",
         "skill_api_key": "SKILL_API_KEY",
         "git_username": "GIT_USERNAME",
-        "git_token": "GIT_TOKEN"
+        "git_token": "GIT_TOKEN",
     }
     for field_name, env_var in env_keys.items():
         val = os.getenv(env_var)
@@ -151,6 +189,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
 
     config = Config(**yaml_data)
     import sys
+
     if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
         config.services.grok_researcher = "http://localhost:8001/grok"
         config.services.claude_architect = "http://localhost:8002/claude"
@@ -162,7 +201,15 @@ def load_config(config_path: str = "config.yaml") -> Config:
             config.skill_api_key = ""
 
     import json
-    registry_path = os.environ.get("GENIUS_SERVICE_REGISTRY", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".agents", "service_registry.json"))
+
+    registry_path = os.environ.get(
+        "GENIUS_SERVICE_REGISTRY",
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            ".agents",
+            "service_registry.json",
+        ),
+    )
     if os.path.exists(registry_path):
         try:
             with open(registry_path, "r", encoding="utf-8") as f:
@@ -173,7 +220,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
                 "codex": "codex_reviewer",
                 "tester": "tester_agent",
                 "security": "security_agent",
-                "devops": "devops_agent"
+                "devops": "devops_agent",
             }
             for role, port in registry.items():
                 field_name = role_to_field.get(role)
@@ -181,7 +228,9 @@ def load_config(config_path: str = "config.yaml") -> Config:
                     suffix = ""
                     if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
                         suffix = f"/{role}"
-                    setattr(config.services, field_name, f"http://localhost:{port}{suffix}")
+                    setattr(
+                        config.services, field_name, f"http://localhost:{port}{suffix}"
+                    )
         except Exception:
             pass
 

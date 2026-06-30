@@ -1,5 +1,6 @@
 import sys
 import os
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import asyncio
@@ -14,9 +15,11 @@ from serve import app, worker_registry
 
 JWT_SECRET = os.getenv("SKILL_API_KEY", "mock-skill-key")
 
+
 @pytest.fixture
 def network():
     return MockNetworkProtocol()
+
 
 @pytest.fixture
 def hub(network):
@@ -24,6 +27,7 @@ def hub(network):
     h.set_network(network)
     yield h
     h.stop_sweeper()
+
 
 # =<ctrl42>= CHALLENGE 1: Graceful Deregistration Task Stall =cat=
 @pytest.mark.asyncio
@@ -62,7 +66,9 @@ async def test_graceful_deregistration_task_stall(network, hub):
     # Now deregister the assigned worker gracefully
     dereg_payload = {"worker_id": assigned_worker_id}
     dereg_headers = hub.create_headers(dereg_payload)
-    status_code, _ = await network.send_to_hub("/deregister", dereg_payload, dereg_headers)
+    status_code, _ = await network.send_to_hub(
+        "/deregister", dereg_payload, dereg_headers
+    )
     assert status_code == 200
 
     # Wait to process deregistration
@@ -93,7 +99,9 @@ async def test_deregister_race_keyerror_crash(network, hub):
     # Deregister immediately without sleeping, causing a race condition
     dereg_payload = {"worker_id": "w1"}
     dereg_headers = hub.create_headers(dereg_payload)
-    status_code, _ = await network.send_to_hub("/deregister", dereg_payload, dereg_headers)
+    status_code, _ = await network.send_to_hub(
+        "/deregister", dereg_payload, dereg_headers
+    )
     assert status_code == 200
 
     # Wait for the background task to execute and fail cleanly
@@ -102,7 +110,10 @@ async def test_deregister_race_keyerror_crash(network, hub):
     # Task is marked failed due to the communication error, but background task does not crash
     assert hub.tasks[task_id]["status"] == "failed"
     assert "error" in hub.tasks[task_id]["result"]
-    assert "unreachable" in str(hub.tasks[task_id]["result"]["error"]).lower() or "dispatch" in str(hub.tasks[task_id]["result"]["error"]).lower()
+    assert (
+        "unreachable" in str(hub.tasks[task_id]["result"]["error"]).lower()
+        or "dispatch" in str(hub.tasks[task_id]["result"]["error"]).lower()
+    )
 
 
 # =<ctrl42>= CHALLENGE 2: JWT Spoofing / Identity Bypass =cat=
@@ -112,18 +123,17 @@ def test_jwt_identity_spoofing_bypass():
     is rejected and disconnected if they send a register request for worker-B.
     """
     client = TestClient(app)
-    token = encode_jwt({"sub": "worker-A", "exp": time.time() + 60}, os.getenv("SKILL_API_KEY", "mock-skill-key"))
+    token = encode_jwt(
+        {"sub": "worker-A", "exp": time.time() + 60},
+        os.getenv("SKILL_API_KEY", "mock-skill-key"),
+    )
 
     # Clear registry
     worker_registry.workers.clear()
 
     with client.websocket_connect(f"/ws/connect?token={token}") as websocket:
         # Register as worker-B, bypassing the JWT sub claim of worker-A
-        reg_payload = {
-            "type": "register",
-            "worker_id": "worker-B",
-            "roles": ["grok"]
-        }
+        reg_payload = {"type": "register", "worker_id": "worker-B", "roles": ["grok"]}
         try:
             websocket.send_json(reg_payload)
             resp = websocket.receive_json()
@@ -252,27 +262,25 @@ def test_websocket_heartbeat_identity_spoofing_rejected():
     the connection is rejected and closed.
     """
     client = TestClient(app)
-    token = encode_jwt({"sub": "worker-A", "exp": time.time() + 60}, os.getenv("SKILL_API_KEY", "mock-skill-key"))
+    token = encode_jwt(
+        {"sub": "worker-A", "exp": time.time() + 60},
+        os.getenv("SKILL_API_KEY", "mock-skill-key"),
+    )
 
     # Clear registry
     worker_registry.workers.clear()
 
     with client.websocket_connect(f"/ws/connect?token={token}") as websocket:
         # First, register correctly as worker-A
-        websocket.send_json({
-            "type": "register",
-            "worker_id": "worker-A",
-            "roles": ["grok"]
-        })
+        websocket.send_json(
+            {"type": "register", "worker_id": "worker-A", "roles": ["grok"]}
+        )
         resp = websocket.receive_json()
         assert resp.get("type") == "registered"
 
         # Now, attempt heartbeat spoofing under worker-B
-        websocket.send_json({
-            "type": "heartbeat",
-            "worker_id": "worker-B"
-        })
-        
+        websocket.send_json({"type": "heartbeat", "worker_id": "worker-B"})
+
         # We expect to receive error and connection closed with code 4003
         try:
             resp = websocket.receive_json()
@@ -292,31 +300,34 @@ def test_websocket_result_identity_spoofing_rejected():
     the connection is rejected and closed.
     """
     client = TestClient(app)
-    token = encode_jwt({"sub": "worker-A", "exp": time.time() + 60}, os.getenv("SKILL_API_KEY", "mock-skill-key"))
+    token = encode_jwt(
+        {"sub": "worker-A", "exp": time.time() + 60},
+        os.getenv("SKILL_API_KEY", "mock-skill-key"),
+    )
 
     # Clear registry
     worker_registry.workers.clear()
 
     with client.websocket_connect(f"/ws/connect?token={token}") as websocket:
         # First, register correctly as worker-A
-        websocket.send_json({
-            "type": "register",
-            "worker_id": "worker-A",
-            "roles": ["grok"]
-        })
+        websocket.send_json(
+            {"type": "register", "worker_id": "worker-A", "roles": ["grok"]}
+        )
         resp = websocket.receive_json()
         assert resp.get("type") == "registered"
 
         # Now, attempt result reporting spoofing under worker-B
-        websocket.send_json({
-            "type": "result",
-            "task_id": "task_1",
-            "worker_id": "worker-B",
-            "status": "completed",
-            "result": {"output": "ok"},
-            "checksum": "dummy-checksum"
-        })
-        
+        websocket.send_json(
+            {
+                "type": "result",
+                "task_id": "task_1",
+                "worker_id": "worker-B",
+                "status": "completed",
+                "result": {"output": "ok"},
+                "checksum": "dummy-checksum",
+            }
+        )
+
         # We expect to receive error and connection closed with code 4003
         try:
             resp = websocket.receive_json()

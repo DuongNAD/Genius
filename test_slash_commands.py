@@ -16,14 +16,15 @@ from ag_core.agents.tester import TesterAgent
 from orchestrator import run_pipeline, ROUTING_TABLE
 from serve import main_async as serve_main_async
 
+
 @pytest.mark.asyncio
 async def test_agent_slash_command_rewriting_grok():
     provider = MagicMock()
     provider.send_prompt = AsyncMock(return_value={"content": "mocked", "usage": {}})
     provider.model_name = "grok-2"
-    
+
     agent = GrokResearcherAgent(provider=provider, output_file="None")
-    
+
     # Test /research command
     await agent.run(prompt="/research detailed queries")
     provider.send_prompt.assert_called_once()
@@ -51,9 +52,9 @@ async def test_agent_slash_command_rewriting_claude():
     provider = MagicMock()
     provider.send_prompt = AsyncMock(return_value={"content": "mocked", "usage": {}})
     provider.model_name = "claude-3-5"
-    
+
     agent = ClaudeArchitectAgent(provider=provider, output_file="None")
-    
+
     # Test /plan command
     await agent.run(prompt="/plan detailed queries")
     provider.send_prompt.assert_called_once()
@@ -81,9 +82,9 @@ async def test_agent_slash_command_rewriting_codex():
     provider = MagicMock()
     provider.send_prompt = AsyncMock(return_value={"content": "mocked", "usage": {}})
     provider.model_name = "gpt-4o"
-    
+
     agent = CodexReviewerAgent(provider=provider, output_file="None")
-    
+
     # Test /code command
     await agent.run(prompt="/code detailed queries")
     provider.send_prompt.assert_called_once()
@@ -111,9 +112,9 @@ async def test_agent_slash_command_rewriting_tester():
     provider = MagicMock()
     provider.send_prompt = AsyncMock(return_value={"content": "mocked", "usage": {}})
     provider.model_name = "gpt-4o"
-    
+
     agent = TesterAgent(provider=provider, output_file="None")
-    
+
     # Test /unit-test command
     await agent.run(prompt="/unit-test detailed queries")
     provider.send_prompt.assert_called_once()
@@ -133,22 +134,22 @@ async def test_agent_slash_command_rewriting_tester():
 @patch("orchestrator.call_api", new_callable=AsyncMock)
 async def test_orchestrator_smart_routing(mock_call_api, tmp_path):
     mock_call_api.return_value = "Mocked routed agent output"
-    
+
     # Run the orchestrator with a routed command
     result = await run_pipeline(
         prompt="/research detailed research query",
         workspace=str(tmp_path),
         grok_url="http://localhost:8001",
-        api_key_override="test-key"
+        api_key_override="test-key",
     )
-    
+
     # Verify we returned direct response and wrote output to research.md only
     assert result == "Mocked routed agent output"
     mock_call_api.assert_called_once()
-    
+
     research_file = tmp_path / "research.md"
     design_file = tmp_path / "design.md"
-    
+
     assert research_file.exists()
     assert not design_file.exists()
     assert research_file.read_text(encoding="utf-8") == "Mocked routed agent output"
@@ -158,14 +159,16 @@ async def test_orchestrator_smart_routing(mock_call_api, tmp_path):
 @patch("serve.start_server", new_callable=AsyncMock)
 @patch("serve.run_pipeline", new_callable=AsyncMock)
 @patch("argparse.ArgumentParser.parse_args")
-async def test_serve_slash_command_dynamic_role(mock_parse_args, mock_run_pipeline, mock_start_server):
+async def test_serve_slash_command_dynamic_role(
+    mock_parse_args, mock_run_pipeline, mock_start_server
+):
     mock_args = MagicMock()
     mock_args.roles = "orchestrator"
     mock_args.prompt = "/plan do a blueprint"
     mock_parse_args.return_value = mock_args
 
     await serve_main_async()
-    
+
     # Serve should dynamically resolve /plan to "claude" and add "claude" as server to start
     mock_start_server.assert_called_once_with("claude", 8002)
     mock_run_pipeline.assert_called_once_with("/plan do a blueprint")
@@ -176,8 +179,8 @@ async def test_serve_slash_command_dynamic_role(mock_parse_args, mock_run_pipeli
 def test_grok_run_cli(mock_agent_run):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     spec = importlib.util.spec_from_file_location(
-        "grok_run", 
-        os.path.join(base_dir, ".agents", "skills", "grok_researcher", "run.py")
+        "grok_run",
+        os.path.join(base_dir, ".agents", "skills", "grok_researcher", "run.py"),
     )
     grok_run = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(grok_run)
@@ -186,12 +189,14 @@ def test_grok_run_cli(mock_agent_run):
 
 
 @patch("sys.argv", ["run.py", "/plan", "design blueprint"])
-@patch("ag_core.agents.claude_architect.ClaudeArchitectAgent.run", new_callable=AsyncMock)
+@patch(
+    "ag_core.agents.claude_architect.ClaudeArchitectAgent.run", new_callable=AsyncMock
+)
 def test_claude_run_cli(mock_agent_run):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     spec = importlib.util.spec_from_file_location(
-        "claude_run", 
-        os.path.join(base_dir, ".agents", "skills", "claude_architect", "run.py")
+        "claude_run",
+        os.path.join(base_dir, ".agents", "skills", "claude_architect", "run.py"),
     )
     claude_run = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(claude_run)
@@ -204,8 +209,8 @@ def test_claude_run_cli(mock_agent_run):
 def test_codex_run_cli(mock_agent_run):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     spec = importlib.util.spec_from_file_location(
-        "codex_run", 
-        os.path.join(base_dir, ".agents", "skills", "codex_reviewer", "run.py")
+        "codex_run",
+        os.path.join(base_dir, ".agents", "skills", "codex_reviewer", "run.py"),
     )
     codex_run = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(codex_run)
@@ -218,8 +223,8 @@ def test_codex_run_cli(mock_agent_run):
 def test_tester_run_cli(mock_agent_run):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     spec = importlib.util.spec_from_file_location(
-        "tester_run", 
-        os.path.join(base_dir, ".agents", "skills", "tester_agent", "run.py")
+        "tester_run",
+        os.path.join(base_dir, ".agents", "skills", "tester_agent", "run.py"),
     )
     tester_run = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(tester_run)

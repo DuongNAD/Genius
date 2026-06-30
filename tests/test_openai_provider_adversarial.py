@@ -4,6 +4,7 @@ import json
 from unittest.mock import AsyncMock, patch
 from ag_core.providers.openai_provider import OpenAIProvider
 
+
 @pytest.mark.asyncio
 async def test_openai_provider_blank_and_noise_lines():
     """
@@ -13,7 +14,7 @@ async def test_openai_provider_blank_and_noise_lines():
     provider = OpenAIProvider()
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    
+
     noise_output = (
         "\n"
         "   \n"
@@ -24,7 +25,7 @@ async def test_openai_provider_blank_and_noise_lines():
         "Some random trailing stdout log\n"
     )
     mock_process.communicate.return_value = (noise_output.encode("utf-8"), b"")
-    
+
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
         response = await provider.send_prompt("Test noise")
@@ -42,7 +43,7 @@ async def test_openai_provider_non_dict_json_lines():
     provider = OpenAIProvider()
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    
+
     json_lines = (
         "null\n"
         "true\n"
@@ -53,7 +54,7 @@ async def test_openai_provider_non_dict_json_lines():
         '{"event": "agent_message", "item": {"text": "Actual message"}}\n'
     )
     mock_process.communicate.return_value = (json_lines.encode("utf-8"), b"")
-    
+
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
         response = await provider.send_prompt("Test non-dict JSON")
@@ -69,7 +70,7 @@ async def test_openai_provider_agent_message_adversarial_structures():
     provider = OpenAIProvider()
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    
+
     lines = [
         # event is agent_message, but item is missing
         '{"event": "agent_message"}',
@@ -94,16 +95,16 @@ async def test_openai_provider_agent_message_adversarial_structures():
         '{"event": "item.completed", "item": null}',
         '{"event": "item.completed", "item": "string_item"}',
         '{"event": "item.completed", "item": {"type": "not_agent_message", "text": "ignored"}}',
-        '{"event": "item.completed", "item": {"type": "agent_message", "text": "Item Completed Text"}}'
+        '{"event": "item.completed", "item": {"type": "agent_message", "text": "Item Completed Text"}}',
     ]
-    
+
     jsonl_output = "\n".join(lines) + "\n"
     mock_process.communicate.return_value = (jsonl_output.encode("utf-8"), b"")
-    
+
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
         response = await provider.send_prompt("Test adversarial agent_message")
-        
+
         # What should content be?
         # 1. The list text ["part1", "part2"] -> str() -> "['part1', 'part2']"
         # 2. The dict text {"nested": "value"} -> str() -> "{'nested': 'value'}"
@@ -126,17 +127,17 @@ async def test_openai_provider_tokens_non_scalar_types():
     provider = OpenAIProvider()
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    
+
     lines = [
         # turn.completed with input_tokens/output_tokens as dictionaries
         '{"event": "turn.completed", "turn.completed": {"usage": {"input_tokens": {"dict": 1}, "output_tokens": [10]}}}',
         # another line with valid tokens to verify it keeps/overwrites
-        '{"event": "turn.completed", "turn.completed": {"usage": {"input_tokens": 15, "output_tokens": 25}}}'
+        '{"event": "turn.completed", "turn.completed": {"usage": {"input_tokens": 15, "output_tokens": 25}}}',
     ]
-    
+
     jsonl_output = "\n".join(lines) + "\n"
     mock_process.communicate.return_value = (jsonl_output.encode("utf-8"), b"")
-    
+
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
         response = await provider.send_prompt("Test non-scalar tokens")
@@ -153,11 +154,13 @@ async def test_openai_provider_tokens_flat_and_nested_combinations():
     provider = OpenAIProvider()
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    
+
     # Check flat format
-    flat_output = '{"event": "turn.completed", "input_tokens": 8, "output_tokens": 12}\n'
+    flat_output = (
+        '{"event": "turn.completed", "input_tokens": 8, "output_tokens": 12}\n'
+    )
     mock_process.communicate.return_value = (flat_output.encode("utf-8"), b"")
-    
+
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
         response = await provider.send_prompt("Test flat tokens")
@@ -168,7 +171,7 @@ async def test_openai_provider_tokens_flat_and_nested_combinations():
     # Check nested format with "tokens" sub-dict
     nested_tokens_output = '{"event": "turn.completed", "turn.completed": {"tokens": {"input_tokens": 30, "output_tokens": 40}}}\n'
     mock_process.communicate.return_value = (nested_tokens_output.encode("utf-8"), b"")
-    
+
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
         response = await provider.send_prompt("Test nested tokens")
@@ -182,7 +185,7 @@ async def test_openai_provider_tokens_flat_and_nested_combinations():
         '{"event": "turn.completed", "turn.completed": {"usage": {"input_tokens": 100, "output_tokens": 200, "total_tokens": 300}}}\n'
     )
     mock_process.communicate.return_value = (multiple_output.encode("utf-8"), b"")
-    
+
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
         response = await provider.send_prompt("Test multiple tokens")
@@ -200,16 +203,18 @@ async def test_openai_provider_tokens_invalid_strings_and_booleans():
     provider = OpenAIProvider()
     mock_process = AsyncMock()
     mock_process.returncode = 0
-    
+
     lines = [
         '{"event": "turn.completed", "input_tokens": "abc", "output_tokens": "50"}\n'
     ]
     mock_process.communicate.return_value = ("\n".join(lines).encode("utf-8"), b"")
-    
+
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
         response = await provider.send_prompt("Test invalid strings")
-        assert response["usage"]["prompt_tokens"] == 0  # failed to parse "abc", fallback to 0
+        assert (
+            response["usage"]["prompt_tokens"] == 0
+        )  # failed to parse "abc", fallback to 0
         assert response["usage"]["completion_tokens"] == 50  # parsed "50" successfully
         assert response["usage"]["total_tokens"] == 50
 
@@ -217,8 +222,11 @@ async def test_openai_provider_tokens_invalid_strings_and_booleans():
     boolean_lines = [
         '{"event": "turn.completed", "input_tokens": true, "output_tokens": false}\n'
     ]
-    mock_process.communicate.return_value = ("\n".join(boolean_lines).encode("utf-8"), b"")
-    
+    mock_process.communicate.return_value = (
+        "\n".join(boolean_lines).encode("utf-8"),
+        b"",
+    )
+
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
         response = await provider.send_prompt("Test booleans")
