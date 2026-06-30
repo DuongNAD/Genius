@@ -1,8 +1,6 @@
-import os
 from typing import Any
 from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
-from ag_core.scanner.project_scanner import ProjectScanner
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
 from ag_core.utils.prompt_templates import RESEARCHER_PROMPT
@@ -41,30 +39,9 @@ class GrokResearcherAgent(BaseAgent):
             elif cmd == "/fact-check":
                 user_prompt = f"Verify facts, check assumptions, and identify potential logical gaps or factual errors in the following query against the project files context:\n\n{query}"
 
-        # Determine scanning root
-        root_dir = os.getcwd()
-        exclude_patterns = self.config.scanner.exclude_patterns
-
-        # Scan files or use provided context_data
-        if context_data is not None:
-            scanned_files = context_data
-        else:
-            scanner = ProjectScanner(root_dir=root_dir, extra_ignores=exclude_patterns)
-            scanned_files = scanner.scan()
-
-        # Format scanned files as input context
-        context = ""
-        for filepath, content in scanned_files.items():
-            context += f"\n--- File: {filepath} ---\n{content}\n"
-
-        history_context = ""
-        if self.history:
-            history_context += "Previous conversation history:\n"
-            for turn in self.history:
-                history_context += (
-                    f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
-                )
-            history_context += "\n"
+        # Scan project files (or use provided context_data) and format context
+        _, context = self.scan_context(context_data)
+        history_context = self.format_history()
 
         full_prompt = (
             f"{history_context}{user_prompt}\n\nProject files context:\n{context}"
@@ -87,21 +64,7 @@ class GrokResearcherAgent(BaseAgent):
         )
 
         # Write to output file
-        output_file = self.extra_params.get("output_file")
-        if output_file is None:
-            if "output_file" in self.extra_params:
-                output_file = "None"
-            else:
-                output_file = "research.md"
-
-        if output_file != "None":
-            try:
-                dir_name = os.path.dirname(output_file)
-                if dir_name:
-                    os.makedirs(dir_name, exist_ok=True)
-                with open(output_file, "w", encoding="utf-8") as f:
-                    f.write(content)
-            except Exception as e:
-                print(f"Warning: Failed to write output file {output_file}: {e}")
+        output_file = self.resolve_output_file("research.md")
+        self.write_output(output_file, content)
 
         return content

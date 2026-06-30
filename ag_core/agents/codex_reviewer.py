@@ -2,7 +2,6 @@ import os
 from typing import Any
 from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
-from ag_core.scanner.project_scanner import ProjectScanner
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
 from ag_core.utils.code_extract import extract_code
@@ -42,21 +41,9 @@ class CodexReviewerAgent(BaseAgent):
             elif cmd == "/security":
                 user_prompt = f"Perform a security code audit, looking for vulnerabilities, insecure practices, data leaks, or potential attack vectors:\n\n{query}"
 
-        # Determine scanning root
+        # Scan project files (or use provided context_data) and format context
         root_dir = os.getcwd()
-        exclude_patterns = self.config.scanner.exclude_patterns
-
-        # Scan files or use provided context_data
-        if context_data is not None:
-            scanned_files = context_data
-        else:
-            scanner = ProjectScanner(root_dir=root_dir, extra_ignores=exclude_patterns)
-            scanned_files = scanner.scan()
-
-        # Format scanned files as input context
-        context = ""
-        for filepath, file_content in scanned_files.items():
-            context += f"\n--- File: {filepath} ---\n{file_content}\n"
+        scanned_files, context = self.scan_context(context_data)
 
         # Retrieve matching past interactions
         past_memories = self.retrieve_memory(user_prompt, limit=3)
@@ -66,14 +53,7 @@ class CodexReviewerAgent(BaseAgent):
             for i, mem in enumerate(past_memories, 1):
                 memory_context += f"Interaction #{i}:\n{mem['text']}\n"
 
-        history_context = ""
-        if self.history:
-            history_context += "Previous conversation history:\n"
-            for turn in self.history:
-                history_context += (
-                    f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
-                )
-            history_context += "\n"
+        history_context = self.format_history()
 
         full_prompt = f"{history_context}{user_prompt}\n"
         if memory_context:
