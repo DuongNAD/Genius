@@ -2,7 +2,6 @@
 .env
 .env.*
 *.env
-# ...but DO track the example env template (no real secrets in it)
 !.env.example
 *.pem
 *.key
@@ -39,12 +38,22 @@ dist/
 MANIFEST
 
 # Shared Context Pipeline outputs & Logs
-research.md
-design.md
-app.py
-review.md
-architecture.md
+/research.md
+/design.md
+/app.py
+/review.md
+/architecture.md
 *.log
+
+# Generated pipeline project outputs (demo runs; excluded from pytest too)
+/projects/
+
+# Runtime-generated dynamic service registry
+/.agents/service_registry.json
+
+# Local scratch / debug files
+/check_anthropic.js
+/help.txt
 
 # OS Specific
 .DS_Store

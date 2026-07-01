@@ -241,9 +241,8 @@ def test_r9_enqueue_db_write():
 # R10. Event Loop Reference Leak in Rate Limiter
 def test_r10_rate_limiter_weakref():
     limiter = TokenBucketRateLimiter()
-    # Get active lock for a mock loop
-    mock_loop = MagicMock()
-    lock = limiter.async_lock
+    # Accessing the property lazily initializes the _async_locks weak map.
+    limiter.async_lock
 
     # async_locks should be a WeakKeyDictionary (except for None case)
     assert isinstance(limiter._async_locks, weakref.WeakKeyDictionary)

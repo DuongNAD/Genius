@@ -3,7 +3,7 @@ from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
-from ag_core.utils.prompt_templates import AGENT_CORE_RULES
+from ag_core.utils.prompt_templates import RESEARCHER_PROMPT
 
 
 class GrokResearcherAgent(BaseAgent):
@@ -39,8 +39,8 @@ class GrokResearcherAgent(BaseAgent):
             elif cmd == "/fact-check":
                 user_prompt = f"Verify facts, check assumptions, and identify potential logical gaps or factual errors in the following query against the project files context:\n\n{query}"
 
-        context = self.scan_context(context_data)
-
+        # Scan project files (or use provided context_data) and format context
+        _, context = self.scan_context(context_data)
         history_context = self.format_history()
 
         full_prompt = (
@@ -48,7 +48,9 @@ class GrokResearcherAgent(BaseAgent):
         )
 
         # Invoke provider
-        response = await self.provider.send_prompt(full_prompt, system=AGENT_CORE_RULES)
+        response = await self.provider.send_prompt(
+            full_prompt, system=RESEARCHER_PROMPT
+        )
         content = response.get("content", "")
         usage = response.get("usage", {})
 
@@ -62,6 +64,7 @@ class GrokResearcherAgent(BaseAgent):
         )
 
         # Write to output file
-        self.write_output(content, "research.md")
+        output_file = self.resolve_output_file("research.md")
+        self.write_output(output_file, content)
 
         return content

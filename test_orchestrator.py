@@ -774,7 +774,9 @@ async def test_self_healing_loop_success_after_retry(
     assert exec_call_count == 2
 
     proj_dir = temp_workspace / "projects" / "build_a_self_healer"
+    # Generated test/audit/log names derive from the flattened relative path
+    # (src/app.py -> src_app) so files with the same basename can't collide.
     assert (proj_dir / "src" / "app.py").exists()
-    assert (proj_dir / "tests" / "test_app.py").exists()
-    assert (proj_dir / "logs" / "audit_app.md").exists()
-    assert (proj_dir / "logs" / "test_app.log").exists()
+    assert (proj_dir / "tests" / "test_src_app.py").exists()
+    assert (proj_dir / "logs" / "audit_src_app.md").exists()
+    assert (proj_dir / "logs" / "test_src_app.log").exists()

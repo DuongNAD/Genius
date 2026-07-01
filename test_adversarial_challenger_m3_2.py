@@ -162,7 +162,7 @@ def test_missing_e_drive_simulation():
         # Check that it handles the OS failure cleanly by propagating the OSError rather than crashing/silently passing
         with pytest.raises(OSError) as excinfo_orch:
             # We mock the http client post to bypass actual network requests since we are in CODE_ONLY
-            with patch("httpx.AsyncClient.post") as mock_post:
+            with patch("httpx.AsyncClient.post"):
                 import asyncio
 
                 asyncio.run(

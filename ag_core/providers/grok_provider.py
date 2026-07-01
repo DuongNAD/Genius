@@ -6,6 +6,47 @@ import asyncio
 from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
+from ag_core.utils.cli_resolver import which_external
+from ag_core.utils.cli_runner import (
+    communicate_with_timeout,
+    explain_cli_failure,
+    DEFAULT_AUX_TIMEOUT,
+)
+
+
+def resolve_grok_cli() -> str:
+    """Resolve the real Grok CLI path, never the bundled repo wrapper.
+
+    Shared by send_prompt and the ``--doctor`` preflight so both agree on which
+    binary will actually run.
+    """
+    cli_path = which_external("grok")
+    if not cli_path:
+        # Official xAI Grok Build CLI installs to ~/.grok/bin (added to PATH on
+        # install, but a long-running process may predate that).
+        userprofile = os.getenv("USERPROFILE") or os.path.expanduser("~")
+        for name in ("grok.exe", "grok"):
+            candidate = os.path.join(userprofile, ".grok", "bin", name)
+            if os.path.exists(candidate):
+                cli_path = candidate
+                break
+    if not cli_path:
+        appdata = os.getenv("APPDATA")
+        if appdata:
+            fallback = os.path.join(appdata, "npm", "grok.cmd")
+            if os.path.exists(fallback):
+                cli_path = fallback
+    if not cli_path:
+        userprofile = os.getenv("USERPROFILE")
+        if userprofile:
+            fallback = os.path.join(
+                userprofile, "AppData", "Roaming", "npm", "grok.cmd"
+            )
+            if os.path.exists(fallback):
+                cli_path = fallback
+    if not cli_path:
+        cli_path = "grok"
+    return cli_path
 
 
 class GrokProvider(BaseProvider):
@@ -18,7 +59,7 @@ class GrokProvider(BaseProvider):
         model_name: str = "grok-build-0.1",
         api_key: str | None = None,
         base_url: str | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> None:
         api_key = api_key or os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY")
         base_url = base_url or os.getenv("GROK_BASE_URL") or "https://api.x.ai/v1"
@@ -36,23 +77,7 @@ class GrokProvider(BaseProvider):
             extra.update(kwargs)
             sys_prompt = extra.pop("system", None) or system
 
-            cli_path = shutil.which("grok")
-            if not cli_path:
-                appdata = os.getenv("APPDATA")
-                if appdata:
-                    fallback = os.path.join(appdata, "npm", "grok.cmd")
-                    if os.path.exists(fallback):
-                        cli_path = fallback
-            if not cli_path:
-                userprofile = os.getenv("USERPROFILE")
-                if userprofile:
-                    fallback = os.path.join(
-                        userprofile, "AppData", "Roaming", "npm", "grok.cmd"
-                    )
-                    if os.path.exists(fallback):
-                        cli_path = fallback
-            if not cli_path:
-                cli_path = "grok"
+            cli_path = resolve_grok_cli()
 
             if not self.api_key:
                 try:
@@ -66,7 +91,7 @@ class GrokProvider(BaseProvider):
                             *login_cmd,
                             stdin=asyncio.subprocess.DEVNULL,
                             stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
+                            stderr=asyncio.subprocess.PIPE,
                         )
                     except OSError:
                         if sys.platform == "win32" and login_cmd[0] != "cmd.exe":
@@ -75,11 +100,15 @@ class GrokProvider(BaseProvider):
                                 *login_cmd,
                                 stdin=asyncio.subprocess.DEVNULL,
                                 stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE
+                                stderr=asyncio.subprocess.PIPE,
                             )
                         else:
                             raise
-                    await login_process.communicate()
+                    await communicate_with_timeout(
+                        login_process,
+                        timeout=DEFAULT_AUX_TIMEOUT,
+                        cli_name="Grok login",
+                    )
                 except Exception:
                     pass
 
@@ -95,21 +124,13 @@ class GrokProvider(BaseProvider):
                         temp_file_path = f.name
                     cmd = [
                         cli_path,
-                        "--prompt",
+                        "--prompt-file",
                         temp_file_path,
                         "--output-format",
                         "json",
-                        "--no-auto-update",
                     ]
                 else:
-                    cmd = [
-                        cli_path,
-                        "-p",
-                        prompt,
-                        "--output-format",
-                        "json",
-                        "--no-auto-update",
-                    ]
+                    cmd = [cli_path, "-p", prompt, "--output-format", "json"]
 
                 session_id = (
                     extra.pop("session_id", None)
@@ -120,7 +141,7 @@ class GrokProvider(BaseProvider):
                     cmd.extend(["--session-id", str(session_id)])
 
                 if sys_prompt:
-                    cmd.extend(["--system-prompt", sys_prompt])
+                    cmd.extend(["--system-prompt-override", sys_prompt])
 
                 actual_cmd = cmd
                 if sys.platform == "win32":
@@ -133,7 +154,7 @@ class GrokProvider(BaseProvider):
                         *actual_cmd,
                         stdin=asyncio.subprocess.DEVNULL,
                         stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
+                        stderr=asyncio.subprocess.PIPE,
                     )
                 except OSError:
                     if sys.platform == "win32" and actual_cmd == cmd:
@@ -142,18 +163,26 @@ class GrokProvider(BaseProvider):
                             *actual_cmd,
                             stdin=asyncio.subprocess.DEVNULL,
                             stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
+                            stderr=asyncio.subprocess.PIPE,
                         )
                     else:
                         raise
 
-                stdout, stderr = await process.communicate()
+                stdout, stderr = await communicate_with_timeout(
+                    process, cli_name="Grok CLI"
+                )
             finally:
                 if temp_file_path and os.path.exists(temp_file_path):
                     try:
                         os.remove(temp_file_path)
                     except Exception:
                         pass
+
+            if isinstance(process.returncode, int) and process.returncode != 0:
+                stderr_str = stderr.decode("utf-8", errors="ignore").strip()
+                raise RuntimeError(
+                    explain_cli_failure("Grok CLI", process.returncode, stderr_str)
+                )
 
             stdout_str = stdout.decode("utf-8", errors="ignore").strip()
             try:

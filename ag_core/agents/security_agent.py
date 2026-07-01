@@ -3,7 +3,7 @@ from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
-from ag_core.utils.prompt_templates import AGENT_CORE_RULES
+from ag_core.utils.prompt_templates import SECURITY_PROMPT
 
 
 class SecurityAgent(BaseAgent):
@@ -39,7 +39,7 @@ class SecurityAgent(BaseAgent):
             elif cmd in ["/audit", "/security-audit"]:
                 user_prompt = f"Perform a comprehensive security audit of the following code and assets:\n\n{query}"
 
-        context = self.scan_context(context_data)
+        _, context = self.scan_context(context_data)
 
         # Retrieve matching past interactions
         past_memories = self.retrieve_memory(user_prompt, limit=3)
@@ -56,7 +56,7 @@ class SecurityAgent(BaseAgent):
             full_prompt += f"{memory_context}\n"
         full_prompt += f"\nProject files context:\n{context}"
 
-        response = await self.provider.send_prompt(full_prompt, system=AGENT_CORE_RULES)
+        response = await self.provider.send_prompt(full_prompt, system=SECURITY_PROMPT)
         content = response.get("content", "")
         usage = response.get("usage", {})
 
@@ -76,6 +76,7 @@ class SecurityAgent(BaseAgent):
             completion_tokens=usage.get("completion_tokens", 0),
         )
 
-        self.write_output(content, "audit.md")
+        output_file = self.resolve_output_file("audit.md")
+        self.write_output(output_file, content)
 
         return content

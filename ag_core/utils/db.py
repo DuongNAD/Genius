@@ -28,15 +28,18 @@ def init_db():
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA auto_vacuum = FULL;")
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS conversations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 prompt TEXT,
                 result TEXT
             )
-        """)
-        cursor.execute("""
+        """
+        )
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS agent_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -47,13 +50,16 @@ def init_db():
                 status TEXT,
                 error TEXT
             )
-        """)
-        cursor.execute("""
+        """
+        )
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS seen_jtis (
                 jti TEXT PRIMARY KEY,
                 exp REAL
             )
-        """)
+        """
+        )
         conn.commit()
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")

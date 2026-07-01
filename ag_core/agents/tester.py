@@ -2,7 +2,6 @@ import os
 from typing import Any
 from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
-from ag_core.scanner.project_scanner import ProjectScanner
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
 from ag_core.utils.code_extract import extract_code
@@ -42,39 +41,18 @@ class TesterAgent(BaseAgent):
             elif cmd == "/stress-test":
                 user_prompt = f"Create a performance or stress testing script or scenario to simulate heavy concurrent load, analyzing latency and failure modes:\n\n{query}"
 
-        # Determine scanning root
-        root_dir = os.getcwd()
-        exclude_patterns = self.config.scanner.exclude_patterns
-
-        # Scan files or use provided context_data
-        if context_data is not None:
-            scanned_files = context_data
-        else:
-            scanner = ProjectScanner(root_dir=root_dir, extra_ignores=exclude_patterns)
-            scanned_files = scanner.scan()
-
-        # Format scanned files as input context
-        context = ""
-        for filepath, content in scanned_files.items():
-            context += f"\n--- File: {filepath} ---\n{content}\n"
-
-        history_context = ""
-        if self.history:
-            history_context += "Previous conversation history:\n"
-            for turn in self.history:
-                history_context += (
-                    f"User: {turn['prompt']}\nAgent: {turn['response']}\n"
-                )
-            history_context += "\n"
+        # Scan project files (or use provided context_data) and format context
+        _, context = self.scan_context(context_data)
+        history_context = self.format_history()
 
         full_prompt = (
             f"{history_context}{user_prompt}\n\nProject files context:\n{context}"
         )
 
-        from ag_core.utils.prompt_templates import AGENT_CORE_RULES
+        from ag_core.utils.prompt_templates import TESTER_PROMPT
 
         # Invoke provider
-        response = await self.provider.send_prompt(full_prompt, system=AGENT_CORE_RULES)
+        response = await self.provider.send_prompt(full_prompt, system=TESTER_PROMPT)
         content = response.get("content", "")
         usage = response.get("usage", {})
 
@@ -150,7 +128,7 @@ class TesterAgent(BaseAgent):
                         f"Please fix the test code and return it. Original context:\n{full_prompt}"
                     )
                     response = await self.provider.send_prompt(
-                        retry_prompt, system=AGENT_CORE_RULES
+                        retry_prompt, system=TESTER_PROMPT
                     )
                     content = response.get("content", "")
                     usage = response.get("usage", {})

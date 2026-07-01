@@ -7,8 +7,10 @@ if command -v python3 >/dev/null 2>&1; then
     PYTHON_EXE="python3"
 elif command -v python >/dev/null 2>&1; then
     PYTHON_EXE="python"
+elif command -v py >/dev/null 2>&1; then
+    PYTHON_EXE="py"
 else
-    echo "Error: Python interpreter not found." >&2
+    echo "Error: Python interpreter not found (tried python3, python, py)." >&2
     exit 1
 fi
 

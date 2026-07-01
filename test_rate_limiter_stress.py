@@ -9,8 +9,6 @@ async def test_rate_limiter_lock_bypass():
     """Verify that the TokenBucketRateLimiter's async_lock can be bypassed due to loop-switching."""
     limiter = TokenBucketRateLimiter(rate=0.0, capacity=2.0)  # capacity 2, no refill
 
-    loop_a = asyncio.get_running_loop()
-
     # 1. Acquire the async lock of the limiter directly in Loop A
     lock_a = limiter.async_lock
     await lock_a.acquire()

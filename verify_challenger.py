@@ -46,7 +46,7 @@ mock_request_timestamps = []
 
 @mock_app.post("/run")
 async def mock_run(response: Response, retry_after: str = None):
-    global mock_request_count, mock_request_timestamps
+    global mock_request_count
     mock_request_timestamps.append(time.time())
     mock_request_count += 1
 

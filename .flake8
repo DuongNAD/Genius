@@ -1,12 +1,18 @@
 [flake8]
-# Align flake8 with black's formatting (88-col lines, black-compatible slicing).
+# Aligned with black (line length 88; E203/W503 disagree with black).
 max-line-length = 88
-extend-ignore = E203, W503
+extend-ignore = E203, W503, E501, E731, E741, E402
 exclude =
     .git,
     __pycache__,
-    .venv,
-    venv,
     .pytest_cache,
     projects,
-    .agents/skills/*/__pycache__
+    .agents,
+    .chroma,
+    build,
+    dist
+# Keep the signal on real defects (unused imports/names, undefined names,
+# f-strings without placeholders, redefinitions) rather than whitespace noise.
+per-file-ignores =
+    # Whitespace flagged inside the embedded HTML/JS dashboard template string.
+    dashboard.py: W291, W293

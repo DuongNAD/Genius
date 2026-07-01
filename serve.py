@@ -306,6 +306,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     await websocket.send_json({"type": "pong"})
 
             elif msg_type in ("report_result", "result"):
+                pass
+
                 task_id = data.get("task_id")
                 payload_worker_id = data.get("worker_id")
                 if payload_worker_id and payload_worker_id != registered_worker_id:
@@ -488,15 +490,42 @@ def get_api_app(role: str):
     return module.app
 
 
+def _resolve_registry_path() -> str:
+    """Resolve the service-registry path and ensure its parent dir exists.
+
+    An empty ``GENIUS_SERVICE_REGISTRY`` (as shipped blank in ``.env.example``
+    and loaded into ``os.environ`` by python-dotenv) must be treated as unset;
+    otherwise ``os.path.dirname("")`` is ``""`` and ``os.makedirs("")`` raises
+    ``FileNotFoundError`` on Windows, crashing every agent server on startup.
+    """
+    registry_path = os.environ.get("GENIUS_SERVICE_REGISTRY") or os.path.join(
+        root_dir, ".agents", "service_registry.json"
+    )
+    registry_dir = os.path.dirname(registry_path)
+    if registry_dir:
+        os.makedirs(registry_dir, exist_ok=True)
+    return registry_path
+
+
 async def start_server(role: str, port: int):
     app = get_api_app(role)
-    try:
-        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+
+    def _make_server(bind_port: int) -> uvicorn.Server:
+        config = uvicorn.Config(app, host="0.0.0.0", port=bind_port, log_level="info")
         server = uvicorn.Server(config)
+        # uvicorn wires up the loaded config + lifespan inside serve(); since we
+        # drive the lifecycle manually (startup -> read bound port -> main_loop),
+        # replicate that init here or startup() fails on a missing .lifespan.
+        if not config.loaded:
+            config.load()
+        server.lifespan = config.lifespan_class(config)
+        return server
+
+    try:
+        server = _make_server(port)
         await server.startup()
     except OSError:
-        config = uvicorn.Config(app, host="0.0.0.0", port=0, log_level="info")
-        server = uvicorn.Server(config)
+        server = _make_server(0)
         await server.startup()
 
     bound_port = None
@@ -509,11 +538,7 @@ async def start_server(role: str, port: int):
     if not bound_port:
         bound_port = server.config.port
 
-    registry_path = os.environ.get(
-        "GENIUS_SERVICE_REGISTRY",
-        os.path.join(root_dir, ".agents", "service_registry.json"),
-    )
-    os.makedirs(os.path.dirname(registry_path), exist_ok=True)
+    registry_path = _resolve_registry_path()
 
     registry = {}
     if os.path.exists(registry_path):
@@ -566,7 +591,18 @@ async def main_async():
         default=8000,
         help="Port to run the central hub service on",
     )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Run preflight checks (CLI resolution, auth, SKILL_API_KEY) and exit",
+    )
     args = parser.parse_args()
+
+    if getattr(args, "doctor", False) is True:
+        from ag_core.diagnostics import run_doctor_report_async
+
+        code = await run_doctor_report_async()
+        raise SystemExit(code)
 
     auto_pilot = getattr(args, "auto_pilot", False) is True
     interactive = getattr(args, "interactive", False) is True

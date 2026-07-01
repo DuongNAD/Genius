@@ -53,7 +53,8 @@ class MessageBus:
                 conn.execute("PRAGMA journal_mode=WAL;")
                 conn.execute("PRAGMA busy_timeout = 30000;")
                 with conn:
-                    conn.execute("""
+                    conn.execute(
+                        """
                         CREATE TABLE IF NOT EXISTS artifacts (
                             artifact_id TEXT PRIMARY KEY,
                             name TEXT NOT NULL,
@@ -64,7 +65,8 @@ class MessageBus:
                             parent_id TEXT,
                             metadata TEXT
                         )
-                    """)
+                    """
+                    )
             finally:
                 conn.close()
 

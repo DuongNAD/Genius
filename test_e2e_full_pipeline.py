@@ -120,7 +120,7 @@ async def test_e2e_happy_path(mock_run_subproc, mock_get, mock_post, temp_worksp
     project_dir = temp_workspace / "projects" / "write_hello_world"
     proj_plan_path = project_dir / "plan.md"
     src_file_path = project_dir / "src" / "hello.py"
-    test_file_path = project_dir / "tests" / "test_hello.py"
+    test_file_path = project_dir / "tests" / "test_src_hello.py"
     prog_file_path = temp_workspace / "CURRENT_PROG.md"
 
     assert plan_path.exists()
@@ -144,7 +144,8 @@ async def test_e2e_codex_self_healing_success(
 
     async def post_side_effect(url, **kwargs):
         body = {"status": "processing", "task_id": "generic-task"}
-        import json, hashlib
+        import json
+        import hashlib
 
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
         checksum = hashlib.sha256(body_bytes).hexdigest()
@@ -219,7 +220,8 @@ async def test_e2e_codex_self_healing_failure(
 
     async def post_side_effect(url, **kwargs):
         body = {"status": "processing", "task_id": "generic-task"}
-        import json, hashlib
+        import json
+        import hashlib
 
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
         checksum = hashlib.sha256(body_bytes).hexdigest()
@@ -275,7 +277,8 @@ async def test_e2e_tester_self_healing_success(
 
     async def post_side_effect(url, **kwargs):
         body = {"status": "processing", "task_id": "generic-task"}
-        import json, hashlib
+        import json
+        import hashlib
 
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
         checksum = hashlib.sha256(body_bytes).hexdigest()
@@ -348,7 +351,8 @@ async def test_e2e_tester_self_healing_failure(
 
     async def post_side_effect(url, **kwargs):
         body = {"status": "processing", "task_id": "generic-task"}
-        import json, hashlib
+        import json
+        import hashlib
 
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
         checksum = hashlib.sha256(body_bytes).hexdigest()
@@ -408,7 +412,8 @@ async def test_e2e_pythonpath_setting(
 
     async def post_side_effect(url, **kwargs):
         body = {"status": "processing", "task_id": "generic-task"}
-        import json, hashlib
+        import json
+        import hashlib
 
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
         checksum = hashlib.sha256(body_bytes).hexdigest()

@@ -8,14 +8,17 @@ from websockets.exceptions import ConnectionClosed
 
 # Add project root to sys.path if not present
 import sys
+
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 from client_app.genius_worker import run_worker
 
+
 class StopTestException(Exception):
     """Exception to break the reconnect loop."""
+
 
 class MockWebSocket:
     def __init__(self):
@@ -70,9 +73,10 @@ async def test_network_drop_exponential_backoff():
     def mock_connect(uri):
         raise Exception("Connection refused")
 
-    with patch("websockets.connect", mock_connect), \
-         patch("ag_core.distributed.worker.asyncio.sleep", mock_sleep):
-        
+    with patch("websockets.connect", mock_connect), patch(
+        "ag_core.distributed.worker.asyncio.sleep", mock_sleep
+    ):
+
         with pytest.raises(StopTestException):
             await run_worker("127.0.0.1", 8000, ["grok"], "test-worker-backoff")
 
@@ -95,8 +99,10 @@ async def test_network_drop_backoff_reset():
     class MockContextManager:
         def __init__(self, ws):
             self.ws = ws
+
         async def __aenter__(self):
             return self.ws
+
         async def __aexit__(self, exc_type, exc_val, exc_tb):
             pass
 
@@ -117,8 +123,9 @@ async def test_network_drop_backoff_reset():
             raise StopTestException()
         await original_sleep(0.001)
 
-    with patch("websockets.connect", mock_connect), \
-         patch("ag_core.distributed.worker.asyncio.sleep", mock_sleep):
+    with patch("websockets.connect", mock_connect), patch(
+        "ag_core.distributed.worker.asyncio.sleep", mock_sleep
+    ):
 
         with pytest.raises(StopTestException):
             await run_worker("127.0.0.1", 8000, ["grok"], "test-worker-reset")
@@ -145,8 +152,10 @@ async def test_token_regeneration_on_reconnect():
     class MockContextManager:
         def __init__(self, ws):
             self.ws = ws
+
         async def __aenter__(self):
             return self.ws
+
         async def __aexit__(self, exc_type, exc_val, exc_tb):
             pass
 
@@ -167,15 +176,15 @@ async def test_token_regeneration_on_reconnect():
     def mock_time():
         return current_mocked_time
 
-    with patch("websockets.connect", mock_connect), \
-         patch("ag_core.distributed.worker.asyncio.sleep", mock_sleep), \
-         patch("time.time", mock_time):
+    with patch("websockets.connect", mock_connect), patch(
+        "ag_core.distributed.worker.asyncio.sleep", mock_sleep
+    ), patch("time.time", mock_time):
 
         with pytest.raises(StopTestException):
             await run_worker("127.0.0.1", 8000, ["grok"], "test-worker-token")
 
     assert len(captured_uris) == 3
-    
+
     # Verify each connection has an updated JWT with updated exp
     last_exp = 0
     for uri in captured_uris:
@@ -183,20 +192,22 @@ async def test_token_regeneration_on_reconnect():
         parts = uri.split("token=")
         assert len(parts) == 2
         token = parts[1]
-        
+
         # Parse token payload manually to avoid env / time.time() mismatch outside the patch block
-        token_parts = token.split('.')
+        token_parts = token.split(".")
         assert len(token_parts) == 3
         payload_b64 = token_parts[1]
-        
+
         # Add padding
         rem = len(payload_b64) % 4
         if rem > 0:
-            payload_b64 += '=' * (4 - rem)
-        
-        payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode('utf-8')).decode('utf-8'))
+            payload_b64 += "=" * (4 - rem)
+
+        payload = json.loads(
+            base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8")
+        )
         assert payload["sub"] == "test-worker-token"
-        
+
         exp = payload["exp"]
         assert exp > last_exp
         last_exp = exp
@@ -213,8 +224,10 @@ async def test_heartbeat_failure_triggers_reconnect():
     class MockContextManager:
         def __init__(self, ws):
             self.ws = ws
+
         async def __aenter__(self):
             return self.ws
+
         async def __aexit__(self, exc_type, exc_val, exc_tb):
             pass
 
@@ -233,13 +246,13 @@ async def test_heartbeat_failure_triggers_reconnect():
         else:
             await original_sleep(0.001)
 
-    with patch("websockets.connect", mock_connect), \
-         patch("ag_core.distributed.worker.asyncio.sleep", mock_sleep):
+    with patch("websockets.connect", mock_connect), patch(
+        "ag_core.distributed.worker.asyncio.sleep", mock_sleep
+    ):
 
         try:
             await asyncio.wait_for(
-                run_worker("127.0.0.1", 8000, ["grok"], "test-worker-hang"),
-                timeout=0.2
+                run_worker("127.0.0.1", 8000, ["grok"], "test-worker-hang"), timeout=0.2
             )
         except asyncio.TimeoutError:
             pass

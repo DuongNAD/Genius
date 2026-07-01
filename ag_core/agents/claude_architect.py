@@ -3,7 +3,7 @@ from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
-from ag_core.utils.prompt_templates import AGENT_CORE_RULES
+from ag_core.utils.prompt_templates import ARCHITECT_PROMPT
 
 
 class ClaudeArchitectAgent(BaseAgent):
@@ -39,7 +39,8 @@ class ClaudeArchitectAgent(BaseAgent):
             elif cmd == "/review-architecture":
                 user_prompt = f"Analyze the current project architecture, identifying architectural design patterns, coupling issues, and structural improvement areas:\n\n{query}"
 
-        context = self.scan_context(context_data)
+        # Scan project files (or use provided context_data) and format context
+        _, context = self.scan_context(context_data)
 
         # Retrieve matching past interactions
         past_memories = self.retrieve_memory(user_prompt, limit=3)
@@ -67,10 +68,19 @@ class ClaudeArchitectAgent(BaseAgent):
         schema_json = json.dumps(schema_dict, indent=2)
 
         sys_prompt = (
-            AGENT_CORE_RULES
-            + "\nTách plan và implement (Separate plan and implement). Ép Agent này chỉ lên kiến trúc (plan), tuyệt đối không tự ý viết code implement."
-            f"\n\nYou must output a JSON block conforming to the following JSON schema representation of the design plan:\n{schema_json}\n"
-            "Format the JSON within a ```json block in your output."
+            ARCHITECT_PROMPT
+            + f"\n\nThe single ```json block must conform to this DesignPlan JSON schema:\n{schema_json}"
+            "\n\nExample of a valid response (structure only — adapt to the actual request):\n"
+            "```json\n"
+            "{\n"
+            '  "project_name": "todo_api",\n'
+            '  "description": "A small FastAPI TODO service.",\n'
+            '  "files": [\n'
+            '    {"path": "src/main.py", "specification": "FastAPI app exposing GET/POST /todos backed by an in-memory store. Define a Todo model with id:int and title:str, plus list_todos() and create_todo() handlers."},\n'
+            '    {"path": "tests/test_main.py", "specification": "pytest tests using FastAPI TestClient that cover listing todos and creating a todo, asserting status codes and response bodies."}\n'
+            "  ]\n"
+            "}\n"
+            "```"
         )
         response = await self.provider.send_prompt(full_prompt, system=sys_prompt)
         content = response.get("content", "")
@@ -95,6 +105,7 @@ class ClaudeArchitectAgent(BaseAgent):
         )
 
         # Write to output file
-        self.write_output(content, "design.md")
+        output_file = self.resolve_output_file("design.md")
+        self.write_output(output_file, content)
 
         return content

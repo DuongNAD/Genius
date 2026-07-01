@@ -62,7 +62,8 @@ async def test_concurrent_task_dispatches_resolution_and_no_leaks(run_server):
     are correctly matched, executed, and resolved without race conditions
     or memory leaks in the future map (pending_tasks).
     """
-    import sys, orchestrator
+    import sys
+    import orchestrator
 
     print(
         "LOADED MODULES:", [m for m in sys.modules if "torch" in m or "tensorflow" in m]

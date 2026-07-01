@@ -9,8 +9,114 @@ import json
 import httpx
 import re
 import shutil
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception,
+)
+
+# Re-exported so existing `from orchestrator import extract_code` callers (and
+# tests) keep working after the helper moved to a shared module.
 from ag_core.utils.code_extract import extract_code
+
+
+def make_http_client() -> httpx.AsyncClient:
+    """Build an AsyncClient with the shared connection-pool limits and timeouts."""
+    limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
+    timeout = httpx.Timeout(10.0, connect=5.0)
+    return httpx.AsyncClient(limits=limits, timeout=timeout)
+
+
+async def gather_or_raise(*awaitables):
+    """Run awaitables concurrently like asyncio.gather, but always let every
+    branch finish (return_exceptions=True) so a failure in one does not leave
+    the siblings running as orphaned tasks. The first exception (in argument
+    order) is re-raised afterwards to preserve fail-fast propagation; otherwise
+    the list of results is returned."""
+    results = await asyncio.gather(*awaitables, return_exceptions=True)
+    for r in results:
+        if isinstance(r, BaseException):
+            raise r
+    return results
+
+
+def degraded_mode() -> bool:
+    """Opt-in resilience: when ``GENIUS_DEGRADED_MODE`` is truthy, the pipeline
+    keeps producing partial artifacts instead of aborting when a non-critical
+    stage fails (some files fail to verify, or the DevOps/deploy stage errors).
+
+    Off by default so CI and normal runs keep strict fail-fast semantics.
+    """
+    return os.getenv("GENIUS_DEGRADED_MODE", "").lower() in ("1", "true", "yes")
+
+
+def resolve_degraded_outcome(paths, results, label):
+    """Decide a degraded fan-out outcome from ``gather(return_exceptions=True)``.
+
+    ``results`` is aligned with ``paths``. If *every* file failed, the first
+    exception is re-raised (a total failure is still fatal, even in degraded
+    mode). If some succeeded, returns ``(failed_paths, summary_str)``; if none
+    failed, returns ``([], None)``. Pure/synchronous so it is unit-testable.
+    """
+    failed = [paths[i] for i, r in enumerate(results) if isinstance(r, BaseException)]
+    if failed and len(failed) == len(paths):
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
+    summary = None
+    if failed:
+        verified = len(paths) - len(failed)
+        summary = (
+            f"{label} completed in degraded mode: {verified}/{len(paths)} files "
+            f"verified. Failed: {', '.join(failed)}."
+        )
+    return failed, summary
+
+
+def write_progress_md(progress_file_path: str, status_dict: dict) -> None:
+    """Write the per-file pipeline progress as a markdown checklist. Failures
+    are logged but non-fatal."""
+    try:
+        os.makedirs(os.path.dirname(progress_file_path), exist_ok=True)
+        with open(progress_file_path, "w", encoding="utf-8") as f:
+            f.write("# Current Progress\n\n")
+            for path, status in status_dict.items():
+                f.write(f"- {path}: {status}\n")
+    except Exception as e:
+        logger.warning(f"Failed to update CURRENT_PROG.md: {e}")
+
+
+def _resolve_pipeline_setup(prompt, workspace, max_debate_rounds):
+    """Shared pipeline preamble: resolve the debate-round default (0 under
+    pytest), validate the prompt, derive the project name from the prompt, and
+    default the workspace to cwd. Returns (project_name, workspace,
+    max_debate_rounds). Raises PipelineError on an empty prompt."""
+    if max_debate_rounds is None:
+        if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+            max_debate_rounds = 0
+        else:
+            max_debate_rounds = 2
+
+    if not prompt or not prompt.strip():
+        raise PipelineError("Prompt cannot be empty.")
+
+    slugified = re.sub(r"[^a-zA-Z0-9]+", "_", prompt.strip().lower()).strip("_")
+    if not slugified:
+        project_name = "default_project"
+    elif len(slugified) > 50:
+        project_name = (
+            slugified[:40]
+            + "_"
+            + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
+        )
+    else:
+        project_name = slugified
+
+    if workspace is None:
+        workspace = os.getcwd()
+
+    return project_name, workspace, max_debate_rounds
 
 
 def parse_design_for_files(design_content: str) -> list:
@@ -20,36 +126,44 @@ def parse_design_for_files(design_content: str) -> list:
     """
     from ag_core.models import DesignPlan
 
-    # 1. Try parsing JSON block with Pydantic
-    json_blocks = re.findall(
-        r"[ \t]*```json\s*(\{.*?\})\s*[ \t]*```", design_content, re.DOTALL
-    )
-    for block in json_blocks:
+    def _validate_obj(obj):
+        if not isinstance(obj, dict) or "files" not in obj:
+            return None
         try:
-            if hasattr(DesignPlan, "model_validate_json"):
-                plan = DesignPlan.model_validate_json(block)
+            if hasattr(DesignPlan, "model_validate"):
+                plan = DesignPlan.model_validate(obj)
             else:
-                plan = DesignPlan.parse_raw(block)
+                plan = DesignPlan.parse_obj(obj)
             return [
                 {"path": f.path, "specification": f.specification} for f in plan.files
             ]
         except Exception:
-            pass
+            return None
 
-    try:
-        start = design_content.find("{")
-        end = design_content.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            block = design_content[start : end + 1]
-            if hasattr(DesignPlan, "model_validate_json"):
-                plan = DesignPlan.model_validate_json(block)
-            else:
-                plan = DesignPlan.parse_raw(block)
-            return [
-                {"path": f.path, "specification": f.specification} for f in plan.files
-            ]
-    except Exception:
-        pass
+    # 1. Look for a DesignPlan JSON object. Prefer a ```json fenced block, then the
+    #    whole document. Use a brace-aware JSON decoder (raw_decode) so a '}' inside
+    #    a specification string can't truncate the object the way the old `\{.*?\}`
+    #    / find..rfind regex did.
+    decoder = json.JSONDecoder()
+    candidates = re.findall(
+        r"```json\s*(.*?)```", design_content, re.DOTALL | re.IGNORECASE
+    )
+    candidates.append(design_content)
+    for text in candidates:
+        idx = 0
+        while True:
+            start = text.find("{", idx)
+            if start == -1:
+                break
+            try:
+                obj, end = decoder.raw_decode(text[start:])
+            except json.JSONDecodeError:
+                idx = start + 1
+                continue
+            result = _validate_obj(obj)
+            if result is not None:
+                return result
+            idx = start + end
 
     # 2. Fall back to regex that extracts markdown code blocks with filepath annotations
     code_blocks = re.findall(
@@ -63,6 +177,40 @@ def parse_design_for_files(design_content: str) -> list:
             files.append({"path": filepath, "specification": block.strip()})
 
     return files
+
+
+def safe_join(base_dir: str, rel_path: str) -> str:
+    """
+    Join an (untrusted, model-supplied) relative path onto base_dir, guaranteeing
+    the result stays inside base_dir. Rejects absolute paths, Windows drive-relative
+    paths, and '..' traversal so a malicious design plan cannot write outside the
+    project workspace.
+    """
+    if (
+        not rel_path
+        or os.path.isabs(rel_path)
+        or (len(rel_path) > 1 and rel_path[1] == ":")
+    ):
+        raise PipelineError(
+            f"Unsafe file path rejected (absolute path not allowed): {rel_path!r}"
+        )
+    base_real = os.path.realpath(base_dir)
+    target_real = os.path.realpath(os.path.join(base_real, rel_path))
+    if target_real != base_real and not target_real.startswith(base_real + os.sep):
+        raise PipelineError(
+            f"Unsafe file path rejected (escapes project dir): {rel_path!r}"
+        )
+    return target_real
+
+
+def flatten_rel_path(rel_path: str) -> str:
+    """
+    Turn a relative path like 'src/a/util.py' into a collision-free stem
+    'src_a_util' so two files with the same basename in different dirs don't
+    overwrite each other's generated test/audit/log files.
+    """
+    no_ext = os.path.splitext(rel_path)[0]
+    return re.sub(r"[\\/]+", "_", no_ext).strip("_") or "file"
 
 
 async def run_subprocess(cmd: list, env: dict = None) -> tuple[int, str]:
@@ -327,13 +475,6 @@ async def perform_get_with_retry(client, url, headers):
 _API_RESPONSE_CACHE = {}
 
 
-def make_http_client() -> httpx.AsyncClient:
-    """Create an AsyncClient with the pipeline's standard limits/timeout."""
-    limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
-    timeout = httpx.Timeout(10.0, connect=5.0)
-    return httpx.AsyncClient(limits=limits, timeout=timeout)
-
-
 async def call_api(
     url: str,
     api_key: str,
@@ -343,6 +484,7 @@ async def call_api(
     poll_timeout: float = 60.0,
 ) -> str:
     import time
+    import uuid
     from ag_core.utils.jwt import encode_jwt
 
     import os
@@ -363,7 +505,6 @@ async def call_api(
         return _API_RESPONSE_CACHE[cache_key]
 
     if DISTRIBUTED_MODE:
-        import uuid
         from serve import (
             worker_registry,
             pending_tasks,
@@ -690,6 +831,9 @@ async def call_api(
     ).encode("utf-8")
 
     base_url = url.rstrip("/")
+    # Stable across the perform_post_with_retry retries so a re-sent /run after
+    # a transient error is deduplicated server-side instead of running twice.
+    idempotency_key = uuid.uuid4().hex
 
     async def _execute(c):
         try:
@@ -701,6 +845,7 @@ async def call_api(
                 "Authorization": f"Bearer {post_token}",
                 "X-Payload-SHA256": req_checksum,
                 "Content-Type": "application/json",
+                "X-Idempotency-Key": idempotency_key,
             }
             response = await perform_post_with_retry(
                 c, f"{base_url}/run", payload_bytes, post_headers
@@ -773,6 +918,88 @@ async def call_api(
     return result
 
 
+def detect_vulnerabilities(security_report: str) -> bool:
+    """
+    Decide whether a security audit report indicates a real, actionable vulnerability.
+
+    Replaces naive case-sensitive substring matching (which produced false positives
+    on phrases like "no HIGH severity issues found" or "HIGHLY recommended") with
+    word-boundary matching plus negation-aware context checks.
+
+    Returns True only when an explicit vulnerability marker or a high/critical
+    severity term is present in a non-negated context.
+    """
+    if not security_report:
+        return False
+
+    text = security_report.lower()
+
+    # 1. Explicit machine-readable markers emitted intentionally by the audit.
+    explicit_markers = ("[vulnerability detected]", "[insecure]", "[vulnerable]")
+    if any(marker in text for marker in explicit_markers):
+        return True
+
+    # 2. Severity terms matched on word boundaries (so "highly"/"highlight" don't match).
+    severity_pattern = re.compile(
+        r"\b(high|critical)\b(?:\s+(?:severity|risk|vulnerabilit\w+|issue\w*))?",
+        re.IGNORECASE,
+    )
+
+    # Negation cues that flip a severity hit into a "clean" statement, e.g.
+    # "no high severity issues", "0 critical vulnerabilities", "without critical".
+    negation_pattern = re.compile(r"\b(no|none|zero|0|without|free of|not? any)\b")
+
+    for match in severity_pattern.finditer(text):
+        # Inspect the ~40 chars preceding the match for a negation cue.
+        window_start = max(0, match.start() - 40)
+        preceding = text[window_start : match.start()]
+        if negation_pattern.search(preceding):
+            continue
+        return True
+
+    return False
+
+
+def parse_security_verdict(security_report: str):
+    """
+    Extract a structured security verdict {"blocking": bool, "findings": [...]}
+    from the audit report. Returns the dict, or None if no verdict object is present.
+    """
+    if not security_report:
+        return None
+    decoder = json.JSONDecoder()
+    fenced = re.findall(
+        r"```json\s*(.*?)```", security_report, re.DOTALL | re.IGNORECASE
+    )
+    for text in fenced + [security_report]:
+        idx = 0
+        while True:
+            start = text.find("{", idx)
+            if start == -1:
+                break
+            try:
+                obj, end = decoder.raw_decode(text[start:])
+            except json.JSONDecodeError:
+                idx = start + 1
+                continue
+            if isinstance(obj, dict) and "blocking" in obj:
+                return obj
+            idx = start + end
+    return None
+
+
+def security_is_blocking(security_report: str) -> bool:
+    """
+    Decide whether the security audit should block acceptance of the code.
+    Prefers a structured verdict (the security agent's machine-readable output);
+    falls back to free-text detection for legacy/prose reports.
+    """
+    verdict = parse_security_verdict(security_report)
+    if verdict is not None:
+        return bool(verdict.get("blocking"))
+    return detect_vulnerabilities(security_report)
+
+
 async def process_single_file(
     file_info,
     project_dir,
@@ -787,6 +1014,7 @@ async def process_single_file(
     semaphore,
     message_bus,
     parent_art_id,
+    design_plan_content="",
 ):
     from ag_core.utils.message_bus import Artifact
 
@@ -794,23 +1022,23 @@ async def process_single_file(
         file_path = file_info["path"]
         specification = file_info["specification"]
 
-        target_file_path = os.path.join(project_dir, file_path)
+        target_file_path = safe_join(project_dir, file_path)
         os.makedirs(os.path.dirname(target_file_path), exist_ok=True)
 
-        base_name = os.path.basename(file_path)
-        file_name, _ = os.path.splitext(base_name)
+        flat_name = flatten_rel_path(file_path)
 
-        test_file_path = os.path.join(project_dir, "tests", f"test_{file_name}.py")
-        audit_log_path = os.path.join(project_dir, "logs", f"audit_{file_name}.md")
-        test_log_path = os.path.join(project_dir, "logs", f"test_{file_name}.log")
+        test_file_path = os.path.join(project_dir, "tests", f"test_{flat_name}.py")
+        audit_log_path = os.path.join(project_dir, "logs", f"audit_{flat_name}.md")
+        test_log_path = os.path.join(project_dir, "logs", f"test_{flat_name}.log")
 
         success = False
         test_failures_logs = ""
         security_report = ""
 
-        # Retrieve design plan content from the message bus
-        design_art = message_bus.retrieve(parent_art_id)
-        design_plan_content = design_art["content"] if design_art else ""
+        # design_plan_content is passed in from the caller (fetched once before the
+        # fan-out) so the design context can't be evicted from the in-memory bus
+        # mid-run on large projects (>100 artifacts), which would silently strip
+        # Codex's specification.
 
         for attempt in range(1, max_retries + 1):
             logger.info(f"Implementing {file_path} - Attempt {attempt}/{max_retries}")
@@ -857,7 +1085,14 @@ async def process_single_file(
                 raise PipelineError(f"Failed to write code to {target_file_path}: {e}")
 
             # 3. Parallel Tester & Security APIs
-            tester_req_prompt = f"/unit-test Generate comprehensive unit tests using pytest for the file '{file_path}' with this code:\n\n{code_to_write}"
+            module_path = (
+                os.path.splitext(file_path)[0].replace("/", ".").replace("\\", ".")
+            )
+            tester_req_prompt = (
+                f"/unit-test Generate comprehensive pytest unit tests for the file '{file_path}'. "
+                f"Import the code under test as the module `{module_path}` (e.g. `from {module_path} import ...`).\n\n"
+                f"Code:\n\n{code_to_write}"
+            )
             security_req_prompt = f"/audit Audit the following code for security vulnerabilities in file '{file_path}':\n\n{code_to_write}"
 
             try:
@@ -888,7 +1123,7 @@ async def process_single_file(
                 poll_timeout=poll_timeout,
             )
 
-            tester_tests_raw, security_report = await asyncio.gather(
+            tester_tests_raw, security_report = await gather_or_raise(
                 tester_task, security_task
             )
 
@@ -965,18 +1200,14 @@ async def process_single_file(
             except Exception as e:
                 logger.warning(f"Failed to write test log to {test_log_path}: {e}")
 
-            # 7. Check if tests passed (return code 0) and security audit has no vulnerabilities
+            # 7. Check if tests passed (return code 0) and security audit has no vulnerabilities.
+            # An empty/whitespace security report means the audit stage produced no
+            # output (crash, truncation, stripped result) — fail closed rather than
+            # treating an absent audit as "clean".
             tests_passed = pytest_exit_code == 0
-            has_vulnerabilities = False
-            if (
-                "[vulnerability detected]" in security_report.lower()
-                or "[insecure]" in security_report.lower()
-                or "HIGH" in security_report
-                or "CRITICAL" in security_report
-            ):
-                has_vulnerabilities = True
-
-            if tests_passed and not has_vulnerabilities:
+            security_missing = not (security_report and security_report.strip())
+            has_vulnerabilities = security_is_blocking(security_report)
+            if tests_passed and not security_missing and not has_vulnerabilities:
                 logger.info(f"Successfully implemented and verified {file_path}")
                 success = True
                 break
@@ -984,7 +1215,11 @@ async def process_single_file(
                 fail_reasons = []
                 if not tests_passed:
                     fail_reasons.append(f"pytest failed (exit code {pytest_exit_code})")
-                if has_vulnerabilities:
+                if security_missing:
+                    fail_reasons.append(
+                        "security audit returned no report (cannot confirm code is safe)"
+                    )
+                elif has_vulnerabilities:
                     fail_reasons.append(
                         "security audit detected vulnerabilities/high warnings"
                     )
@@ -998,41 +1233,6 @@ async def process_single_file(
             )
 
         return security_report
-
-
-def derive_project_name(prompt: str) -> str:
-    """Slugify a prompt into a stable project directory name."""
-    slugified = re.sub(r"[^a-zA-Z0-9]+", "_", prompt.strip().lower()).strip("_")
-    if not slugified:
-        return "default_project"
-    if len(slugified) > 50:
-        return (
-            slugified[:40]
-            + "_"
-            + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
-        )
-    return slugified
-
-
-def resolve_debate_rounds(max_debate_rounds):
-    """Default the debate-round count (0 under pytest, otherwise 2) when unset."""
-    if max_debate_rounds is not None:
-        return max_debate_rounds
-    if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
-        return 0
-    return 2
-
-
-def write_progress_md(progress_file_path, status_dict):
-    """Write the per-file pipeline progress to CURRENT_PROG.md."""
-    try:
-        os.makedirs(os.path.dirname(progress_file_path), exist_ok=True)
-        with open(progress_file_path, "w", encoding="utf-8") as f:
-            f.write("# Current Progress\n\n")
-            for path, status in status_dict.items():
-                f.write(f"- {path}: {status}\n")
-    except Exception as e:
-        logger.warning(f"Failed to update CURRENT_PROG.md: {e}")
 
 
 async def run_pipeline(
@@ -1059,7 +1259,7 @@ async def run_pipeline(
     security_url: str = None,
     devops_url: str = None,
     api_key_override: str = None,
-    poll_timeout: float = 60.0,
+    poll_timeout: float = 300.0,
     interactive: bool = False,
     max_retries: int = 3,
     max_debate_rounds: int = None,
@@ -1069,15 +1269,9 @@ async def run_pipeline(
     global DISTRIBUTED_MODE
     DISTRIBUTED_MODE = distributed
 
-    max_debate_rounds = resolve_debate_rounds(max_debate_rounds)
-
-    if not prompt or not prompt.strip():
-        raise PipelineError("Prompt cannot be empty.")
-
-    project_name = derive_project_name(prompt)
-
-    if workspace is None:
-        workspace = os.getcwd()
+    project_name, workspace, max_debate_rounds = _resolve_pipeline_setup(
+        prompt, workspace, max_debate_rounds
+    )
 
     project_dir = os.path.join(workspace, "projects", project_name)
     os.makedirs(os.path.join(project_dir, "src"), exist_ok=True)
@@ -1290,7 +1484,9 @@ async def run_pipeline(
 
                 claude_refine_prompt = (
                     "You are Claude, the architect agent. Refine your draft architecture plan based on the constructive criticism from GrokReviewer.\n"
-                    "Address the identified issues and incorporate the suppressed improvements, producing a final refined architecture plan.\n\n"
+                    "Address the identified issues and incorporate the suggested improvements, producing a final refined architecture plan.\n"
+                    "Output the refined plan as EXACTLY ONE ```json fenced block conforming to the same DesignPlan schema "
+                    "(project_name, description, and files[] where each file has path + specification) and nothing else.\n\n"
                     f"Previous Draft Plan:\n{claude_content}\n\n"
                     f"GrokReviewer's Criticism:\n{critic_content}\n\n"
                     f"Original Research and Context:\n{claude_prompt}"
@@ -1387,6 +1583,11 @@ async def run_pipeline(
             aggregated_audits = []
             semaphore = asyncio.Semaphore(3)
 
+            # Fetch the design content once, before the fan-out publishes the
+            # per-file artifacts that would evict it from the in-memory bus.
+            design_art = message_bus.retrieve(claude_art_id)
+            design_plan_content = design_art["content"] if design_art else ""
+
             async def handle_file(file_info):
                 file_path = file_info["path"]
                 status_dict[file_path] = "in progress"
@@ -1406,6 +1607,7 @@ async def run_pipeline(
                         semaphore,
                         message_bus,
                         claude_art_id,
+                        design_plan_content=design_plan_content,
                     )
                     status_dict[file_path] = "completed"
                     update_progress_md(status_dict)
@@ -1425,13 +1627,30 @@ async def run_pipeline(
                 else:
                     aggregated_audits.append(f"### Audit for {file_path}\n\n{result}")
 
-            if failed_files:
+            all_failed = len(failed_files) == len(files_to_implement)
+            if failed_files and not (degraded_mode() and not all_failed):
                 raise PipelineError(
                     f"Self-healing loop failed to implement and verify files: {', '.join(failed_files)}"
                 )
+            if failed_files:
+                logger.warning(
+                    "Degraded mode: %d/%d files failed verification; continuing "
+                    "with the rest. Failed: %s",
+                    len(failed_files),
+                    len(files_to_implement),
+                    ", ".join(failed_files),
+                )
 
             # Write review.md as implementation is verified
-            review_content = "All files successfully implemented and verified through self-healing loop."
+            if failed_files:
+                verified = len(files_to_implement) - len(failed_files)
+                review_content = (
+                    f"Degraded run: {verified}/{len(files_to_implement)} files "
+                    f"verified through the self-healing loop. "
+                    f"Failed: {', '.join(failed_files)}."
+                )
+            else:
+                review_content = "All files successfully implemented and verified through self-healing loop."
             review_art_id = message_bus.publish(
                 Artifact(
                     name="review_data",
@@ -1491,14 +1710,28 @@ async def run_pipeline(
                 current_context = {}
             current_context["audit.md"] = devops_prompt
 
-            devops_content = await call_api(
-                devops_url,
-                api_key,
-                devops_prompt,
-                context=current_context,
-                client=client,
-                poll_timeout=poll_timeout,
-            )
+            try:
+                devops_content = await call_api(
+                    devops_url,
+                    api_key,
+                    devops_prompt,
+                    context=current_context,
+                    client=client,
+                    poll_timeout=poll_timeout,
+                )
+            except Exception as e:
+                if not degraded_mode():
+                    raise
+                logger.error(
+                    "Degraded mode: DevOps stage failed, emitting a placeholder "
+                    "deploy artifact and continuing: %s",
+                    e,
+                )
+                devops_content = (
+                    "# DevOps stage unavailable (degraded mode)\n\n"
+                    "The DevOps/deploy stage failed and was skipped; the code and "
+                    f"audit artifacts above are still valid.\n\nError: {e}\n"
+                )
 
             # Publish DevOps to MessageBus
             message_bus.publish(
@@ -1552,6 +1785,15 @@ async def run_pipeline(
             input_path=design_file,
             output_path=app_file,
         )
+
+        # On Windows, create_subprocess_exec (CreateProcess) cannot launch a
+        # .cmd/.bat directly — it must be run via cmd.exe /c (matches provider logic).
+        if (
+            sys.platform == "win32"
+            and antigravity_formatted_cmd
+            and str(antigravity_formatted_cmd[0]).lower().endswith((".cmd", ".bat"))
+        ):
+            antigravity_formatted_cmd = ["cmd.exe", "/c"] + antigravity_formatted_cmd
 
         logger.info(f"Command arguments: {antigravity_formatted_cmd}")
 
@@ -1645,7 +1887,8 @@ async def run_pipeline(
         app_art = message_bus.retrieve(app_art_id)
         codex_prompt = app_art["content"] if app_art else ""
 
-        scanned_files["design.md"] = message_bus.retrieve(claude_art_id)["content"]
+        design_art = message_bus.retrieve(claude_art_id)
+        scanned_files["design.md"] = design_art["content"] if design_art else ""
         scanned_files["app.py"] = codex_prompt
 
         codex_content = await call_api(
@@ -1690,7 +1933,8 @@ async def run_pipeline(
         shared_prompt = review_art["content"] if review_art else ""
 
         scanned_files["review.md"] = shared_prompt
-        scanned_files["app.py"] = message_bus.retrieve(app_art_id)["content"]
+        app_art = message_bus.retrieve(app_art_id)
+        scanned_files["app.py"] = app_art["content"] if app_art else ""
 
         # Invoke concurrently
         tester_task = call_api(
@@ -1718,7 +1962,7 @@ async def run_pipeline(
             poll_timeout=poll_timeout,
         )
 
-        tester_content, security_content, devops_content = await asyncio.gather(
+        tester_content, security_content, devops_content = await gather_or_raise(
             tester_task, security_task, devops_task
         )
 
@@ -1817,7 +2061,7 @@ async def run_e2e_pipeline(
     codex_url: str = None,
     tester_url: str = None,
     api_key_override: str = None,
-    poll_timeout: float = 60.0,
+    poll_timeout: float = 300.0,
     max_retries: int = 3,
     max_debate_rounds: int = None,
     distributed: bool = False,
@@ -1826,15 +2070,9 @@ async def run_e2e_pipeline(
     global DISTRIBUTED_MODE
     DISTRIBUTED_MODE = distributed
 
-    max_debate_rounds = resolve_debate_rounds(max_debate_rounds)
-
-    if not prompt or not prompt.strip():
-        raise PipelineError("Prompt cannot be empty.")
-
-    project_name = derive_project_name(prompt)
-
-    if workspace is None:
-        workspace = os.getcwd()
+    project_name, workspace, max_debate_rounds = _resolve_pipeline_setup(
+        prompt, workspace, max_debate_rounds
+    )
 
     project_dir = os.path.join(workspace, "projects", project_name)
     os.makedirs(os.path.join(project_dir, "src"), exist_ok=True)
@@ -1974,14 +2212,13 @@ async def run_e2e_pipeline(
                 status_dict[file_path] = "in progress"
                 update_progress_md(status_dict)
 
-                target_file_path = os.path.join(project_dir, file_path)
+                target_file_path = safe_join(project_dir, file_path)
                 os.makedirs(os.path.dirname(target_file_path), exist_ok=True)
 
-                base_name = os.path.basename(file_path)
-                file_name, _ = os.path.splitext(base_name)
+                flat_name = flatten_rel_path(file_path)
 
                 test_file_path = os.path.join(
-                    project_dir, "tests", f"test_{file_name}.py"
+                    project_dir, "tests", f"test_{flat_name}.py"
                 )
 
                 # --- Codex Implementation & Self-healing loop ---
@@ -2034,25 +2271,27 @@ async def run_e2e_pipeline(
                     # Check lint with flake8
                     flake8_cmd = [sys.executable, "-m", "flake8", target_file_path]
                     flake8_code, flake8_out = await run_subprocess(flake8_cmd, env=env)
+                    # flake8 is only a dev dependency; if it's not installed, don't
+                    # treat its absence as a lint failure that fails every attempt.
+                    if flake8_code != 0 and "No module named flake8" in flake8_out:
+                        logger.warning(
+                            "flake8 is not installed; skipping the lint gate for this file."
+                        )
+                        flake8_code, flake8_out = 0, ""
 
-                    # Check tests with pytest
-                    has_tests = False
-                    tests_dir = os.path.join(project_dir, "tests")
-                    if os.path.exists(tests_dir):
-                        for r, d, fs in os.walk(tests_dir):
-                            if any(
-                                f.startswith("test_") and f.endswith(".py") for f in fs
-                            ):
-                                has_tests = True
-                                break
-
-                    if has_tests:
-                        pytest_cmd = [sys.executable, "-m", "pytest", tests_dir]
+                    # Check tests with pytest, scoped to THIS file's own test
+                    # file rather than the whole tests/ directory. Running the
+                    # whole dir is racy: process_e2e_file runs concurrently per
+                    # file, so a sibling's not-yet-implemented or mid-write test
+                    # would fail our verification non-deterministically. Each
+                    # sibling's test is verified by its own task.
+                    if os.path.exists(test_file_path):
+                        pytest_cmd = [sys.executable, "-m", "pytest", test_file_path]
                         pytest_code, pytest_out = await run_subprocess(
                             pytest_cmd, env=env
                         )
                     else:
-                        pytest_code, pytest_out = 0, "No tests found to run yet."
+                        pytest_code, pytest_out = 0, "No test for this file yet."
 
                     if flake8_code == 0 and pytest_code == 0:
                         logger.info(
@@ -2089,7 +2328,16 @@ async def run_e2e_pipeline(
                     with open(target_file_path, "r", encoding="utf-8") as f:
                         implemented_code = f.read()
 
-                    tester_prompt = f"/unit-test Generate comprehensive unit tests using pytest for the file '{file_path}' with this code:\n\n{implemented_code}"
+                    e2e_module_path = (
+                        os.path.splitext(file_path)[0]
+                        .replace("/", ".")
+                        .replace("\\", ".")
+                    )
+                    tester_prompt = (
+                        f"/unit-test Generate comprehensive pytest unit tests for the file '{file_path}'. "
+                        f"Import the code under test as the module `{e2e_module_path}` (e.g. `from {e2e_module_path} import ...`).\n\n"
+                        f"Code:\n\n{implemented_code}"
+                    )
                     if attempt > 1:
                         tester_prompt += f"\n\nPrevious test generation attempt failed verification.\nErrors/Logs:\n{tester_error_log}"
 
@@ -2147,7 +2395,21 @@ async def run_e2e_pipeline(
                 update_progress_md(status_dict)
 
         tasks_list = [process_e2e_file(f) for f in files_to_implement]
-        await asyncio.gather(*tasks_list)
+        if degraded_mode():
+            results = await asyncio.gather(*tasks_list, return_exceptions=True)
+            paths = [f["path"] for f in files_to_implement]
+            failed, summary = resolve_degraded_outcome(paths, results, "E2E Pipeline")
+            if failed:
+                logger.warning(
+                    "Degraded mode: %d/%d files failed in the E2E pipeline; "
+                    "continuing with the rest. Failed: %s",
+                    len(failed),
+                    len(files_to_implement),
+                    ", ".join(failed),
+                )
+                return summary
+        else:
+            await gather_or_raise(*tasks_list)
 
         logger.info(
             "E2E Pipeline executed successfully and all files implemented, verified, and tested."
@@ -2274,7 +2536,7 @@ def main():
 
     # Polling timeout
     parser.add_argument(
-        "--poll-timeout", type=float, default=60.0, help="Polling timeout in seconds"
+        "--poll-timeout", type=float, default=300.0, help="Polling timeout in seconds"
     )
     parser.add_argument(
         "--interactive", action="store_true", help="Interactive design review loop"

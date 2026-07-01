@@ -3,7 +3,7 @@ from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
-from ag_core.utils.prompt_templates import AGENT_CORE_RULES
+from ag_core.utils.prompt_templates import DEVOPS_PROMPT
 
 
 class DevOpsAgent(BaseAgent):
@@ -36,7 +36,7 @@ class DevOpsAgent(BaseAgent):
             if cmd == "/deploy":
                 user_prompt = f"Generate a robust CI/CD deployment configuration and deployment steps for the following requirements:\n\n{query}"
 
-        context = self.scan_context(context_data)
+        _, context = self.scan_context(context_data)
 
         # Retrieve matching past interactions
         past_memories = self.retrieve_memory(user_prompt, limit=3)
@@ -53,7 +53,7 @@ class DevOpsAgent(BaseAgent):
             full_prompt += f"{memory_context}\n"
         full_prompt += f"\nProject files context:\n{context}"
 
-        response = await self.provider.send_prompt(full_prompt, system=AGENT_CORE_RULES)
+        response = await self.provider.send_prompt(full_prompt, system=DEVOPS_PROMPT)
         content = response.get("content", "")
         usage = response.get("usage", {})
 
@@ -73,6 +73,7 @@ class DevOpsAgent(BaseAgent):
             completion_tokens=usage.get("completion_tokens", 0),
         )
 
-        self.write_output(content, "deploy.md")
+        output_file = self.resolve_output_file("deploy.md")
+        self.write_output(output_file, content)
 
         return content

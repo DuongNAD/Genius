@@ -5,6 +5,71 @@ import asyncio
 from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
+from ag_core.utils.cli_resolver import which_external
+from ag_core.utils.cli_runner import communicate_with_timeout, explain_cli_failure
+
+
+def _newest(paths):
+    """Return the most recently modified path, tolerating ones that don't exist.
+
+    The Codex desktop app keeps binaries in content-addressed ``bin/<hash>``
+    dirs and leaves stale ones behind after an update, so several ``codex.exe``
+    copies can coexist; pick the newest. ``getmtime`` is guarded so a path that
+    vanished (or a mocked, non-existent path in tests) sorts last instead of
+    raising.
+    """
+
+    def mtime(p):
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return 0.0
+
+    return max(paths, key=mtime)
+
+
+def resolve_codex_cli() -> str:
+    """Resolve the Codex CLI path (PATH, then Codex desktop install dirs).
+
+    Shared by send_prompt and the ``--doctor`` preflight. Never returns the
+    bundled repo wrapper (``which_external`` excludes it).
+    """
+    cli_path = which_external("codex") or which_external("codex.exe")
+    if not cli_path:
+        localappdata = os.environ.get("LOCALAPPDATA")
+        if localappdata:
+            pattern1 = os.path.join(
+                localappdata, "OpenAI", "Codex", "bin", "*", "codex.exe"
+            )
+            matches1 = glob.glob(pattern1)
+            if matches1:
+                cli_path = _newest(matches1)
+
+        if not cli_path and localappdata:
+            candidate2 = os.path.join(
+                localappdata, "Microsoft", "WindowsApps", "codex.exe"
+            )
+            if os.path.exists(candidate2):
+                cli_path = candidate2
+
+        if not cli_path:
+            program_files = os.environ.get("ProgramFiles")
+            if program_files:
+                pattern3 = os.path.join(
+                    program_files,
+                    "WindowsApps",
+                    "OpenAI.Codex_*",
+                    "app",
+                    "resources",
+                    "codex.exe",
+                )
+                matches3 = glob.glob(pattern3)
+                if matches3:
+                    cli_path = _newest(matches3)
+
+        if not cli_path:
+            cli_path = "codex" if os.name != "nt" else "codex.exe"
+    return cli_path
 
 
 class OpenAIProvider(BaseProvider):
@@ -37,113 +102,70 @@ class OpenAIProvider(BaseProvider):
             extra.update(kwargs)
             sys_prompt = extra.pop("system", None) or system
 
-            # Locate codex prioritized in PATH, then fallbacks
+            # Locate codex prioritized in PATH, then Codex desktop install dirs
             import shutil
 
-            cli_path = shutil.which("codex") or shutil.which("codex.exe")
-
-            if not cli_path:
-                localappdata = os.environ.get("LOCALAPPDATA")
-                if localappdata:
-                    pattern1 = os.path.join(
-                        localappdata, "OpenAI", "Codex", "bin", "*", "codex.exe"
-                    )
-                    matches1 = glob.glob(pattern1)
-                    if matches1:
-                        cli_path = matches1[0]
-
-                if not cli_path and localappdata:
-                    candidate2 = os.path.join(
-                        localappdata, "Microsoft", "WindowsApps", "codex.exe"
-                    )
-                    if os.path.exists(candidate2):
-                        cli_path = candidate2
-
-                if not cli_path:
-                    program_files = os.environ.get("ProgramFiles")
-                    if program_files:
-                        pattern3 = os.path.join(
-                            program_files,
-                            "WindowsApps",
-                            "OpenAI.Codex_*",
-                            "app",
-                            "resources",
-                            "codex.exe",
-                        )
-                        matches3 = glob.glob(pattern3)
-                        if matches3:
-                            cli_path = matches3[0]
-
-                if not cli_path:
-                    cli_path = "codex" if os.name != "nt" else "codex.exe"
+            cli_path = resolve_codex_cli()
 
             if sys_prompt:
                 prompt = f"{sys_prompt}\n\n{prompt}"
 
-            import tempfile
             import sys
 
-            temp_file_path = None
+            # `codex exec [PROMPT]` treats the positional arg as the literal
+            # instructions — it has no flag to read the prompt from a file.
+            # Passing a temp-file PATH (the old behaviour) made Codex run with
+            # the path string as its instructions. Instead use "-" so Codex
+            # reads the prompt from stdin; this also sidesteps the Windows
+            # command-line length limit the temp file was trying to avoid.
+            #
+            # Sandbox/approvals are bypassed by default: this project drives the
+            # Codex CLI non-interactively without a sandbox. Set
+            # GENIUS_CODEX_SANDBOX=1 (true/yes) to keep the Codex sandbox and
+            # approval prompts enabled instead.
+            sandbox_on = os.getenv("GENIUS_CODEX_SANDBOX", "").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            bypass_flags = (
+                [] if sandbox_on else ["--dangerously-bypass-approvals-and-sandbox"]
+            )
+            cmd = [cli_path, "exec", "-", *bypass_flags, "--json"]
+
+            actual_cmd = cmd
+            if sys.platform == "win32":
+                resolved_cli = shutil.which(cli_path) or cli_path
+                if resolved_cli.lower().endswith((".cmd", ".bat")):
+                    actual_cmd = ["cmd.exe", "/c"] + cmd
+
+            prompt_bytes = prompt.encode("utf-8")
             try:
-                # Sandbox/approvals are bypassed by default: this project was
-                # explicitly built to drive the Codex CLI non-interactively
-                # without a sandbox. Set GENIUS_CODEX_SANDBOX=1 (true/yes) to
-                # keep the Codex sandbox and approval prompts enabled.
-                sandbox_on = os.getenv("GENIUS_CODEX_SANDBOX", "").lower() in (
-                    "1",
-                    "true",
-                    "yes",
+                process = await asyncio.create_subprocess_exec(
+                    *actual_cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
-                bypass_flags = (
-                    [] if sandbox_on else ["--dangerously-bypass-approvals-and-sandbox"]
-                )
-
-                if len(prompt) > 1000:
-                    with tempfile.NamedTemporaryFile(
-                        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-                    ) as f:
-                        f.write(prompt)
-                        temp_file_path = f.name
-                    cmd = [cli_path, "exec", temp_file_path, *bypass_flags, "--json"]
-                else:
-                    cmd = [cli_path, "exec", prompt, *bypass_flags, "--json"]
-
-                actual_cmd = cmd
-                if sys.platform == "win32":
-                    resolved_cli = shutil.which(cli_path) or cli_path
-                    if resolved_cli.lower().endswith((".cmd", ".bat")):
-                        actual_cmd = ["cmd.exe", "/c"] + cmd
-
-                try:
+            except OSError:
+                if sys.platform == "win32" and actual_cmd == cmd:
+                    actual_cmd = ["cmd.exe", "/c"] + cmd
                     process = await asyncio.create_subprocess_exec(
                         *actual_cmd,
-                        stdin=asyncio.subprocess.DEVNULL,
+                        stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                except OSError:
-                    if sys.platform == "win32" and actual_cmd == cmd:
-                        actual_cmd = ["cmd.exe", "/c"] + cmd
-                        process = await asyncio.create_subprocess_exec(
-                            *actual_cmd,
-                            stdin=asyncio.subprocess.DEVNULL,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                    else:
-                        raise
-                stdout, stderr = await process.communicate()
-            finally:
-                if temp_file_path and os.path.exists(temp_file_path):
-                    try:
-                        os.remove(temp_file_path)
-                    except Exception:
-                        pass
+                else:
+                    raise
+            stdout, stderr = await communicate_with_timeout(
+                process, input=prompt_bytes, cli_name="Codex CLI"
+            )
 
             if isinstance(process.returncode, int) and process.returncode != 0:
                 stderr_str = stderr.decode("utf-8", errors="ignore").strip()
                 raise RuntimeError(
-                    f"Codex CLI failed with exit code {process.returncode}: {stderr_str}"
+                    explain_cli_failure("Codex CLI", process.returncode, stderr_str)
                 )
 
             stdout_str = stdout.decode("utf-8", errors="ignore")

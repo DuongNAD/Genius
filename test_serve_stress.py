@@ -66,7 +66,6 @@ async def test_high_concurrency_registration(run_server):
     serve_mod.central_hub.config["max_workers"] = 100
 
     num_workers = 30  # 30 concurrent connections is plenty for stress testing
-    connections = []
 
     async def connect_and_register(i):
         worker_id = f"stress-worker-{i}"

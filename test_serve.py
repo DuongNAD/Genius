@@ -5,7 +5,28 @@ from unittest.mock import patch, AsyncMock, MagicMock
 
 # Add current workspace to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from serve import normalize_roles, main_async
+from serve import normalize_roles, main_async, _resolve_registry_path
+
+
+def test_resolve_registry_path_empty_env_falls_back_to_default(tmp_path, monkeypatch):
+    # Regression: a blank GENIUS_SERVICE_REGISTRY (shipped in .env.example and
+    # loaded into os.environ by python-dotenv) used to override the default with
+    # "", making os.makedirs(dirname("")) raise FileNotFoundError on Windows and
+    # crash every agent server on startup.
+    monkeypatch.setenv("GENIUS_SERVICE_REGISTRY", "")
+    # Should not raise, and must fall back to the in-repo default path.
+    path = _resolve_registry_path()
+    assert path.endswith(os.path.join(".agents", "service_registry.json"))
+
+
+def test_resolve_registry_path_honours_explicit_env(tmp_path, monkeypatch):
+    target = tmp_path / "nested" / "dir" / "registry.json"
+    monkeypatch.setenv("GENIUS_SERVICE_REGISTRY", str(target))
+    path = _resolve_registry_path()
+    assert path == str(target)
+    # Parent directory must have been created.
+    assert target.parent.is_dir()
+
 
 
 def test_normalize_roles():

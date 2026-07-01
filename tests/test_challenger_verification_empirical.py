@@ -204,7 +204,6 @@ async def test_result_tampering_corrupted_checksum(run_server):
     worker_id = "tamper-worker"
 
     # We will mock the worker's execute_task to send a bad result checksum
-    original_execute = ClientWorker.execute_task
 
     # We want to override the execute_task behaviour to send a tampered checksum
     async def mock_execute_task(self, task_id, task_data):

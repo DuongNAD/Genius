@@ -1,9 +1,30 @@
 import asyncio
 import json
+import os
 from unittest.mock import AsyncMock, patch
-from ag_core.providers.openai_provider import OpenAIProvider
+from ag_core.providers.openai_provider import OpenAIProvider, _newest
 from ag_core.providers.anthropic_provider import AnthropicProvider
 from ag_core.providers.grok_provider import GrokProvider
+
+
+def test_newest_picks_most_recent_codex_and_tolerates_missing(tmp_path):
+    # The Codex desktop app can leave several content-addressed bin/<hash> dirs
+    # behind after an update; _newest must select the freshest codex.exe.
+    old = tmp_path / "old" / "codex.exe"
+    new = tmp_path / "new" / "codex.exe"
+    old.parent.mkdir()
+    new.parent.mkdir()
+    old.write_text("")
+    new.write_text("")
+    os.utime(old, (1_000_000, 1_000_000))
+    os.utime(new, (2_000_000, 2_000_000))
+
+    assert _newest([str(old), str(new)]) == str(new)
+    assert _newest([str(new), str(old)]) == str(new)
+    # A path that no longer exists must sort last, never raise.
+    missing = str(tmp_path / "gone" / "codex.exe")
+    assert _newest([missing, str(old)]) == str(old)
+    assert _newest([missing]) == missing
 
 
 def test_openai_provider_success():
@@ -43,16 +64,17 @@ def test_openai_provider_success():
             assert args[0] == fake_path
             assert args[1:] == (
                 "exec",
-                "You are helpful\n\nTest prompt",
+                "-",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--json",
             )
-            assert kwargs["stdin"] == asyncio.subprocess.DEVNULL or hasattr(
-                kwargs["stdin"], "read"
-            )
+            # Prompt is piped via stdin (the "-" arg), not passed positionally.
+            assert kwargs["stdin"] == asyncio.subprocess.PIPE
             assert kwargs["stdout"] == asyncio.subprocess.PIPE
             assert kwargs["stderr"] == asyncio.subprocess.PIPE
-            mock_process.communicate.assert_called_once_with()
+            mock_process.communicate.assert_called_once_with(
+                input=b"You are helpful\n\nTest prompt"
+            )
 
     asyncio.run(run_test())
 
@@ -130,10 +152,12 @@ def test_openai_provider_fallback_path():
             assert args[0] == "codex.exe"
             assert args[1:] == (
                 "exec",
-                "Test prompt",
+                "-",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--json",
             )
+            assert kwargs["stdin"] == asyncio.subprocess.PIPE
+            mock_process.communicate.assert_called_once_with(input=b"Test prompt")
 
     asyncio.run(run_test())
 
@@ -244,13 +268,7 @@ def test_grok_provider_success():
             mock_exec.assert_called_once()
             args, kwargs = mock_exec.call_args
             assert args[0] == "/usr/local/bin/grok"
-            assert args[1:] == (
-                "-p",
-                "Test prompt",
-                "--output-format",
-                "json",
-                "--no-auto-update",
-            )
+            assert args[1:] == ("-p", "Test prompt", "--output-format", "json")
 
     asyncio.run(run_test())
 
@@ -291,12 +309,6 @@ def test_grok_provider_login_when_no_key():
             # The second call should be prompt execution
             second_args, second_kwargs = mock_exec.call_args_list[1]
             assert second_args[0] == "/usr/local/bin/grok"
-            assert second_args[1:] == (
-                "-p",
-                "Test prompt",
-                "--output-format",
-                "json",
-                "--no-auto-update",
-            )
+            assert second_args[1:] == ("-p", "Test prompt", "--output-format", "json")
 
     asyncio.run(run_test())

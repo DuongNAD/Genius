@@ -126,7 +126,7 @@ async def test_concurrent_dispatches_under_load(run_server):
         # Verify correctness
         assert len(results) == 15
         for i in range(15):
-            assert f"Processed" in results[i]
+            assert "Processed" in results[i]
 
         # Verify no future resolution memory leaks: pending_tasks dict must be empty
         assert (
@@ -165,7 +165,6 @@ async def test_worker_unexpected_websocket_close(run_server):
     """
     port = run_server
     worker_id = "flaky-worker"
-    worker = ClientWorker(worker_id=worker_id, roles=["grok"])
 
     # We will connect and listen manually
     token = encode_jwt({"sub": worker_id, "exp": time.time() + 300}, JWT_SECRET)
