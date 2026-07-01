@@ -4,6 +4,7 @@ Reads the hook JSON from stdin, extracts the edited file path, and formats it
 with black if it is a Python file. Always exits 0 so it can never block edits;
 no-ops silently when black is not installed.
 """
+
 import json
 import subprocess
 import sys

@@ -28,7 +28,6 @@ def test_resolve_registry_path_honours_explicit_env(tmp_path, monkeypatch):
     assert target.parent.is_dir()
 
 
-
 def test_normalize_roles():
     assert normalize_roles("grok,claude") == ["grok", "claude"]
     assert normalize_roles("grok-api,4") == ["grok", "tester"]
