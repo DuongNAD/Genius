@@ -83,3 +83,8 @@ desktop.ini
 *.db-shm
 *.db-wal
 config.yaml
+
+# Runtime vector store (Chroma persistent client) — regenerated on every run
+.chroma/
+# Scratch/generated workspace from stress runs
+temp_workspace_f4_large/
