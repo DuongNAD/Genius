@@ -4,7 +4,7 @@
 
 **Overall risk assessment**: **LOW**
 
-The Distributed Agent Network implements robust defenses against common network instability and high-load hazards. Core mechanisms such as JSON Web Token (JWT) authentication, payload integrity verification (SHA-256 checksums), rate limiting with `Retry-After` headers, and SQLite Write-Ahead Logging (WAL) mode are highly effective, as demonstrated by the 100% success rate across all stress and adversarial test suites. 
+The Distributed Agent Network implements robust defenses against common network instability and high-load hazards. Core mechanisms such as JSON Web Token (JWT) authentication, payload integrity verification (SHA-256 checksums), rate limiting with `Retry-After` headers, and SQLite Write-Ahead Logging (WAL) mode are highly effective, as demonstrated by the 100% success rate across all stress and adversarial test suites.
 
 However, some architectural trade-offs remain regarding database lock contention under massive parallel write loads, lack of payload signing (HMAC) for checksums, and transient network blips causing redundant task execution.
 

@@ -10,38 +10,38 @@ Based on the files in `C:\Users\Admin\Downloads\AGENTS` (`AGENTS.md`, `Beforehan
 
 ### A. Separation of Planning and Implementation (Plan vs. Implement)
 * **Principle**: Agents must formulate and align on a detailed, step-by-step plan (directories, files, and sequence of modifications) before writing any code. Skipping this step leads to expensive, incorrect, multi-file edits.
-* **Genius Mapping**: 
+* **Genius Mapping**:
   * Currently, the orchestrator divides the pipeline into research (`GrokResearcherAgent`), design (`ClaudeArchitectAgent`), and implementation (`CodexReviewerAgent`).
   * In `claude_architect.py`, the agent appends a plan constraint: `sys_prompt = AGENT_CORE_RULES + "\nTách plan và implement (Separate plan and implement)..."`.
   * *Improvement*: The plan-versus-implement distinction should be explicitly defined in the metadata and instructions of the prompt request, rather than using string concatenation.
 
 ### B. Strict Verification Feedback Loop
 * **Principle**: Prompt payloads should include verification details—such as test commands (e.g., `pytest`), linter checks (e.g., `flake8`), and expected outputs. When the agent sees logs of failed verification steps, it can self-correct without human intervention.
-* **Genius Mapping**: 
+* **Genius Mapping**:
   * The `orchestrator.py` implements a self-healing loop inside `process_single_file()`, where it executes `pytest` and, if it fails, re-prompts the Codex agent with test failures and logs for up to `max_retries` attempts.
   * *Improvement*: The test failures, compiler logs, and linter outputs are currently appended as raw strings to the user prompt. We should separate this into a designated `feedback_loop` block in our structured prompt.
 
 ### C. Problem-Focused, Not Solution-Prescribed
 * **Principle**: Prompts should describe the problem domain, requirements, and constraints (e.g., "Implement a login form with validation") rather than locking the agent into a pre-selected implementation path (e.g., "Use React useState for login form").
-* **Genius Mapping**: 
+* **Genius Mapping**:
   * Individual agents (`CodexReviewerAgent`, `TesterAgent`, etc.) currently intercept user prompts and prefix them with instructions like `/code`, `/unit-test`, or `/audit`.
   * *Improvement*: The problem description should be isolated in a dedicated `payload` field to prevent target implementation paths from being hardcoded.
 
 ### D. One Task, One Prompt (Context Discipline)
 * **Principle**: Never combine multiple unrelated requests in a single prompt session. Keep prompt contexts clean to prevent degradation, which begins around 30-40% context window utilization.
-* **Genius Mapping**: 
+* **Genius Mapping**:
   * In `orchestrator.py`, the orchestration pipeline parses `design.md` and processes files one by one using a worker pool and `process_single_file()`. This aligns with the "One Task, One Prompt" rule.
   * *Improvement*: Standardizing the task metadata (e.g., `task_id`) helps trace tasks across multiple agents and ensures that each sub-request stays isolated.
 
 ### E. Anti-Over-engineering Constraints
 * **Principle**: Set strict limits on adding extra abstractions, helper scripts, or external dependencies. Prefer modifying existing files, keeping functions under 50 lines, and strictly avoiding raw `.env` file queries.
-* **Genius Mapping**: 
+* **Genius Mapping**:
   * The codebase defines standard rules in `ag_core/utils/prompt_templates.py` under the `AGENT_CORE_RULES` string.
   * *Improvement*: Instead of passing a large monolithic system prompt string, constraints should be represented as an array in the prompt structure, enabling dynamic toggling of rules based on the agent's target role.
 
 ### F. Rewind and Re-Prompt over Error Stacking
 * **Principle**: If an agent goes down the wrong path, it is better to reset ("rewind") the session context to a clean state and adjust the prompt rather than trying to patch errors incrementally.
-* **Genius Mapping**: 
+* **Genius Mapping**:
   * The self-healing loop in `orchestrator.py` currently appends new error logs to the existing conversation context, which increases noise and leads to error stacking.
   * *Improvement*: The metadata of the prompt structure should track the `attempt` count, allowing the model and the agent provider to decide when to perform a clean context rewind.
 

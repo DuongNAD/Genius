@@ -5,7 +5,7 @@ Genius là một hệ thống siêu tác tử (Agentic Framework) tự trị chu
 
 ## 🌟 Tính năng Cốt lõi (V2 Upgrades)
 
-1. **Kiến trúc Phân tán & Đa luồng (Parallel Execution):** 
+1. **Kiến trúc Phân tán & Đa luồng (Parallel Execution):**
    - Thay vì chạy tuần tự, `orchestrator.py` giờ đây sử dụng `asyncio.gather` để điều phối các Agent hoạt động song song (ví dụ: Tester và Security cùng chạy một lúc).
    - Kiến trúc Stateless API cho phép scale hệ thống dễ dàng.
 
@@ -119,6 +119,18 @@ Thêm Genius vào file cấu hình MCP của Antigravity tại `~/.gemini/antigr
 1. `python serve.py` — bật các Skill Server (8001–8006).
 2. Trong Antigravity, gọi tool `orchestrate` với `prompt` (mô tả việc cần build) → nhận `job_id`.
 3. Gọi `orchestrate_status` với `job_id` để theo dõi, đến khi `status = completed` thì nhận artifacts (research/design/code/review/tests/security/deploy).
+
+---
+
+## 📚 Tài liệu
+
+Chỉ mục đầy đủ tại [`docs/README.md`](docs/README.md).
+
+- [`docs/OVERVIEW.md`](docs/OVERVIEW.md) — tổng quan kiến trúc, thành phần, chất lượng, rủi ro, milestones.
+- [`docs/TESTING.md`](docs/TESTING.md) — trạng thái test, coverage, challenger, hiệu năng.
+- [`TEST_INFRA.md`](TEST_INFRA.md) — hạ tầng test phân tán (canonical).
+- [`PIPELINE_COMPARISON.md`](PIPELINE_COMPARISON.md) — `run_pipeline` vs `run_e2e_pipeline`.
+- [`docs/history/`](docs/history/) — báo cáo/phân tích cũ (lưu trữ).
 
 ---
 > **Lưu ý V2**: Hệ thống có khả năng fallback thông minh. Nếu thiếu API Key, GrokProvider sẽ tự động mở login prompt; nếu mã sinh ra bị độc hại, vòng lặp `Self-Healing` sẽ tự động vá lỗi thông qua phản hồi từ `pytest` và `flake8`.

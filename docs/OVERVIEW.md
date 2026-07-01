@@ -1,7 +1,10 @@
-# BÁO CÁO CHI TIẾT DỰ ÁN — GENIUS (Antigravity 2.0)
+# TỔNG QUAN DỰ ÁN — GENIUS (Antigravity 2.0)
 
-> **Ngày lập:** 2026-07-01 · **Nhánh:** `main` @ `ccdd59d` · **Trạng thái:** đồng bộ với `origin/main`
-> **Phạm vi:** kiến trúc, thành phần, chất lượng, rủi ro và khuyến nghị của toàn bộ codebase.
+> **Tài liệu canonical** mô tả kiến trúc, thành phần, chất lượng, rủi ro và khuyến nghị của toàn bộ codebase.
+> **Cập nhật gần nhất:** 2026-07-01 (nhánh `main`).
+> Tài liệu này hợp nhất các báo cáo tổng-quan trước đây; bản gốc được lưu trong [`history/`](./history/)
+> (`Genius_Comprehensive_Report.md`, `BAO_CAO_KIEM_TRA_DU_AN_2026-06-30.md`, `PROJECT.md`, `HANDOFF_ROADMAP.md`).
+> Xem thêm: [`TESTING.md`](./TESTING.md) · [`../PIPELINE_COMPARISON.md`](../PIPELINE_COMPARISON.md) · [`../TEST_INFRA.md`](../TEST_INFRA.md)
 
 ---
 
@@ -240,8 +243,8 @@ Sau khi **merge `origin/main`** (14 commit local + 36 commit remote phân kỳ, 
 |---|---|
 | Cao | Chuẩn hoá quy trình format qua `pre-commit` (tránh lệch black 24 vs 26). |
 | Cao | Viết tài liệu/script **sinh `.agents/skills/*`** để onboarding chạy được ngay. |
-| Trung bình | Nâng cấp khỏi `websockets.legacy` để dứt điểm deprecation. |
-| Trung bình | Hợp nhất các file báo cáo `.md` trùng lặp. |
+| ~~Trung bình~~ ✅ | ~~Nâng cấp khỏi `websockets.legacy`~~ — đã chuyển uvicorn sang `websockets-sansio`. |
+| ~~Trung bình~~ ✅ | ~~Hợp nhất các file báo cáo `.md` trùng lặp~~ — đã gom về `docs/` + `docs/history/`. |
 | Thấp | Đưa flake8 vào CI (hiện chỉ ở pre-commit) để gate lint ở server. |
 
 ---
@@ -267,4 +270,25 @@ ag_core/
 
 ---
 
-*Báo cáo được tổng hợp tự động từ khảo sát mã nguồn (orchestrator, serve, skill_app, agents, providers, distributed, security, memory, testing) tại commit `ccdd59d`.*
+## 17. Phụ lục — Milestones (M1–M22, đều DONE)
+
+Tổng hợp từ `PROJECT.md` (lưu trong [`history/`](./history/)). Toàn bộ đã hoàn thành.
+
+| # | Tên | Phạm vi |
+|---|---|---|
+| 1 | Monolith Core & CLI | Framework phân lớp ban đầu, CLI wrappers, rate limiter, tenacity API retries. |
+| 2 | FastAPI Skill APIs | Expose skill qua FastAPI với header `X-API-Key` + `X-Payload-SHA256`. |
+| 3 | Stateless Payloads | Hỗ trợ `context_data` tùy chọn, bỏ quét/ghi đĩa ở server. |
+| 4 | Async Orchestration | Gọi httpx bất đồng bộ, poll task, tenacity retry. |
+| 5 | Startup Menu CLI | `serve.py` bootup vai trò động. |
+| 6 | Tests & Verification | Phủ test HTTP mock + verification. |
+| 7 | Vector Memory (R1) | Vector DB cục bộ (fallback + chroma), tích hợp BaseAgent/Claude/Codex. |
+| 8 | DevOps & Security (R2) | Thêm 2 tác tử Security & DevOps vào routing/menu. |
+| 9 | CI/CD Pipeline (R3) | GitHub Actions `.github/workflows/ci.yml`. |
+| 10 | E2E Testing & Verification | Kiểm chứng toàn bộ năng lực Phase 5 qua integration/E2E. |
+| 11–16 | Swarm Upgrades | Skill layer & CLI hang, core distribution/security (HMAC-SHA256, jti JWT), DB write queue + dynamic port, logging, audit gate. |
+| 17–22 | Upgrade V2 | Grok/Codex CLI providers, config/rate-limiter, memory (sentence-transformers) + concurrency, streaming/WebSocket dashboard/MCP/Docker, final audit gate. |
+
+---
+
+*Tài liệu tổng hợp từ khảo sát mã nguồn (orchestrator, serve, skill_app, agents, providers, distributed, security, memory, testing). Bản chi tiết theo commit gốc: xem lịch sử git của `docs/OVERVIEW.md`.*

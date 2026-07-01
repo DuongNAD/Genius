@@ -416,4 +416,3 @@ Integrity mode: development
 - [ ] File `config.yaml` có các model name chính xác.
 - [ ] Không còn bất kỳ đường dẫn hardcode Python cục bộ nào trên hệ thống.
 - [ ] Có `.gitignore` đầy đủ để tránh lộ key.
-
