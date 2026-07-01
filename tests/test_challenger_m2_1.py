@@ -32,7 +32,9 @@ WS_URL = f"ws://{HOST}:{PORT}/ws/connect"
 @pytest_asyncio.fixture
 async def run_server():
     # Start serve FastAPI app on a distinct port in background
-    config = uvicorn.Config(app, host=HOST, port=PORT, log_level="warning")
+    config = uvicorn.Config(
+        app, host=HOST, port=PORT, log_level="warning", ws="websockets-sansio"
+    )
     server = uvicorn.Server(config)
     server_task = asyncio.create_task(server.serve())
     await asyncio.sleep(0.5)

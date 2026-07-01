@@ -46,7 +46,9 @@ async def run_server():
     WS_URL = f"ws://{HOST}:{PORT}/ws/connect"
 
     # Start the FastAPI app on a separate port in the background
-    config = uvicorn.Config(app, host=HOST, port=PORT, log_level="warning")
+    config = uvicorn.Config(
+        app, host=HOST, port=PORT, log_level="warning", ws="websockets-sansio"
+    )
     server = uvicorn.Server(config)
     # Start server in a background task
     server_task = asyncio.create_task(server.serve())

@@ -35,7 +35,9 @@ def get_free_port():
 @pytest_asyncio.fixture
 async def run_server():
     port = get_free_port()
-    config = uvicorn.Config(app, host=HOST, port=port, log_level="warning")
+    config = uvicorn.Config(
+        app, host=HOST, port=port, log_level="warning", ws="websockets-sansio"
+    )
     server = uvicorn.Server(config)
     server_task = asyncio.create_task(server.serve())
     await asyncio.sleep(0.5)

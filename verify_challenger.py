@@ -74,7 +74,9 @@ async def mock_run(response: Response, retry_after: str = None):
 
 
 def run_server(app, port):
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="warning", ws="websockets-sansio"
+    )
     server = uvicorn.Server(config)
     server.run()
 
