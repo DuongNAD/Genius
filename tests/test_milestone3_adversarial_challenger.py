@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import time
 import json
@@ -369,7 +369,13 @@ async def test_live_websocket_concurrency_and_disconnects():
     port = get_free_port()
 
     # Start the serve.py server in the background using uvicorn on the ephemeral port
-    config = uvicorn.Config(serve_app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(
+        serve_app,
+        host="127.0.0.1",
+        port=port,
+        log_level="warning",
+        ws="auto",
+    )
     server = uvicorn.Server(config)
     server_task = asyncio.create_task(server.serve())
     await asyncio.sleep(0.5)  # Wait for server to boot

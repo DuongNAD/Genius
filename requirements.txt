@@ -1,4 +1,4 @@
-pydantic==2.12.5
+﻿pydantic==2.12.5
 tenacity==9.1.4
 PyYAML==6.0.3
 pytest==9.0.3
@@ -9,7 +9,7 @@ python-dotenv>=1.0.1
 fastapi>=0.115.0
 uvicorn>=0.30.0
 flake8>=7.0.0
-websockets
+websockets>=16
 requests
 pytest-asyncio
 

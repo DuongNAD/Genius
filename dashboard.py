@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import socket
 import sqlite3
@@ -369,34 +369,34 @@ def get_index():
         function renderStatusData(data) {
             const container = document.getElementById('worker-cards-container');
             if (!container) return;
-            
+
             const keys = Object.keys(data);
             if (keys.length === 0) {
                 container.innerHTML = '<div class="col-span-full text-center text-gray-500 text-sm py-8 bg-gray-800 rounded border border-gray-700">No registered workers found</div>';
                 return;
             }
-            
+
             let html = '';
             keys.forEach(key => {
                 const info = data[key];
                 const roles = info.roles || [key];
                 const rolesStr = roles.join(', ');
                 const portInfo = info.port ? `Port ${info.port}` : '';
-                
+
                 let connBadge = '';
                 if (info.online) {
                     connBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-green-500/20 text-green-400 border border-green-500/30">Online</span>';
                 } else {
                     connBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-500/20 text-red-400 border border-red-500/30">Offline</span>';
                 }
-                
+
                 let actBadge = '';
                 if (info.status === 'busy') {
                     actBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">Busy</span>';
                 } else {
                     actBadge = '<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-700/50 text-gray-400 border border-gray-600">Idle</span>';
                 }
-                
+
                 html += `
                 <div class="bg-gray-800 p-5 rounded-lg border border-gray-700 shadow flex flex-col justify-between h-40">
                     <div>
@@ -444,20 +444,20 @@ def get_index():
 
         function renderConversations() {
             const searchTerm = document.getElementById('search-conv').value.toLowerCase();
-            const filtered = allConversations.filter(c => 
+            const filtered = allConversations.filter(c =>
                 (c.prompt && c.prompt.toLowerCase().includes(searchTerm)) ||
                 (c.result && c.result.toLowerCase().includes(searchTerm)) ||
                 (c.timestamp && c.timestamp.toLowerCase().includes(searchTerm)) ||
                 (c.id && String(c.id).includes(searchTerm))
             );
-            
+
             const tbody = document.getElementById('conv-tbody');
             tbody.innerHTML = '';
             if (filtered.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="4" class="px-6 py-4 text-center text-gray-500 text-sm">No conversations found</td></tr>`;
                 return;
             }
-            
+
             filtered.forEach(c => {
                 const tr = document.createElement('tr');
                 tr.className = 'border-b border-gray-750 hover:bg-gray-750/30 transition-colors';
@@ -484,7 +484,7 @@ def get_index():
 
         function renderLogs() {
             const searchTerm = document.getElementById('search-logs').value.toLowerCase();
-            const filtered = allLogs.filter(l => 
+            const filtered = allLogs.filter(l =>
                 (l.agent_name && l.agent_name.toLowerCase().includes(searchTerm)) ||
                 (l.task_id && l.task_id.toLowerCase().includes(searchTerm)) ||
                 (l.prompt && l.prompt.toLowerCase().includes(searchTerm)) ||
@@ -492,14 +492,14 @@ def get_index():
                 (l.error && l.error.toLowerCase().includes(searchTerm)) ||
                 (l.status && l.status.toLowerCase().includes(searchTerm))
             );
-            
+
             const tbody = document.getElementById('logs-tbody');
             tbody.innerHTML = '';
             if (filtered.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="7" class="px-6 py-4 text-center text-gray-500 text-sm">No logs found</td></tr>`;
                 return;
             }
-            
+
             filtered.forEach(l => {
                 let statusBadge = '';
                 const status = (l.status || '').toLowerCase();
@@ -512,9 +512,9 @@ def get_index():
                 } else {
                     statusBadge = `<span class="px-2.5 py-0.5 rounded text-xs font-semibold bg-blue-500/20 text-blue-400 border border-blue-500/30">${escapeHtml(l.status)}</span>`;
                 }
-                
+
                 const displayResult = l.error ? `Error: ${l.error}` : (l.result || '');
-                
+
                 const tr = document.createElement('tr');
                 tr.className = 'border-b border-gray-750 hover:bg-gray-750/30 transition-colors';
                 tr.innerHTML = `
@@ -535,7 +535,7 @@ def get_index():
             const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUri = proto + '//' + window.location.host + '/ws';
             ws = new WebSocket(wsUri);
-            
+
             ws.onmessage = function(event) {
                 try {
                     const data = JSON.parse(event.data);
@@ -554,12 +554,12 @@ def get_index():
                     console.error("Error processing websocket message:", e);
                 }
             };
-            
+
             ws.onclose = function() {
                 console.log("WebSocket disconnected, reconnecting in 5 seconds...");
                 setTimeout(connectWebSocket, 5000);
             };
-            
+
             ws.onerror = function(err) {
                 console.error("WebSocket error:", err);
             };
@@ -586,4 +586,4 @@ def get_index():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("dashboard:app", host="0.0.0.0", port=8080)
+    uvicorn.run("dashboard:app", host="0.0.0.0", port=8080, ws="auto")

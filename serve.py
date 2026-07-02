@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 import argparse
 import asyncio
 import importlib.util
@@ -399,7 +399,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
 
 async def start_hub_server(port: int):
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    config = uvicorn.Config(
+        app, host="0.0.0.0", port=port, log_level="info", ws="auto"
+    )
     server = uvicorn.Server(config)
     await server.serve()
 
@@ -653,7 +655,13 @@ async def start_server(role: str, port: int):
     app = get_api_app(role)
 
     def _make_server(bind_port: int) -> uvicorn.Server:
-        config = uvicorn.Config(app, host="0.0.0.0", port=bind_port, log_level="info")
+        config = uvicorn.Config(
+            app,
+            host="0.0.0.0",
+            port=bind_port,
+            log_level="info",
+            ws="auto",
+        )
         server = uvicorn.Server(config)
         # uvicorn wires up the loaded config + lifespan inside serve(); since we
         # drive the lifecycle manually (startup -> read bound port -> main_loop),

@@ -1,4 +1,4 @@
-# tests/test_milestone3_challenger.py
+﻿# tests/test_milestone3_challenger.py
 import asyncio
 import json
 import time
@@ -63,7 +63,9 @@ def get_free_port():
 async def run_server():
     # Start the FastAPI app on a separate port in the background
     port = get_free_port()
-    config = uvicorn.Config(app, host=HOST, port=port, log_level="warning")
+    config = uvicorn.Config(
+        app, host=HOST, port=port, log_level="warning", ws="auto"
+    )
     server = uvicorn.Server(config)
     server_task = asyncio.create_task(server.serve())
     # Wait for server to start

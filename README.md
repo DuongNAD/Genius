@@ -5,7 +5,7 @@ Genius là một hệ thống siêu tác tử (Agentic Framework) tự trị chu
 
 ## 🌟 Tính năng Cốt lõi (V2 Upgrades)
 
-1. **Kiến trúc Phân tán & Đa luồng (Parallel Execution):** 
+1. **Kiến trúc Phân tán & Đa luồng (Parallel Execution):**
    - Thay vì chạy tuần tự, `orchestrator.py` giờ đây sử dụng `asyncio.gather` để điều phối các Agent hoạt động song song (ví dụ: Tester và Security cùng chạy một lúc).
    - Kiến trúc Stateless API cho phép scale hệ thống dễ dàng.
 
@@ -16,10 +16,11 @@ Genius là một hệ thống siêu tác tử (Agentic Framework) tự trị chu
    - Cơ chế nội bộ cho phép các tác tử gửi và nhận tin nhắn chéo cho nhau (Agent-to-Agent) qua Mailbox, được quản lý độc lập.
 
 4. **Vector Store & RAG (Retrieval-Augmented Generation):**
-   - Tích hợp `sentence-transformers` (tf-keras) để Agent tự động ghi nhớ và tìm kiếm theo ngữ cảnh semantic.
+   - Mặc định Agent dùng bộ nhớ semantic qua SQLite + embedding TF-IDF nội bộ (không cần cài thêm gì).
+   - **Tùy chọn nâng cao:** cài thêm `chromadb` và `sentence-transformers` (không nằm trong `requirements.txt`) để bật embedding mạnh hơn; thiếu chúng hệ thống tự fallback về TF-IDF/SQLite.
 
-5. **TUI Dashboard Giám sát theo thời gian thực:**
-   - Khởi chạy `dashboard.py` để xem trực tiếp trạng thái, log, CPU/RAM usage và mailbox của từng Agent dưới dạng giao diện Terminal UI.
+5. **Web Dashboard Giám sát theo thời gian thực:**
+   - Khởi chạy `dashboard.py` (FastAPI + WebSocket, mặc định port 8080) để xem trực tiếp trạng thái, log và mailbox của từng Agent qua trình duyệt.
 
 6. **Bảo mật & Rate Limiting:**
    - Áp dụng thuật toán TokenBucketRateLimiter có lock-safety cho asyncio loop, giới hạn tốc độ call mô hình và chống spam.
@@ -61,7 +62,7 @@ python serve.py
 python orchestrator.py
 ```
 
-**Cách 3: Khởi động Bảng điều khiển (TUI Dashboard)**
+**Cách 3: Khởi động Bảng điều khiển (Web Dashboard, port 8080)**
 Mở Terminal mới và chạy để theo dõi toàn bộ hệ thống đang làm việc:
 ```bash
 python dashboard.py
@@ -156,7 +157,7 @@ Genius **mặc định** chạy mọi role trên một chuỗi backend dự phò
 
 | Role | Chuỗi mặc định |
 |------|----------------|
-| Researcher (`grok`) | `agy → claude → codex` |
+| Researcher (`researcher`) | `agy → claude → codex` |
 | Architect (`claude`) | `claude → agy → codex` |
 | Codex / Tester / Security / DevOps | `codex → claude → agy` |
 
@@ -164,13 +165,25 @@ Genius **mặc định** chạy mọi role trên một chuỗi backend dự phò
 - **Backend `grok` là opt-in (legacy)**: không chuỗi mặc định nào dùng nó (CLI grok đã hết credits). Muốn dùng lại, chỉ định tường minh cho role cần thiết, ví dụ:
 
 ```bash
-# Ghi đè chuỗi cho role research: grok làm primary, agy dự phòng
-set GENIUS_PROVIDER_GROK=grok,agy
+# Ghi đè chuỗi cho role researcher: grok làm primary, agy dự phòng
+set GENIUS_PROVIDER_RESEARCHER=grok,agy
 ```
 
-- `GENIUS_PROVIDER_<ROLE>` (comma-separated: `grok`, `agy`, `claude`, `codex`) ghi đè chuỗi mặc định của từng role. Biến `GENIUS_PROVIDER_FALLBACK` cũ đã **deprecated**: chuỗi dự phòng giờ là mặc định nên biến này được chấp nhận nhưng không còn tác dụng.
+- `GENIUS_PROVIDER_<ROLE>` (comma-separated: `grok`, `agy`, `claude`, `codex`) ghi đè chuỗi mặc định của từng role (role Researcher vẫn nhận biến legacy `GENIUS_PROVIDER_GROK`). Biến `GENIUS_PROVIDER_FALLBACK` cũ đã **deprecated**: chuỗi dự phòng giờ là mặc định nên biến này được chấp nhận nhưng không còn tác dụng.
 - Các biến này áp dụng cho **cả ba đường gọi**: Skill Server (`serve.py`), **MCP/Antigravity** (`mcp_server.py`) và distributed worker — chỉ cần set trong `.env` hoặc trong khối `env` của `mcp_config.json`.
 - Kiểm tra chuỗi hiệu lực của từng role (và đường dẫn `agy` được resolve): `python serve.py --doctor`.
+
+---
+
+## 📚 Tài liệu
+
+Chỉ mục đầy đủ tại [`docs/README.md`](docs/README.md).
+
+- [`docs/OVERVIEW.md`](docs/OVERVIEW.md) — tổng quan kiến trúc, thành phần, chất lượng, rủi ro, milestones.
+- [`docs/TESTING.md`](docs/TESTING.md) — trạng thái test, coverage, challenger, hiệu năng.
+- [`TEST_INFRA.md`](TEST_INFRA.md) — hạ tầng test phân tán (canonical).
+- [`PIPELINE_COMPARISON.md`](PIPELINE_COMPARISON.md) — `run_pipeline` vs `run_e2e_pipeline`.
+- [`docs/history/`](docs/history/) — báo cáo/phân tích cũ (lưu trữ).
 
 ---
 > **Lưu ý V2**: Hệ thống có khả năng fallback thông minh ở mọi role (bảng chuỗi ở trên); nếu mã sinh ra bị lỗi, vòng lặp `Self-Healing` sẽ tự động vá lỗi thông qua phản hồi từ `pytest` và `flake8`. (Backend `grok` opt-in vẫn giữ auto-login: chỉ khi được gọi tới và thiếu API key, GrokProvider mới mở login prompt.)

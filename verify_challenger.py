@@ -1,4 +1,4 @@
-# verify_challenger.py
+﻿# verify_challenger.py
 import os
 import sys
 
@@ -74,7 +74,9 @@ async def mock_run(response: Response, retry_after: str = None):
 
 
 def run_server(app, port):
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="warning", ws="auto"
+    )
     server = uvicorn.Server(config)
     server.run()
 
