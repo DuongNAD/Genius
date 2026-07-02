@@ -138,9 +138,25 @@ async def checksum_middleware(request: Request, call_next):
 
     response = await call_next(request)
 
+    # Buffer the response to compute its checksum, but bound the buffer so a
+    # pathologically large response can't exhaust memory. Skill endpoints
+    # return small JSON, so this only trips on a runaway payload.
+    try:
+        max_bytes = int(os.getenv("GENIUS_MAX_RESPONSE_BYTES") or 25 * 1024 * 1024)
+    except (TypeError, ValueError):
+        max_bytes = 25 * 1024 * 1024
     response_body = b""
     async for chunk in response.body_iterator:
         response_body += chunk
+        if len(response_body) > max_bytes:
+            content = {"detail": "Response too large to checksum"}
+            body_bytes = json.dumps(content).encode("utf-8")
+            checksum = hashlib.sha256(body_bytes).hexdigest()
+            return JSONResponse(
+                status_code=500,
+                content=content,
+                headers={"X-Payload-SHA256": checksum},
+            )
 
     if getattr(request.state, "use_plain_checksum", False):
         checksum = hashlib.sha256(response_body).hexdigest()

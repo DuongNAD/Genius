@@ -100,6 +100,15 @@ class CodexReviewerAgent(BaseAgent):
             self._write_output_file(content)
             return content
 
+        # In stateless (skill-server) mode the agent must leave no trace and
+        # must NOT execute the host's test suite: skip the flake8/pytest
+        # self-healing loop below, which writes model-generated code into the
+        # server's working tree and re-runs pytest — a remote-code-execution
+        # surface. Return the model's review text directly.
+        if bool(self.extra_params.get("stateless", False)):
+            self._write_output_file(content)  # no-op when output_file == "None"
+            return content
+
         def _detect_target_file(prompt_str, content_str, scanned_keys):
             import re
 
@@ -203,11 +212,13 @@ class CodexReviewerAgent(BaseAgent):
 
                 code_to_write = extract_code(content)
                 if target_file:
-                    abs_target_path = os.path.abspath(
+                    # realpath (not abspath) so an in-tree symlink can't point
+                    # the write outside root_dir.
+                    abs_target_path = os.path.realpath(
                         os.path.join(root_dir, target_file)
                     )
                     try:
-                        abs_root = os.path.abspath(root_dir)
+                        abs_root = os.path.realpath(root_dir)
                         if os.path.commonpath([abs_root, abs_target_path]) != abs_root:
                             raise ValueError(
                                 "Path traversal detected: target path is outside root directory"

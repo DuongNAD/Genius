@@ -73,6 +73,10 @@ def build_agent(role: str, stateless: bool = True):
     if stateless:
         agent_kwargs["output_file"] = "None"
         agent_kwargs["use_memory"] = False
+        # Signal side-effect-free mode to agents that would otherwise execute
+        # the host's test suite / write files (e.g. CodexReviewerAgent's
+        # self-healing loop).
+        agent_kwargs["stateless"] = True
     return agent_class(**agent_kwargs)
 
 

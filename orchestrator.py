@@ -333,7 +333,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger("orchestrator")
 
+import contextvars
+
+# Module-level default; tests set this directly (orchestrator.DISTRIBUTED_MODE).
 DISTRIBUTED_MODE = False
+# Per-pipeline override: run_pipeline sets this in its own task context so two
+# concurrent pipelines (e.g. MCP orchestrate jobs) don't stomp a shared global.
+# Task contexts are copied at create_task time and discarded on completion, so
+# the set is naturally scoped — no reset needed.
+_DISTRIBUTED_MODE_VAR: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "genius_distributed_mode"
+)
+
+
+def _is_distributed() -> bool:
+    """Effective distributed-dispatch flag: the pipeline's contextvar if set,
+    else the module-level DISTRIBUTED_MODE (the direct-call/test path)."""
+    try:
+        return _DISTRIBUTED_MODE_VAR.get()
+    except LookupError:
+        return DISTRIBUTED_MODE
+
 
 DEFAULT_ANTIGRAVITY_ARGS = ["--design", "{input}", "--output", "{output}"]
 
@@ -627,7 +647,7 @@ async def call_api(
         _API_RESPONSE_CACHE.move_to_end(cache_key)
         return _API_RESPONSE_CACHE[cache_key]
 
-    if DISTRIBUTED_MODE:
+    if _is_distributed():
         from serve import (
             worker_registry,
             pending_tasks,
@@ -1550,8 +1570,7 @@ async def run_pipeline(
     the research, design and code stages complete; it may pause (human
     approval) or raise to abort. None (the default) runs straight through.
     """
-    global DISTRIBUTED_MODE
-    DISTRIBUTED_MODE = distributed
+    _DISTRIBUTED_MODE_VAR.set(distributed)
 
     project_name, workspace, max_debate_rounds = _resolve_pipeline_setup(
         prompt, workspace, max_debate_rounds
@@ -2461,8 +2480,7 @@ async def run_e2e_pipeline(
     distributed: bool = False,
 ):
     """Execute the E2E automated pipeline (Claude -> critic critique -> Codex implementation & self-healing -> Tester test generation & self-healing)."""
-    global DISTRIBUTED_MODE
-    DISTRIBUTED_MODE = distributed
+    _DISTRIBUTED_MODE_VAR.set(distributed)
 
     project_name, workspace, max_debate_rounds = _resolve_pipeline_setup(
         prompt, workspace, max_debate_rounds

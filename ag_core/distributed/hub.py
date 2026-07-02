@@ -1,7 +1,13 @@
 import asyncio
 import time
 import os
+import uuid
+from collections import OrderedDict
 from typing import Dict, Optional, Any
+
+
+def _truthy(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 class TaskQueue(list):
@@ -57,6 +63,9 @@ class CentralHub:
         self._sweeper_task: Optional[asyncio.Task] = None
         self._sweeper_running = False
         self.lock = asyncio.Lock()
+        # Bounded set of recently-seen request nonces for opt-in replay
+        # protection on the authenticated HTTP path (GENIUS_HUB_REPLAY_PROTECTION).
+        self._seen_nonces: "OrderedDict[str, float]" = OrderedDict()
 
     @property
     def api_key(self) -> str:
@@ -191,6 +200,62 @@ class CentralHub:
 
         return hmac.compare_digest(str(auth_header), str(self.api_key))
 
+    def _verify_replay(self, headers: Dict[str, str]) -> bool:
+        """Opt-in anti-replay for the HTTP path (GENIUS_HUB_REPLAY_PROTECTION).
+
+        Requires a fresh ``X-Timestamp`` (within the window) and an unseen
+        ``X-Nonce``. Off by default so existing clients/tests are unchanged.
+        NOTE: the HTTP path transmits the raw shared secret in ``X-API-Key``,
+        so a party who captures a request already holds the credential; this
+        control only helps alongside a transport that hides the secret (TLS)
+        or a future move to signature-based auth. It is not a full fix on its
+        own.
+        """
+        if not _truthy(os.getenv("GENIUS_HUB_REPLAY_PROTECTION")):
+            return True
+
+        def _get(name: str):
+            v = headers.get(name) or headers.get(name.lower())
+            if not v and hasattr(headers, "items"):
+                v = next(
+                    (val for k, val in headers.items() if k.lower() == name.lower()),
+                    None,
+                )
+            return v
+
+        ts_raw = _get("X-Timestamp")
+        nonce = _get("X-Nonce")
+        if not ts_raw or not nonce:
+            return False
+        try:
+            ts = float(ts_raw)
+        except (TypeError, ValueError):
+            return False
+
+        now = time.time()
+        try:
+            window = float(os.getenv("GENIUS_HUB_REPLAY_WINDOW") or 300.0)
+        except (TypeError, ValueError):
+            window = 300.0
+        if abs(now - ts) > window:
+            return False
+
+        # Drop nonces older than the window, then reject a reused one.
+        cutoff = now - window
+        while self._seen_nonces:
+            oldest_key = next(iter(self._seen_nonces))
+            if self._seen_nonces[oldest_key] < cutoff:
+                self._seen_nonces.pop(oldest_key, None)
+            else:
+                break
+        if nonce in self._seen_nonces:
+            return False
+        self._seen_nonces[nonce] = now
+        # Hard cap so a flood of unique nonces can't grow the map unbounded.
+        while len(self._seen_nonces) > 10000:
+            self._seen_nonces.popitem(last=False)
+        return True
+
     def verify_checksum(self, payload: Any, headers: Dict[str, str]) -> bool:
         checksum = headers.get("X-Payload-SHA256") or headers.get("x-payload-sha256")
         if not checksum and hasattr(headers, "items"):
@@ -238,6 +303,9 @@ class CentralHub:
 
         if not self.verify_checksum(payload, headers):
             return 400, {"error": "Bad Checksum"}, {}
+
+        if not self._verify_replay(headers):
+            return 401, {"error": "Stale or replayed request"}, {}
 
         async with self.lock:
             if endpoint == "/register":
@@ -574,4 +642,12 @@ class CentralHub:
         from ag_core.utils.security import calculate_checksum
 
         checksum = calculate_checksum(payload, self.api_key)
-        return {"X-API-Key": self.api_key, "X-Payload-SHA256": checksum}
+        # X-Timestamp/X-Nonce are always emitted (harmless when replay
+        # protection is off) so enabling GENIUS_HUB_REPLAY_PROTECTION works
+        # without a client change.
+        return {
+            "X-API-Key": self.api_key,
+            "X-Payload-SHA256": checksum,
+            "X-Timestamp": str(time.time()),
+            "X-Nonce": uuid.uuid4().hex,
+        }

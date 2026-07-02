@@ -66,10 +66,19 @@ class ClientWorker:
         network.register_worker(self.worker_id, self)
 
     def create_headers(self, payload: Any) -> Dict[str, str]:
+        import time
+        import uuid
         from ag_core.utils.security import calculate_checksum
 
         checksum = calculate_checksum(payload, self.api_key)
-        return {"X-API-Key": self.api_key, "X-Payload-SHA256": checksum}
+        # X-Timestamp/X-Nonce let the hub enforce anti-replay when
+        # GENIUS_HUB_REPLAY_PROTECTION is on; harmless when it's off.
+        return {
+            "X-API-Key": self.api_key,
+            "X-Payload-SHA256": checksum,
+            "X-Timestamp": str(time.time()),
+            "X-Nonce": uuid.uuid4().hex,
+        }
 
     async def register(self) -> tuple[int, Any]:
         payload = {"worker_id": self.worker_id, "roles": self.roles}
