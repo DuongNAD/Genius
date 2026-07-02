@@ -1,0 +1,184 @@
+"""Tests for the pipeline-reliability upgrades: the design-format retry
+(production-only self-heal), the tests-for-tests skip, and raw response
+capture."""
+
+import json
+import os
+
+import pytest
+from unittest.mock import patch, AsyncMock
+
+import orchestrator
+from orchestrator import is_test_module, save_raw_response, PipelineError
+
+
+# --- is_test_module ----------------------------------------------------------
+
+
+def test_is_test_module_detects_pytest_modules():
+    assert is_test_module("tests/test_core.py")
+    assert is_test_module("test_app.py")
+    assert is_test_module("pkg/tests/test_x.py")
+    assert is_test_module("tests\\test_win.py")
+
+
+def test_is_test_module_ignores_regular_sources():
+    assert not is_test_module("src/main.py")
+    assert not is_test_module("contest.py")
+    assert not is_test_module("latest_results.py")
+    assert not is_test_module("src/testing_utils.py")
+
+
+# --- save_raw_response --------------------------------------------------------
+
+
+def test_save_raw_response_writes_sanitized_file(tmp_path):
+    save_raw_response(str(tmp_path), "codex a/b:attempt#1", "payload")
+    raw_dir = tmp_path / "logs" / "raw"
+    files = list(raw_dir.iterdir())
+    assert len(files) == 1
+    assert files[0].suffix == ".md"
+    assert files[0].read_text(encoding="utf-8") == "payload"
+    # No path separators survive in the file name.
+    assert "/" not in files[0].name and ":" not in files[0].name
+
+
+def test_save_raw_response_never_raises(tmp_path):
+    # Point at an unwritable location (a FILE where the logs dir should be).
+    (tmp_path / "logs").write_text("blocker", encoding="utf-8")
+    save_raw_response(str(tmp_path), "x", "y")  # must not raise
+
+
+# --- design-format retry ------------------------------------------------------
+
+_GOOD_DESIGN = (
+    "```json\n"
+    + json.dumps(
+        {
+            "project_name": "demo",
+            "description": "d",
+            "files": [{"path": "src/thing.py", "specification": "A function ok()."}],
+        }
+    )
+    + "\n```"
+)
+
+_PASSING_TEST_MODULE = "```python\ndef test_ok():\n    assert True\n```"
+_CLEAN_AUDIT = '```json\n{"blocking": false, "findings": []}\n```'
+
+
+def test_design_selfheal_disabled_under_pytest():
+    # The suite itself must see the knob off (legacy branch stays reachable).
+    assert orchestrator.design_selfheal_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_design_retry_reprompts_architect_then_succeeds(tmp_path, monkeypatch):
+    monkeypatch.setattr(orchestrator, "design_selfheal_enabled", lambda: True)
+
+    calls = []
+
+    async def fake_call_api(url, api_key, prompt, **kwargs):
+        calls.append(prompt)
+        n = len(calls)
+        if n == 1:
+            return "research brief"
+        if n == 2:
+            return "a markdown design with no json block"
+        if n == 3:
+            return _GOOD_DESIGN  # the retry fixes the format
+        if "unit-test" in prompt:
+            return _PASSING_TEST_MODULE
+        if "/audit" in prompt:
+            return _CLEAN_AUDIT
+        if n == 4:
+            return "```python\ndef ok():\n    return 1\n```"  # codex
+        return "deploy plan"  # devops
+
+    with patch("orchestrator.call_api", new=AsyncMock(side_effect=fake_call_api)):
+        await orchestrator.run_pipeline(
+            prompt="build demo",
+            workspace=str(tmp_path),
+            max_debate_rounds=0,
+            max_retries=1,
+        )
+
+    # The 3rd call is the format retry, carrying explicit feedback.
+    assert "could not be parsed" in calls[2]
+    assert "DesignPlan" in calls[2]
+    # The pipeline went on to implement the planned file.
+    project_dirs = list((tmp_path / "projects").iterdir())
+    assert len(project_dirs) == 1
+    assert (project_dirs[0] / "src" / "thing.py").is_file()
+    # Raw responses were captured for the retry and the codex attempt.
+    raw_names = os.listdir(project_dirs[0] / "logs" / "raw")
+    assert any(n.startswith("design_retry1") for n in raw_names)
+    assert any(n.startswith("codex_") for n in raw_names)
+
+
+_README_DESIGN = (
+    "```json\n"
+    + json.dumps(
+        {
+            "project_name": "demo",
+            "description": "d",
+            "files": [{"path": "README.md", "specification": "Project readme."}],
+        }
+    )
+    + "\n```"
+)
+
+
+@pytest.mark.asyncio
+async def test_non_python_file_skips_tester_and_pytest(tmp_path):
+    # Regression: a designed README.md used to get a generated pytest module
+    # against a markdown "module" and failed every self-heal attempt.
+    calls = []
+
+    async def fake_call_api(url, api_key, prompt, **kwargs):
+        calls.append(prompt)
+        n = len(calls)
+        if n == 1:
+            return "research brief"
+        if n == 2:
+            return _README_DESIGN
+        if "/audit" in prompt:
+            return _CLEAN_AUDIT
+        if n == 3:
+            return "# Demo\n\nA readme."  # codex writes the file content
+        return "deploy plan"
+
+    with patch("orchestrator.call_api", new=AsyncMock(side_effect=fake_call_api)):
+        await orchestrator.run_pipeline(
+            prompt="build demo",
+            workspace=str(tmp_path),
+            max_debate_rounds=0,
+            max_retries=1,
+        )
+
+    project_dirs = list((tmp_path / "projects").iterdir())
+    assert (project_dirs[0] / "README.md").is_file()
+    # No unit-test generation was requested for the markdown file.
+    assert not any("unit-test" in c for c in calls)
+    # The security audit still ran.
+    assert any("/audit" in c for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_design_retry_exhaustion_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(orchestrator, "design_selfheal_enabled", lambda: True)
+
+    async def fake_call_api(url, api_key, prompt, **kwargs):
+        if "research" not in getattr(fake_call_api, "seen", []):
+            fake_call_api.seen = ["research"]
+            return "research brief"
+        return "still not a design plan"
+
+    with patch("orchestrator.call_api", new=AsyncMock(side_effect=fake_call_api)):
+        with pytest.raises(PipelineError, match="no parseable DesignPlan"):
+            await orchestrator.run_pipeline(
+                prompt="build demo",
+                workspace=str(tmp_path),
+                max_debate_rounds=0,
+                max_retries=1,
+            )

@@ -29,6 +29,8 @@ EXPECTED_TOOLS = {
     "security_audit",
     "deploy",
     "orchestrate",
+    "orchestrate_approve",
+    "orchestrate_reject",
     "orchestrate_status",
     "doctor",
     "debate",
@@ -158,7 +160,7 @@ def test_mcp_stdio_handshake_tools_list_and_stream_purity(mcp):
     mcp.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
     mcp.assert_stream_quiet()
 
-    # --- tools/list -> the 11 documented tools ---
+    # --- tools/list -> the 13 documented tools ---
     mcp.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     tools_resp = mcp.read_response()
     assert tools_resp["id"] == 2

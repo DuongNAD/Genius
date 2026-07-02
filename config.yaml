@@ -5,19 +5,20 @@ app:
 # is passed straight to the CLI's model flag. Override per backend without
 # editing this file via GENIUS_MODEL_<BACKEND> (e.g. GENIUS_MODEL_CLAUDE).
 models:
-  # codex CLI (-m). Examples (2026-07): gpt-5.5 (recommended), gpt-5.4,
-  # gpt-5.4-mini (fast/cheap).
-  openai: ""
-  # claude CLI (--model). Accepts aliases (sonnet, opus, haiku) or full ids.
-  # Examples (2026-07): claude-sonnet-5, claude-fable-5, claude-opus-4-8,
-  # claude-haiku-4-5-20251001.
-  anthropic: ""
+  # codex CLI (-m) — serves the coder/tester/security/devops roles.
+  # Alternatives (2026-07): gpt-5.4, gpt-5.4-mini (fast/cheap).
+  openai: "gpt-5.5"
+  # claude CLI (--model) — serves the architect role (+ fallbacks). Accepts
+  # aliases (sonnet, opus, haiku) or full ids. Alternatives (2026-07):
+  # claude-fable-5, claude-opus-4-8, claude-haiku-4-5-20251001.
+  anthropic: "claude-sonnet-5"
   # grok is an OPT-IN backend only (no default chain uses it); enable it per
   # role with GENIUS_PROVIDER_<ROLE>=grok,... (model not passed to the CLI).
   grok: "grok-build-0.1"
   # agy CLI (--model), Antigravity 2.0 / Gemini, the default Researcher
-  # primary. Examples (2026-07): gemini-3.5-flash, gemini-3.1-pro-preview.
-  agy: ""
+  # primary. Alternative (2026-07): gemini-3.1-pro-preview (deeper research,
+  # slower). Empty = account default.
+  agy: "gemini-3.5-flash"
 scanner:
   chunk_size_limit: 8000
   exclude_patterns:

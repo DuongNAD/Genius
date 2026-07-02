@@ -211,6 +211,108 @@ async def test_run_orchestration_records_failure(tmp_path):
     assert "boom" in job["error"]
 
 
+# --- approval gates ---------------------------------------------------------
+
+
+async def _wait_job_state(job_id, state, timeout=5.0):
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        job = mcp_server.ORCHESTRATION_JOBS[job_id]
+        if job["status"] == state:
+            return job
+        await asyncio.sleep(0.01)
+    raise AssertionError(
+        f"job {job_id} never reached {state!r} "
+        f"(last: {mcp_server.ORCHESTRATION_JOBS[job_id]['status']!r})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_approval_gates_pause_and_resume(tmp_path):
+    stages_run = []
+
+    async def fake_pipeline(prompt, workspace=None, stage_gate=None):
+        # Mirrors the real run_pipeline gate protocol.
+        for stage in ("research", "design", "code"):
+            stages_run.append(stage)
+            if stage_gate is not None:
+                await stage_gate(stage)
+
+    with patch("orchestrator.run_pipeline", new=AsyncMock(side_effect=fake_pipeline)):
+        out = await mcp_server.dispatch_tool(
+            "orchestrate",
+            {
+                "prompt": "gated build",
+                "workspace": str(tmp_path),
+                "require_approval": True,
+            },
+        )
+        job_id = json.loads(out)["job_id"]
+
+        for expected_stage in ("research", "design", "code"):
+            job = await _wait_job_state(job_id, "awaiting_approval")
+            assert job["awaiting_stage"] == expected_stage
+            status = json.loads(
+                await mcp_server.dispatch_tool("orchestrate_status", {"job_id": job_id})
+            )
+            assert status["awaiting_stage"] == expected_stage
+            # Artifacts are exposed while paused so the stage can be reviewed.
+            assert "artifacts" in status
+            approved = json.loads(
+                await mcp_server.dispatch_tool(
+                    "orchestrate_approve", {"job_id": job_id}
+                )
+            )
+            assert approved["action"] == "approved"
+            assert approved["stage"] == expected_stage
+
+        await _wait_job_state(job_id, "completed")
+    assert stages_run == ["research", "design", "code"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_reject_fails_job(tmp_path):
+    async def fake_pipeline(prompt, workspace=None, stage_gate=None):
+        await stage_gate("research")
+
+    with patch("orchestrator.run_pipeline", new=AsyncMock(side_effect=fake_pipeline)):
+        out = await mcp_server.dispatch_tool(
+            "orchestrate",
+            {
+                "prompt": "gated build",
+                "workspace": str(tmp_path),
+                "require_approval": True,
+            },
+        )
+        job_id = json.loads(out)["job_id"]
+        await _wait_job_state(job_id, "awaiting_approval")
+        await mcp_server.dispatch_tool(
+            "orchestrate_reject", {"job_id": job_id, "reason": "wrong direction"}
+        )
+        job = await _wait_job_state(job_id, "failed")
+    assert "rejected" in job["error"]
+    assert "wrong direction" in job["error"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_approve_requires_awaiting_state():
+    _register("j-not-waiting")
+    with pytest.raises(ValueError):
+        await mcp_server.dispatch_tool(
+            "orchestrate_approve", {"job_id": "j-not-waiting"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_require_approval_rejects_e2e():
+    with pytest.raises(ValueError):
+        await mcp_server.dispatch_tool(
+            "orchestrate",
+            {"prompt": "x", "pipeline": "e2e", "require_approval": True},
+        )
+
+
 @pytest.mark.asyncio
 async def test_orchestrate_status_unknown_job_raises():
     with pytest.raises(ValueError):

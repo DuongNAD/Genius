@@ -287,8 +287,55 @@ TOOLS = [
                     "type": "string",
                     "description": "Optional absolute path where artifacts are written (default: server cwd)",
                 },
+                "require_approval": {
+                    "type": "boolean",
+                    "description": (
+                        "Pause after each stage (research, design, code) as "
+                        "'awaiting_approval' until orchestrate_approve / "
+                        "orchestrate_reject is called (sequential pipeline only)"
+                    ),
+                },
             },
             "required": ["prompt"],
+        },
+    },
+    {
+        "name": "orchestrate_approve",
+        "description": (
+            "Approve the stage a paused orchestrate job is waiting on "
+            "(status 'awaiting_approval') so the pipeline continues to the "
+            "next stage."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "The job_id returned by orchestrate",
+                }
+            },
+            "required": ["job_id"],
+        },
+    },
+    {
+        "name": "orchestrate_reject",
+        "description": (
+            "Reject the stage a paused orchestrate job is waiting on: the "
+            "pipeline stops and the job is marked failed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "The job_id returned by orchestrate",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional reason recorded in the job error",
+                },
+            },
+            "required": ["job_id"],
         },
     },
     {
@@ -535,7 +582,11 @@ def _collect_artifacts(workspace: str) -> Dict[str, str]:
 
 
 async def _run_orchestration(
-    job_id: str, prompt: str, pipeline: str, workspace: str = None
+    job_id: str,
+    prompt: str,
+    pipeline: str,
+    workspace: str = None,
+    require_approval: bool = False,
 ) -> None:
     job = ORCHESTRATION_JOBS[job_id]
     try:
@@ -543,10 +594,35 @@ async def _run_orchestration(
         # must respond before Antigravity's connect timeout).
         from orchestrator import run_pipeline, run_e2e_pipeline
 
+        stage_gate = None
+        if require_approval:
+
+            async def _approval_gate(stage: str) -> None:
+                # Pause at a stage boundary until orchestrate_approve /
+                # orchestrate_reject flips the event. Artifacts are collected
+                # first so the reviewer can read the stage output while the
+                # job is paused.
+                job["awaiting_stage"] = stage
+                job["status"] = "awaiting_approval"
+                job["artifacts"] = _collect_artifacts(workspace or os.getcwd())
+                job["approval_event"].clear()
+                await job["approval_event"].wait()
+                # The approve/reject handler already flipped status and
+                # cleared awaiting_stage (synchronously, so pollers never see
+                # a stale pause state); only the rejection outcome is ours.
+                if job.get("rejected"):
+                    reason = job.get("reject_reason")
+                    raise RuntimeError(
+                        f"Pipeline stopped: stage '{stage}' was rejected"
+                        + (f" ({reason})" if reason else "")
+                    )
+
+            stage_gate = _approval_gate
+
         if pipeline == "e2e":
             await run_e2e_pipeline(prompt, workspace=workspace)
         else:
-            await run_pipeline(prompt, workspace=workspace)
+            await run_pipeline(prompt, workspace=workspace, stage_gate=stage_gate)
         job["artifacts"] = _collect_artifacts(workspace or os.getcwd())
         job["status"] = "completed"
     except Exception as e:  # noqa: BLE001 - surface any pipeline failure to the client
@@ -569,6 +645,12 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         if pipeline not in ("sequential", "e2e"):
             raise ValueError("pipeline must be 'sequential' or 'e2e'.")
         workspace = arguments.get("workspace")
+        require_approval = bool(arguments.get("require_approval", False))
+        if require_approval and pipeline == "e2e":
+            raise ValueError(
+                "require_approval is only supported for the 'sequential' "
+                "pipeline (the e2e variant has no stage gates)."
+            )
         job_id = uuid.uuid4().hex
         ORCHESTRATION_JOBS[job_id] = {
             "job_id": job_id,
@@ -580,15 +662,25 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             "workspace": workspace,
             "started_at": time.time(),
             "finished_at": None,
+            "require_approval": require_approval,
+            "awaiting_stage": None,
+            "approval_event": asyncio.Event(),
+            "rejected": False,
+            "reject_reason": None,
         }
-        asyncio.create_task(_run_orchestration(job_id, prompt, pipeline, workspace))
-        return json.dumps(
-            {
-                "job_id": job_id,
-                "status": "running",
-                "message": "Pipeline started. Poll orchestrate_status with this job_id.",
-            }
+        asyncio.create_task(
+            _run_orchestration(job_id, prompt, pipeline, workspace, require_approval)
         )
+        message = "Pipeline started. Poll orchestrate_status with this job_id."
+        if require_approval:
+            message = (
+                "Pipeline started WITH approval gates: after each stage "
+                "(research, design, code) the job pauses as "
+                "'awaiting_approval' — review the artifacts from "
+                "orchestrate_status, then call orchestrate_approve (or "
+                "orchestrate_reject) with this job_id to continue."
+            )
+        return json.dumps({"job_id": job_id, "status": "running", "message": message})
 
     if name == "orchestrate_status":
         job_id = arguments.get("job_id", "")
@@ -603,9 +695,41 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         stages, ready = _stage_progress(job)
         view["stages"] = stages
         view["artifacts_ready"] = ready
-        if job["status"] == "completed":
+        if job.get("awaiting_stage"):
+            view["awaiting_stage"] = job["awaiting_stage"]
+        # Expose artifacts while paused too, so the reviewer can read the
+        # stage output before approving/rejecting.
+        if job["status"] in ("completed", "awaiting_approval"):
             view["artifacts"] = job["artifacts"]
         return json.dumps(view)
+
+    if name in ("orchestrate_approve", "orchestrate_reject"):
+        job_id = arguments.get("job_id", "")
+        job = ORCHESTRATION_JOBS.get(job_id)
+        if job is None:
+            raise ValueError(f"Unknown job_id: {job_id}")
+        if job.get("status") != "awaiting_approval":
+            raise ValueError(
+                f"Job {job_id} is not awaiting approval "
+                f"(status: {job.get('status')})."
+            )
+        stage = job.get("awaiting_stage")
+        if name == "orchestrate_reject":
+            job["rejected"] = True
+            job["reject_reason"] = (arguments.get("reason") or "").strip() or None
+        # Flip the pause state synchronously so a status poll right after
+        # this call never sees a stale 'awaiting_approval'; the gate coroutine
+        # then resumes and (on rejection) fails the job.
+        job["awaiting_stage"] = None
+        job["status"] = "running"
+        job["approval_event"].set()
+        return json.dumps(
+            {
+                "job_id": job_id,
+                "stage": stage,
+                "action": ("rejected" if name == "orchestrate_reject" else "approved"),
+            }
+        )
 
     if name == "doctor":
         return await _run_doctor_report()

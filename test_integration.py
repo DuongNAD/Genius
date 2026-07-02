@@ -88,9 +88,9 @@ def test_config_loading_and_merging():
     config = load_config()
     assert config.app.name == "Antigravity Core"
     assert config.app.version == "2.0"
-    # Empty = "use the CLI's own default model" (no model flag injected).
-    assert config.models.openai == ""
-    assert config.models.anthropic == ""
+    # Mirrors config.yaml (empty would mean "the CLI's own default model").
+    assert config.models.openai == "gpt-5.5"
+    assert config.models.anthropic == "claude-sonnet-5"
     assert config.models.grok == "grok-build-0.1"
     assert config.scanner.chunk_size_limit == 8000
     assert ".git/" in config.scanner.exclude_patterns
