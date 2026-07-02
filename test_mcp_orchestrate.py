@@ -16,6 +16,39 @@ import mcp_server
 # --- MCP JSON-RPC handshake -------------------------------------------------
 
 
+def test_stdio_logging_never_leaks_to_stdout():
+    """The ag_core logger binds a StreamHandler to sys.stdout at import time;
+    in stdio mode that would corrupt the JSON-RPC channel. Verify the redirect
+    helper retargets it (and every other StreamHandler) to the stderr stand-in,
+    so an ag_core log line lands on stderr, never on the real stdout."""
+    import io
+    import logging
+    from ag_core.utils.logger import logger as ag_logger
+
+    stderr_stand_in = io.StringIO()
+    saved = [
+        (h, h.stream)
+        for lg in [logging.getLogger()]
+        + [logging.getLogger(n) for n in list(logging.Logger.manager.loggerDict)]
+        for h in getattr(lg, "handlers", [])
+        if isinstance(h, logging.StreamHandler)
+    ]
+    try:
+        mcp_server._redirect_all_logging_to_stderr(stderr_stand_in)
+        ag_logger.info("LEAK_CHECK_TOKEN")
+        for h in ag_logger.handlers:
+            if isinstance(h, logging.StreamHandler):
+                h.flush()
+        assert "LEAK_CHECK_TOKEN" in stderr_stand_in.getvalue()
+        assert all(
+            isinstance(h, logging.StreamHandler) is False or h.stream is stderr_stand_in
+            for h in ag_logger.handlers
+        )
+    finally:
+        for handler, stream in saved:
+            handler.setStream(stream)
+
+
 @pytest.mark.asyncio
 async def test_initialize_handshake():
     res = await mcp_server.handle_request(

@@ -721,14 +721,45 @@ async def handle_request(req: Dict[str, Any]):
     }
 
 
+def _redirect_all_logging_to_stderr(stream=None):
+    """Point every logging StreamHandler at ``stream`` (default: real stderr).
+
+    In stdio mode stdout is the JSON-RPC channel. Handlers bound to the real
+    stdout at import time - notably ``ag_core``'s logger
+    (``StreamHandler(sys.stdout)`` in ag_core/utils/logger.py) - would otherwise
+    interleave log lines with responses and corrupt the protocol for strict
+    MCP clients. Retarget all of them, across every logger, not just root.
+    """
+    import logging
+
+    target = stream if stream is not None else sys.stderr
+    loggers = [logging.getLogger()] + [
+        logging.getLogger(name) for name in list(logging.Logger.manager.loggerDict)
+    ]
+    seen = set()
+    for lg in loggers:
+        for handler in list(getattr(lg, "handlers", [])):
+            if isinstance(handler, logging.StreamHandler) and id(handler) not in seen:
+                seen.add(id(handler))
+                if hasattr(handler, "setStream"):
+                    handler.setStream(target)
+                else:  # pragma: no cover - Python < 3.7
+                    handler.stream = target
+
+
 async def run_stdio_mcp():
     import logging
 
+    real_stdout = sys.stdout
+    real_stderr = sys.stderr
+
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+    logging.basicConfig(stream=real_stderr, level=logging.INFO)
+    # Retarget non-root handlers (e.g. ag_core's stdout handler) to stderr so
+    # they can never contaminate the JSON-RPC stream on stdout.
+    _redirect_all_logging_to_stderr(real_stderr)
 
-    real_stdout = sys.stdout
     sys.stdout = sys.stderr
 
     if sys.platform == "win32":
