@@ -446,8 +446,10 @@ async def test_doctor_tool_returns_report_text(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_doctor_tool_reports_not_ready_on_missing_cli(monkeypatch):
+    # codex is a required backend (grok is optional/opt-in and would only
+    # degrade the report).
     monkeypatch.setenv("SKILL_API_KEY", "k")
-    fake = [_doctor_result("grok", "MISSING")]
+    fake = [_doctor_result("codex", "MISSING")]
     with patch(
         "ag_core.diagnostics.run_doctor_async", new=AsyncMock(return_value=fake)
     ):

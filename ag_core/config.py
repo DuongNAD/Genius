@@ -78,8 +78,11 @@ class AppConfig(BaseModel):
 class ModelsConfig(BaseModel):
     openai: str = "gpt-4o"
     anthropic: str = "claude-3-5-sonnet"
+    # grok is an opt-in backend only (kept for GENIUS_PROVIDER_<ROLE>
+    # overrides; no default provider chain uses it).
     grok: str = "grok-2"
-    # Antigravity 2.0 (agy CLI / Gemini). Empty = the account's default model.
+    # Antigravity 2.0 (agy CLI / Gemini), the default Researcher primary.
+    # Empty = the account's default model.
     agy: str = ""
 
 

@@ -198,8 +198,9 @@ def _r(cli, status):
 
 
 def test_report_missing_cli_is_not_ready():
+    # codex is a required backend (grok would be optional/opt-in).
     lines, code = diagnostics.report_lines(
-        [_r("grok", "MISSING"), _r("codex", "OK")], skill_key_ok=True
+        [_r("codex", "MISSING"), _r("claude", "OK")], skill_key_ok=True
     )
     assert code == 1
     assert any("NOT READY" in ln for ln in lines)

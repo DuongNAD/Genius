@@ -1,7 +1,7 @@
 """Preflight diagnostics - ``python serve.py --doctor``.
 
 Verifies the brittle parts of a real run *before* the pipeline starts, so a
-missing Codex desktop install, an unauthenticated Grok CLI, or a missing
+missing Codex desktop install, an unauthenticated agy CLI, or a missing
 ``SKILL_API_KEY`` surfaces immediately with an actionable message instead of
 failing deep inside a stage.
 
@@ -27,20 +27,26 @@ from ag_core.utils.cli_runner import communicate_with_timeout, DEFAULT_AUX_TIMEO
 
 # (display name, resolver, agents that depend on this CLI)
 CLI_CHECKS = [
-    ("grok", resolve_grok_cli, ["Grok Researcher"]),
+    (
+        "grok",
+        resolve_grok_cli,
+        ["optional backend (opt-in via GENIUS_PROVIDER_<ROLE>)"],
+    ),
     ("claude", resolve_claude_cli, ["Claude Architect"]),
     (
         "codex",
         resolve_codex_cli,
         ["Codex Reviewer", "Tester", "Security", "DevOps"],
     ),
-    ("agy", resolve_agy_cli, ["fallback chains (Antigravity 2.0)"]),
+    ("agy", resolve_agy_cli, ["Researcher (default primary, Antigravity 2.0)"]),
 ]
 
-# Backends that no role depends on by default: a missing one never makes the
-# doctor NOT READY. When an env knob puts it in an effective chain, a [warn]
-# line is emitted instead (see provider_chain_lines).
-OPTIONAL_CLIS = {"agy"}
+# Backends whose absence never makes the doctor NOT READY. grok is opt-in
+# only (no default chain contains it), and every default chain also contains
+# claude + codex, so agy going missing only degrades the researcher chain.
+# When a missing optional backend sits in an effective chain, a [warn] line
+# is emitted instead (see provider_chain_lines).
+OPTIONAL_CLIS = {"agy", "grok"}
 
 
 def _is_located(path: str) -> bool:
@@ -163,10 +169,7 @@ def provider_chain_lines(results):
     PRIMARY backend CLI failed to resolve when a resolvable fallback backend
     exists further down its chain.
     """
-    lines = [
-        "Provider chains (override: GENIUS_PROVIDER_<ROLE>=a,b or "
-        "GENIUS_PROVIDER_FALLBACK=1):"
-    ]
+    lines = ["Provider chains (defaults; override with GENIUS_PROVIDER_<ROLE>=a,b):"]
     statuses = {r["cli"]: r["status"] for r in results}
     for role in provider_factory.DEFAULT_CHAINS:
         try:
@@ -209,9 +212,10 @@ def report_lines(results, skill_key_ok: bool):
     lines.extend(provider_chain_lines(results))
 
     lines.append("=" * 60)
-    # Optional backends (agy) never fail the doctor: no role depends on them
-    # unless an env knob adds them to a chain, and then the chain report
-    # already carries a [warn] line.
+    # Optional backends (grok, agy) never fail the doctor: grok is opt-in
+    # only, and every default chain still contains claude + codex, so the
+    # chain report above already carries a [warn] line when a missing
+    # optional backend sits in an effective chain.
     missing = [
         r for r in results if r["status"] == "MISSING" and r["cli"] not in OPTIONAL_CLIS
     ]

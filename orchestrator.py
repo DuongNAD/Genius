@@ -272,7 +272,7 @@ DISTRIBUTED_MODE = False
 DEFAULT_ANTIGRAVITY_ARGS = ["--design", "{input}", "--output", "{output}"]
 
 ROUTING_TABLE = {
-    # Grok
+    # Researcher (role id "grok")
     "/research": ("grok", "research.md"),
     "/summarize": ("grok", "research.md"),
     "/fact-check": ("grok", "research.md"),
@@ -1346,7 +1346,7 @@ async def run_pipeline(
     max_debate_rounds: int = None,
     distributed: bool = False,
 ):
-    """Execute the sequential pipeline (Grok -> Claude -> Antigravity -> Codex -> Tester -> Security -> DevOps)."""
+    """Execute the sequential pipeline (Research -> Claude -> Antigravity -> Codex -> Tester -> Security -> DevOps)."""
     global DISTRIBUTED_MODE
     DISTRIBUTED_MODE = distributed
 
@@ -1473,8 +1473,8 @@ async def run_pipeline(
             log_conversation(prompt, result)
             return result
 
-        # Step 1: Grok (Research) - Call API
-        logger.info("--- Running Step: Grok ---")
+        # Step 1: Research (agy/claude/codex fallback chain) - Call API
+        logger.info("--- Running Step: Research ---")
         from ag_core.utils.message_bus import MessageBus, Artifact
 
         message_bus = MessageBus(
@@ -1494,9 +1494,10 @@ async def run_pipeline(
             if not degraded_mode():
                 raise
             # Research is enrichment, not a hard prerequisite: in degraded
-            # mode (e.g. Grok out of credits) continue with the raw prompt.
+            # mode (e.g. every research backend down) continue with the raw
+            # prompt.
             logger.warning(
-                "DEGRADED MODE: Grok research stage failed (%s). Continuing "
+                "DEGRADED MODE: Research stage failed (%s). Continuing "
                 "WITHOUT research context - design quality may suffer.",
                 e,
             )
@@ -1514,10 +1515,10 @@ async def run_pipeline(
             with open(proj_research_file, "w", encoding="utf-8") as f:
                 f.write(grok_content)
         except Exception as e:
-            logger.warning(f"Failed to write Grok debug output: {e}")
-        validate_file(research_file, "Grok", is_input=False)
+            logger.warning(f"Failed to write research debug output: {e}")
+        validate_file(research_file, "Research", is_input=False)
         logger.info(
-            f"Step 'Grok' successfully completed. Output verified: {research_file}"
+            f"Step 'Research' successfully completed. Output verified: {research_file}"
         )
 
         # Step 2: Claude (Design) - Call API
@@ -1564,11 +1565,11 @@ async def run_pipeline(
             )
             for round_idx in range(1, max_debate_rounds + 1):
                 logger.info(
-                    f"Debate Round {round_idx} Start: Grok reviewing Claude's draft plan..."
+                    f"Debate Round {round_idx} Start: Critic reviewing Claude's draft plan..."
                 )
 
                 critic_prompt = (
-                    "You are GrokReviewer, a critic agent. Analyze the following draft architecture plan proposed by Claude.\n"
+                    "You are CriticReviewer, a critic agent. Analyze the following draft architecture plan proposed by Claude.\n"
                     "Identify potential architectural flaws, security risks, missing requirements, or execution challenges.\n"
                     "Provide constructive criticism and suggest concrete improvements. If the draft architecture plan is correct, complete, and needs no further improvements, include `[APPROVED]` in your response.\n\n"
                     f"Draft Architecture Plan:\n{claude_content}\n\n"
@@ -1601,21 +1602,21 @@ async def run_pipeline(
 
                 if "[APPROVED]" in critic_content:
                     logger.info(
-                        f"Debate Round {round_idx} End: Grok approved the plan with [APPROVED]. Exiting debate loop early."
+                        f"Debate Round {round_idx} End: Critic approved the plan with [APPROVED]. Exiting debate loop early."
                     )
                     break
 
                 logger.info(
-                    f"Debate Round {round_idx}: Grok's critique received. Sending to Claude for refinement..."
+                    f"Debate Round {round_idx}: Critique received. Sending to Claude for refinement..."
                 )
 
                 claude_refine_prompt = (
-                    "You are Claude, the architect agent. Refine your draft architecture plan based on the constructive criticism from GrokReviewer.\n"
+                    "You are Claude, the architect agent. Refine your draft architecture plan based on the constructive criticism from CriticReviewer.\n"
                     "Address the identified issues and incorporate the suggested improvements, producing a final refined architecture plan.\n"
                     "Output the refined plan as EXACTLY ONE ```json fenced block conforming to the same DesignPlan schema "
                     "(project_name, description, and files[] where each file has path + specification) and nothing else.\n\n"
                     f"Previous Draft Plan:\n{claude_content}\n\n"
-                    f"GrokReviewer's Criticism:\n{critic_content}\n\n"
+                    f"CriticReviewer's Criticism:\n{critic_content}\n\n"
                     f"Original Research and Context:\n{claude_prompt}"
                 )
                 try:
@@ -2193,7 +2194,7 @@ async def run_e2e_pipeline(
     max_debate_rounds: int = None,
     distributed: bool = False,
 ):
-    """Execute the E2E automated pipeline (Claude -> Grok critique -> Codex implementation & self-healing -> Tester test generation & self-healing)."""
+    """Execute the E2E automated pipeline (Claude -> critic critique -> Codex implementation & self-healing -> Tester test generation & self-healing)."""
     global DISTRIBUTED_MODE
     DISTRIBUTED_MODE = distributed
 
@@ -2261,18 +2262,18 @@ async def run_e2e_pipeline(
         # the already-produced (and paid-for) plan is safe on disk.
         _write_plan_files(claude_content)
 
-        # Step 2: Grok critique & debate refinement
+        # Step 2: Critic critique & debate refinement (researcher role)
         if max_debate_rounds > 0:
             logger.info(
                 f"--- Starting E2E Debate Refinement (Max Rounds: {max_debate_rounds}) ---"
             )
             for round_idx in range(1, max_debate_rounds + 1):
                 logger.info(
-                    f"E2E Debate Round {round_idx} Start: Grok reviewing Claude's draft plan..."
+                    f"E2E Debate Round {round_idx} Start: Critic reviewing Claude's draft plan..."
                 )
 
                 critic_prompt = (
-                    "You are GrokReviewer, a critic agent. Analyze the following draft plan proposed by Claude.\n"
+                    "You are CriticReviewer, a critic agent. Analyze the following draft plan proposed by Claude.\n"
                     "Identify potential flaws, security risks, missing requirements, or execution challenges.\n"
                     "Provide constructive criticism and suggest concrete improvements. If the draft plan is correct, complete, and needs no further improvements, include `[APPROVED]` in your response.\n\n"
                     f"Draft Plan:\n{claude_content}\n\n"
@@ -2303,19 +2304,19 @@ async def run_e2e_pipeline(
 
                 if "[APPROVED]" in critic_content:
                     logger.info(
-                        f"E2E Debate Round {round_idx} End: Grok approved the plan with [APPROVED]. Exiting debate loop early."
+                        f"E2E Debate Round {round_idx} End: Critic approved the plan with [APPROVED]. Exiting debate loop early."
                     )
                     break
 
                 logger.info(
-                    f"E2E Debate Round {round_idx}: Grok's critique received. Sending to Claude for refinement..."
+                    f"E2E Debate Round {round_idx}: Critique received. Sending to Claude for refinement..."
                 )
 
                 claude_refine_prompt = (
-                    "You are Claude, the architect agent. Refine your draft plan based on the constructive criticism from GrokReviewer.\n"
+                    "You are Claude, the architect agent. Refine your draft plan based on the constructive criticism from CriticReviewer.\n"
                     "Address the identified issues and incorporate the suggested improvements, producing a final refined plan.\n\n"
                     f"Previous Draft Plan:\n{claude_content}\n\n"
-                    f"GrokReviewer's Criticism:\n{critic_content}\n\n"
+                    f"CriticReviewer's Criticism:\n{critic_content}\n\n"
                     f"Original Prompt:\n{prompt}"
                 )
                 try:
@@ -2604,7 +2605,7 @@ async def run_e2e_pipeline(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="5-AI CLI Orchestrator pipeline executing Grok -> Claude -> Antigravity -> Codex -> Tester."
+        description="Multi-agent CLI Orchestrator pipeline executing Research -> Claude -> Antigravity -> Codex -> Tester."
     )
     parser.add_argument(
         "--prompt", required=True, help="Initial research/query prompt for the pipeline"
@@ -2682,7 +2683,9 @@ def main():
 
     # Service URL overrides
     parser.add_argument(
-        "--grok-url", default=None, help="Service URL override for Grok"
+        "--grok-url",
+        default=None,
+        help="Service URL override for the Researcher service (role grok)",
     )
     parser.add_argument(
         "--claude-url", default=None, help="Service URL override for Claude"

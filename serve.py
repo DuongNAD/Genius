@@ -449,7 +449,7 @@ def normalize_roles(roles_str: str) -> list:
 def interactive_prompt() -> list:
     print("=== Antigravity 2.0 Unified Startup Menu ===")
     print("Select specific roles/agents this machine will run (comma-separated):")
-    print("1. grok         - Grok Researcher API (Port 8001)")
+    print("1. grok         - Researcher API (Port 8001)")
     print("2. claude       - Claude Architect API (Port 8002)")
     print("3. codex        - Codex Reviewer API (Port 8003)")
     print("4. tester       - Tester Agent API (Port 8004)")

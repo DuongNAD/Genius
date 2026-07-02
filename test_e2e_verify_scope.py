@@ -35,7 +35,7 @@ async def test_e2e_pytest_is_scoped_per_file(mock_sub, mock_get, mock_post, tmp_
         prompt = payload.get("prompt", "")
         if "plan" in prompt:
             tid = "claude-plan"
-        elif "GrokReviewer" in prompt:
+        elif "CriticReviewer" in prompt:
             tid = "grok-critique"
         elif "unit-test" in prompt:
             tid = "tester-test"

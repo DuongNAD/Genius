@@ -43,6 +43,11 @@ MANIFEST
 /app.py
 /review.md
 /architecture.md
+/audit.md
+/deploy.md
+/plan.md
+/test_generated.py
+/*.md.bak
 *.log
 
 # Generated pipeline project outputs (demo runs; excluded from pytest too)

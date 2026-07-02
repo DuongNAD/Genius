@@ -242,6 +242,9 @@ def test_tester_agent_flow(tmp_path, monkeypatch):
 
 
 def test_skill_bootstrap_grok_researcher(tmp_path, monkeypatch):
+    # This test exercises the grok-backend skill wiring specifically: pin the
+    # researcher role to the grok backend (the default chain is agy-first).
+    monkeypatch.setenv("GENIUS_PROVIDER_GROK", "grok")
     monkeypatch.chdir(tmp_path)
     (tmp_path / "config.yaml").write_text(
         'app:\n  name: "Antigravity Core"\n  version: "2.0"\nmodels:\n  openai: "gpt-4o"\n  anthropic: "claude-3-5-sonnet"\n  grok: "grok-2"\nscanner:\n  chunk_size_limit: 8000\n  exclude_patterns: [".git/"]\n',
@@ -450,7 +453,10 @@ def make_test_headers(api_key: str, body_bytes: bytes) -> dict:
     }
 
 
-def test_grok_api_server():
+def test_grok_api_server(monkeypatch):
+    # Pin the researcher role to the grok backend: the mocked subprocess
+    # output below is grok-envelope shaped (the default chain is agy-first).
+    monkeypatch.setenv("GENIUS_PROVIDER_GROK", "grok")
     grok_app = load_api_app("grok")
     from fastapi.testclient import TestClient
 

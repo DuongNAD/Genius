@@ -384,7 +384,7 @@ async def test_pipeline_early_exit_on_missing_or_empty_output(
             prompt="Build a calculator app", workspace=str(temp_workspace)
         )
 
-    assert "Output file for 'Grok' is empty" in str(exc_info.value)
+    assert "Output file for 'Research' is empty" in str(exc_info.value)
     assert mock_post.call_count == 1
 
 

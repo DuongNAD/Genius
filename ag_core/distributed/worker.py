@@ -155,8 +155,8 @@ class ClientWorker:
                 context = task_data.get("context", {})
 
                 # role alias -> (agent module, agent class, provider-factory
-                # role). Provider selection (incl. GENIUS_PROVIDER_<ROLE> /
-                # GENIUS_PROVIDER_FALLBACK chains) lives in
+                # role). Provider selection (default fallback chains +
+                # explicit GENIUS_PROVIDER_<ROLE> overrides) lives in
                 # ag_core.provider_factory - same wiring as skill_app.
                 ROLE_AGENT_MAP = {
                     "grok": (

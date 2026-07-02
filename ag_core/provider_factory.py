@@ -5,14 +5,16 @@ The three provider construction sites (``ag_core.skill_app.build_agent``,
 all route through :func:`make_provider` so the role -> backend mapping lives in
 one place and can be redirected without code changes:
 
-* ``GENIUS_PROVIDER_<ROLE>`` (e.g. ``GENIUS_PROVIDER_GROK=claude,codex``) -
-  explicit comma-separated backend chain for one role.
-* ``GENIUS_PROVIDER_FALLBACK=1`` (also ``true``/``auto``) - every role uses its
-  :data:`DEFAULT_CHAINS` entry, so a backend that dies at runtime (e.g. the
-  grok CLI returning 403 out-of-credits) is retried on the next backend.
-* Neither set - the legacy single backend per role, bit-identical to the
-  pre-fallback wiring (:func:`make_provider` returns the raw provider, not a
-  :class:`FallbackProvider`).
+* No env knobs set - every role gets its :data:`DEFAULT_CHAINS` fallback
+  chain (a :class:`FallbackProvider`): a backend that dies at runtime is
+  retried on the next backend. The default chains do NOT include the grok
+  backend (the grok CLI is opt-in only; its account is out of credits).
+* ``GENIUS_PROVIDER_<ROLE>`` (e.g. ``GENIUS_PROVIDER_GROK=grok,claude``) -
+  explicit comma-separated backend chain for one role; overrides everything,
+  including bringing the grok backend back.
+* ``GENIUS_PROVIDER_FALLBACK`` - DEPRECATED no-op, accepted for backward
+  compatibility only. Fallback chains are now always the default; setting
+  this variable (truthy or falsy) changes nothing.
 
 Blank env values are treated as unset (``os.environ.get(...) or`` - this repo
 was bitten before by blank vars shipped in ``.env.example``).
@@ -58,37 +60,19 @@ BACKENDS = {
     ),
 }
 
-# role -> preferred backend order when GENIUS_PROVIDER_FALLBACK is enabled.
-# agy participates only here (and via explicit GENIUS_PROVIDER_<ROLE>); the
-# legacy no-env chains are unchanged.
+# role -> default backend order (the no-env default for every role). The grok
+# backend is deliberately absent: it stays registered in BACKENDS for explicit
+# opt-in via GENIUS_PROVIDER_<ROLE>, but no default chain ever invokes it.
+# The "grok" KEY below is the Researcher ROLE id (wired through config, ports
+# and the service registry) - not the grok backend.
 DEFAULT_CHAINS = {
-    "grok": ["grok", "agy", "claude", "codex"],
-    "claude": ["claude", "agy", "codex"],
+    "grok": ["agy", "claude", "codex"],  # Researcher: Antigravity/Gemini first
+    "claude": ["claude", "agy", "codex"],  # Architect
     "codex": ["codex", "claude", "agy"],
     "tester": ["codex", "claude", "agy"],
     "security": ["codex", "claude", "agy"],
     "devops": ["codex", "claude", "agy"],
 }
-
-# role -> the single backend each role used before fallback existed. Used when
-# no env knob is set so the default path constructs the exact same provider
-# class as the legacy per-site wiring.
-LEGACY_BACKENDS = {
-    "grok": "grok",
-    "claude": "claude",
-    "codex": "codex",
-    "tester": "codex",
-    "security": "codex",
-    "devops": "codex",
-}
-
-_TRUTHY = ("1", "true", "auto", "yes", "on")
-
-
-def fallback_enabled() -> bool:
-    """True when GENIUS_PROVIDER_FALLBACK is set to a truthy value."""
-    raw = os.environ.get("GENIUS_PROVIDER_FALLBACK") or ""
-    return raw.strip().lower() in _TRUTHY
 
 
 def _explicit_chain_env(role: str) -> Optional[str]:
@@ -101,9 +85,10 @@ def _explicit_chain_env(role: str) -> Optional[str]:
 def resolve_chain(role: str) -> List[str]:
     """Resolve the ordered backend chain for ``role``.
 
-    Precedence: explicit ``GENIUS_PROVIDER_<ROLE>`` > ``GENIUS_PROVIDER_FALLBACK``
-    (auto default chain) > legacy single backend. Raises :class:`ValueError`
-    for unknown roles or unknown backend names in the explicit env value.
+    Precedence: explicit ``GENIUS_PROVIDER_<ROLE>`` > the role's
+    :data:`DEFAULT_CHAINS` entry. ``GENIUS_PROVIDER_FALLBACK`` is a deprecated
+    no-op and never consulted. Raises :class:`ValueError` for unknown roles or
+    unknown backend names in the explicit env value.
     """
     role = role.lower()
     if role not in DEFAULT_CHAINS:
@@ -124,24 +109,19 @@ def resolve_chain(role: str) -> List[str]:
             )
         return chain
 
-    if fallback_enabled():
-        return list(DEFAULT_CHAINS[role])
-
-    return [LEGACY_BACKENDS[role]]
+    return list(DEFAULT_CHAINS[role])
 
 
 def chain_source(role: str) -> Optional[str]:
     """Which knob produced the chain for ``role`` (for diagnostics output).
 
-    Returns ``"GENIUS_PROVIDER_<ROLE>"``, ``"GENIUS_PROVIDER_FALLBACK=<val>"``
-    or ``None`` for the legacy default.
+    Returns ``"GENIUS_PROVIDER_<ROLE>"`` for an explicit override, or ``None``
+    for the built-in default chain (``GENIUS_PROVIDER_FALLBACK`` is a
+    deprecated no-op and never reported).
     """
     role = role.lower()
     if _explicit_chain_env(role):
         return f"GENIUS_PROVIDER_{role.upper()}"
-    if fallback_enabled():
-        raw = (os.environ.get("GENIUS_PROVIDER_FALLBACK") or "").strip()
-        return f"GENIUS_PROVIDER_FALLBACK={raw}"
     return None
 
 
@@ -247,21 +227,27 @@ class FallbackProvider:
         ) from last_exc
 
 
-def make_provider(role: str, config, legacy_backend: Optional[str] = None):
+def make_provider(role: str, config, default_chain: Optional[List[str]] = None):
     """Build the provider (or fallback chain) for ``role`` from ``config``.
 
-    ``legacy_backend`` overrides the no-env single backend for call sites whose
-    historical wiring differs from :data:`LEGACY_BACKENDS` (the MCP ``deploy``
-    tool has always used the claude backend for the devops role).
+    ``default_chain`` overrides the role's :data:`DEFAULT_CHAINS` entry for
+    call sites whose historical wiring differs (the MCP ``deploy`` tool keeps
+    its claude-first tradition with ``["claude", "codex", "agy"]``). An
+    explicit ``GENIUS_PROVIDER_<ROLE>`` env chain still wins over it.
 
-    Single-backend chains return the raw provider instance - zero behavior
-    change for the default path. Multi-backend chains return a lazy
-    :class:`FallbackProvider`.
+    Single-backend chains return the raw provider instance; multi-backend
+    chains return a lazy :class:`FallbackProvider`.
     """
     role = role.lower()
     chain = resolve_chain(role)
-    if legacy_backend and not _explicit_chain_env(role) and not fallback_enabled():
-        chain = [legacy_backend]
+    if default_chain and not _explicit_chain_env(role):
+        unknown = sorted(set(default_chain) - set(BACKENDS))
+        if unknown:
+            raise ValueError(
+                f"default_chain for role {role!r} names unknown backend(s) "
+                f"{unknown}; valid backends: {', '.join(sorted(BACKENDS))}"
+            )
+        chain = [name.lower() for name in default_chain]
     if len(chain) == 1:
         return build_backend(chain[0], config)
     return FallbackProvider(

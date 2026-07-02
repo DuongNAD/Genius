@@ -322,7 +322,10 @@ def test_r15_orchestrator_progress_path():
 # R16. Inconsistent Agent Provider Config for DevOps Agent
 @pytest.mark.asyncio
 async def test_r16_devops_provider_config():
-    # Verify in mcp_server that deploy agent name maps to AnthropicProvider
+    # Verify in mcp_server that the deploy tool keeps its claude-first
+    # tradition: a fallback chain whose primary is the claude backend.
+    from ag_core.provider_factory import FallbackProvider
+
     with patch("mcp_server.DevOpsAgent") as mock_agent_class:
         mock_agent_instance = MagicMock()
         mock_agent_instance.run = AsyncMock(return_value="deployed")
@@ -332,7 +335,9 @@ async def test_r16_devops_provider_config():
 
         mock_agent_class.assert_called_once()
         args, kwargs = mock_agent_class.call_args
-        assert isinstance(kwargs.get("provider"), AnthropicProvider)
+        provider = kwargs.get("provider")
+        assert isinstance(provider, FallbackProvider)
+        assert provider.backend_names == ["claude", "codex", "agy"]
 
 
 # R17. Memory-Resident Registry Import across Process Isolation

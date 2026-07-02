@@ -36,7 +36,7 @@ def create_mock_http_response(status_code, content_str, url="http://localhost/mo
 @patch("httpx.AsyncClient.get", new_callable=MagicMock)
 @patch("orchestrator.run_subprocess", new_callable=MagicMock)
 async def test_e2e_happy_path(mock_run_subproc, mock_get, mock_post, temp_workspace):
-    """Test happy path: Claude -> Grok approved -> Codex code -> Tester test -> execution success."""
+    """Test happy path: Claude -> critic approved -> Codex code -> Tester test -> execution success."""
 
     # 1. Mock call_api posting task
     async def post_side_effect(url, **kwargs):
@@ -48,7 +48,7 @@ async def test_e2e_happy_path(mock_run_subproc, mock_get, mock_post, temp_worksp
         task_id = "task-id"
         if "plan" in prompt:
             task_id = "claude-plan"
-        elif "GrokReviewer" in prompt:
+        elif "CriticReviewer" in prompt:
             task_id = "grok-critique"
         elif "unit-test" in prompt:
             task_id = "tester-test"

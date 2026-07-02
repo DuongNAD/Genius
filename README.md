@@ -28,7 +28,7 @@ Genius là một hệ thống siêu tác tử (Agentic Framework) tự trị chu
 ## 🤖 Đội hình Tác tử (Agents)
 
 Hệ thống có 6 Tác tử cốt lõi, mỗi tác tử chạy trên một API Port độc lập:
-- **Grok Researcher** (Port 8001): Phân tích tài liệu, thu thập yêu cầu (Sử dụng Grok CLI, hỗ trợ auto-login qua session-id).
+- **Researcher** (Port 8001): Phân tích tài liệu, thu thập yêu cầu. Mặc định chạy trên **Antigravity/Gemini** (CLI `agy`), tự động fallback sang `claude` rồi `codex`; backend `grok` chỉ là lựa chọn opt-in (bật qua `GENIUS_PROVIDER_GROK=grok,...`).
 - **Claude Architect** (Port 8002): Kiến trúc sư thiết kế hệ thống, lên bản vẽ thư mục và logic.
 - **Codex Reviewer** (Port 8003): Chuyên gia code và refactor, tích hợp siêu sâu qua Codex Desktop CLI JSONL streams.
 - **Tester Agent** (Port 8004): QA tự động viết Unit/Integration/E2E test.
@@ -93,8 +93,8 @@ Server hỗ trợ đầy đủ handshake MCP (`initialize` / `notifications/init
 | `research`, `design`, `code`, `unit_test`, `security_audit`, `deploy` | Gọi từng tác tử đơn lẻ (in-process) |
 | `orchestrate` | **Chạy TOÀN BỘ pipeline** (research → design → code → test + security + deploy). Trả về `job_id` ngay lập tức |
 | `orchestrate_status` | Poll trạng thái job (`running` / `completed` / `failed`), kèm `elapsed_seconds`, tiến độ từng giai đoạn (`stages`: done/pending suy ra từ artifact trên đĩa) và `artifacts_ready` (các URI đọc được ngay) |
-| `doctor` | Kiểm tra sẵn sàng (preflight): CLI grok/claude/codex/agy, `SKILL_API_KEY`, chuỗi fallback provider. **Nên gọi trước `orchestrate`** — trả về báo cáo READY / NOT READY, không có side effect |
-| `debate` | Tinh chỉnh bản thiết kế theo kiểu phản biện: Grok phê bình ↔ Claude chỉnh sửa (tối đa 3 vòng, dừng sớm khi critic trả lời `[APPROVED]`). Chạy in-process, không cần Skill Server |
+| `doctor` | Kiểm tra sẵn sàng (preflight): CLI agy/claude/codex (grok tuỳ chọn), `SKILL_API_KEY`, chuỗi fallback provider. **Nên gọi trước `orchestrate`** — trả về báo cáo READY / NOT READY, không có side effect |
+| `debate` | Tinh chỉnh bản thiết kế theo kiểu phản biện: critic role Researcher (mặc định agy/Gemini) phê bình ↔ Claude chỉnh sửa (tối đa 3 vòng, dừng sớm khi critic trả lời `[APPROVED]`). Chạy in-process, không cần Skill Server |
 | `review` | Review một đoạn code bất kỳ bằng tác tử Codex (in-process, **không ghi file**) |
 
 Ngoài tool, server còn expose **MCP resources**: các artifact của pipeline (`research.md`, `design.md`, `review.md`, `audit.md`, `deploy.md`, `plan.md` và bản lưu `.bak` của chúng) dưới dạng URI `genius://artifacts/<tên-file>` (mimeType `text/markdown`). Antigravity có thể `resources/list` / `resources/read` để đọc trực tiếp kết quả từng giai đoạn — chỉ đúng danh sách artifact trên (whitelist cứng, không bao giờ lộ file khác của workspace); URI sai hoặc file chưa tồn tại trả về lỗi `-32002`.
@@ -116,7 +116,7 @@ Thêm Genius vào file cấu hình MCP của Antigravity tại `~/.gemini/antigr
 ```
 
 - Dùng **đường dẫn tuyệt đối tới `python.exe`** (do `python` thường không nằm trong PATH; có thể lấy bằng `py -c "import sys; print(sys.executable)"`).
-- **Không cần khối `env` chứa API key**: các CLI tự xác thực (`grok login`, app desktop của Codex/Claude), còn `skill_api_key` được đọc nhất quán từ `config.yaml` ở cả hai phía.
+- **Không cần khối `env` chứa API key**: các CLI tự xác thực (`agy` dùng chung phiên đăng nhập Antigravity IDE, app desktop của Codex/Claude), còn `skill_api_key` được đọc nhất quán từ `config.yaml` ở cả hai phía.
 - Sau khi sửa file, **khởi động lại Antigravity** để nó nạp MCP server `genius`.
 
 ### Quy trình dùng từ Antigravity
@@ -126,22 +126,27 @@ Thêm Genius vào file cấu hình MCP của Antigravity tại `~/.gemini/antigr
 
 ---
 
-## 🛟 Chạy không cần Grok (Claude CLI + Codex + Antigravity)
+## 🔌 Chuỗi provider dự phòng (mặc định)
 
-Nếu Grok CLI hết credits (lỗi `403 spending-limit`) hoặc chưa cài, Genius vẫn chạy đầy đủ pipeline với các backend còn lại nhờ cơ chế **provider fallback**:
+Genius **mặc định** chạy mọi role trên một chuỗi backend dự phòng (fallback chain) — không cần set biến môi trường nào. Backend lỗi giữa chừng (403, timeout, CLI chết) sẽ tự động fall-through sang backend kế tiếp, và backend thành công được "ghi nhớ" cho các lần gọi sau trong cùng tiến trình:
+
+| Role | Chuỗi mặc định |
+|------|----------------|
+| Researcher (`grok`) | `agy → claude → codex` |
+| Architect (`claude`) | `claude → agy → codex` |
+| Codex / Tester / Security / DevOps | `codex → claude → agy` |
+
+- **Backend `agy`**: Antigravity 2.0 (CLI `agy`, chính là agent Gemini của Antigravity IDE) — primary mặc định của Researcher. Không cần API key — `agy` dùng chung phiên đăng nhập với Antigravity IDE. Mặc định tìm trong PATH rồi tới `%LOCALAPPDATA%\agy\bin\agy.exe`; ghi đè bằng biến `GENIUS_AGY_PATH`. `agy` chạy với `--sandbox` (hạn chế terminal) mặc định; tắt bằng `GENIUS_AGY_SANDBOX=0`.
+- **Backend `grok` là opt-in (legacy)**: không chuỗi mặc định nào dùng nó (CLI grok đã hết credits). Muốn dùng lại, chỉ định tường minh cho role cần thiết, ví dụ:
 
 ```bash
-# Cách 1 (khuyên dùng): bật fallback tự động — role nào lỗi runtime sẽ tự chuyển backend kế tiếp
-set GENIUS_PROVIDER_FALLBACK=1
-
-# Cách 2: chỉ định tường minh chuỗi backend cho role research (bỏ hẳn grok)
-set GENIUS_PROVIDER_GROK=agy,claude
+# Ghi đè chuỗi cho role research: grok làm primary, agy dự phòng
+set GENIUS_PROVIDER_GROK=grok,agy
 ```
 
-- **Backend `agy` mới**: Antigravity 2.0 (CLI `agy`, chính là agent Gemini của Antigravity IDE) làm backend Gemini thứ 4 bên cạnh `grok`/`claude`/`codex`. Không cần API key — `agy` dùng chung phiên đăng nhập với Antigravity IDE. Mặc định tìm trong PATH rồi tới `%LOCALAPPDATA%\agy\bin\agy.exe`; ghi đè bằng biến `GENIUS_AGY_PATH`. `agy` chạy với `--sandbox` (hạn chế terminal) mặc định; tắt bằng `GENIUS_AGY_SANDBOX=0`.
-- Chuỗi mặc định khi bật fallback: `grok → agy → claude → codex` (research), `claude → agy → codex` (architect), `codex → claude → agy` (các role còn lại). Backend lỗi giữa chừng (403, timeout, CLI chết) sẽ tự động fall-through, và backend thành công được "ghi nhớ" cho các lần gọi sau trong cùng tiến trình. Chú ý: khi **không** bật fallback (chạy legacy), `agy` chỉ tham gia khi được nêu tường minh trong `GENIUS_PROVIDER_<ROLE>`.
-- Hai biến này áp dụng cho **cả ba đường gọi**: Skill Server (`serve.py`), **MCP/Antigravity** (`mcp_server.py`) và distributed worker — chỉ cần set trong `.env` hoặc trong khối `env` của `mcp_config.json`.
+- `GENIUS_PROVIDER_<ROLE>` (comma-separated: `grok`, `agy`, `claude`, `codex`) ghi đè chuỗi mặc định của từng role. Biến `GENIUS_PROVIDER_FALLBACK` cũ đã **deprecated**: chuỗi dự phòng giờ là mặc định nên biến này được chấp nhận nhưng không còn tác dụng.
+- Các biến này áp dụng cho **cả ba đường gọi**: Skill Server (`serve.py`), **MCP/Antigravity** (`mcp_server.py`) và distributed worker — chỉ cần set trong `.env` hoặc trong khối `env` của `mcp_config.json`.
 - Kiểm tra chuỗi hiệu lực của từng role (và đường dẫn `agy` được resolve): `python serve.py --doctor`.
 
 ---
-> **Lưu ý V2**: Hệ thống có khả năng fallback thông minh. Nếu thiếu API Key, GrokProvider sẽ tự động mở login prompt; nếu mã sinh ra bị độc hại, vòng lặp `Self-Healing` sẽ tự động vá lỗi thông qua phản hồi từ `pytest` và `flake8`.
+> **Lưu ý V2**: Hệ thống có khả năng fallback thông minh ở mọi role (bảng chuỗi ở trên); nếu mã sinh ra bị lỗi, vòng lặp `Self-Healing` sẽ tự động vá lỗi thông qua phản hồi từ `pytest` và `flake8`. (Backend `grok` opt-in vẫn giữ auto-login: chỉ khi được gọi tới và thiếu API key, GrokProvider mới mở login prompt.)

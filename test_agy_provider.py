@@ -377,9 +377,10 @@ def test_doctor_probe_table_includes_agy():
     assert any("Antigravity" in dep for dep in entry[2])
 
 
-def test_doctor_missing_agy_is_not_fatal_without_chains():
-    # No env knob set: no chain references agy, so a missing agy must not
-    # flip the doctor to NOT READY.
+def test_doctor_missing_agy_is_not_fatal():
+    # agy is an optional backend: every default chain still contains
+    # claude + codex, so a missing agy degrades chains but must not flip the
+    # doctor to NOT READY.
     results = _BASE_OK + [_r("agy", "MISSING")]
     lines, code = diagnostics.report_lines(results, skill_key_ok=True)
     text = "\n".join(lines)
@@ -388,8 +389,9 @@ def test_doctor_missing_agy_is_not_fatal_without_chains():
     assert any("agy" in ln and "[MISSING]" in ln for ln in lines)
 
 
-def test_doctor_warns_when_fallback_chain_references_missing_agy(monkeypatch):
-    monkeypatch.setenv("GENIUS_PROVIDER_FALLBACK", "1")
+def test_doctor_warns_when_default_chain_references_missing_agy():
+    # The default researcher chain is agy-first: a missing agy must produce a
+    # [warn] naming the surviving fallback backend.
     results = _BASE_OK + [_r("agy", "MISSING")]
     lines, code = diagnostics.report_lines(results, skill_key_ok=True)
     assert code == 0  # degraded, not fatal
@@ -398,9 +400,18 @@ def test_doctor_warns_when_fallback_chain_references_missing_agy(monkeypatch):
     )
 
 
-def test_doctor_missing_required_cli_still_fatal():
-    # The optional-backend carve-out must not soften grok/claude/codex.
+def test_doctor_missing_grok_is_not_fatal():
+    # grok is opt-in only (in no default chain): its absence never makes the
+    # doctor NOT READY.
     results = [_r("grok", "MISSING"), _r("claude", "OK"), _r("codex", "OK")]
+    lines, code = diagnostics.report_lines(results, skill_key_ok=True)
+    assert code == 0
+    assert "NOT READY" not in "\n".join(lines)
+
+
+def test_doctor_missing_required_cli_still_fatal():
+    # The optional-backend carve-out must not soften claude/codex.
+    results = [_r("grok", "OK"), _r("claude", "OK"), _r("codex", "MISSING")]
     _, code = diagnostics.report_lines(results, skill_key_ok=True)
     assert code == 1
 

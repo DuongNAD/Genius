@@ -34,20 +34,20 @@ class CallToolRequest(BaseModel):
     arguments: Dict[str, Any]
 
 
-# tool name -> (provider-factory role, agent class *name*, legacy backend
-# override). Provider selection (incl. GENIUS_PROVIDER_<ROLE> /
-# GENIUS_PROVIDER_FALLBACK chains) lives in ag_core.provider_factory. The agent
-# class is looked up through module globals at call time so tests can patch
-# e.g. ``mcp_server.DevOpsAgent``. The MCP ``deploy`` tool has always built its
-# devops agent on the claude backend (unlike the codex-backed skill server /
-# worker paths), so its legacy default is pinned to claude.
+# tool name -> (provider-factory role, agent class *name*, default-chain
+# override). Provider selection (incl. explicit GENIUS_PROVIDER_<ROLE> chains)
+# lives in ag_core.provider_factory. The agent class is looked up through
+# module globals at call time so tests can patch e.g. ``mcp_server.DevOpsAgent``.
+# The MCP ``deploy`` tool has always built its devops agent on the claude
+# backend (unlike the codex-first skill server / worker paths), so its default
+# chain keeps that claude-first tradition.
 TOOL_AGENTS = {
     "research": ("grok", "GrokResearcherAgent", None),
     "design": ("claude", "ClaudeArchitectAgent", None),
     "code": ("codex", "CodexReviewerAgent", None),
     "unit_test": ("tester", "TesterAgent", None),
     "security_audit": ("security", "SecurityAgent", None),
-    "deploy": ("devops", "DevOpsAgent", "claude"),
+    "deploy": ("devops", "DevOpsAgent", ["claude", "codex", "agy"]),
 }
 
 
@@ -57,9 +57,9 @@ async def execute_agent(
     if agent_name not in TOOL_AGENTS:
         raise ValueError(f"Unknown agent: {agent_name}")
 
-    role, agent_cls_name, legacy_backend = TOOL_AGENTS[agent_name]
+    role, agent_cls_name, default_chain = TOOL_AGENTS[agent_name]
     config = load_config()
-    provider = make_provider(role, config, legacy_backend=legacy_backend)
+    provider = make_provider(role, config, default_chain=default_chain)
     agent_class = globals()[agent_cls_name]
     agent = agent_class(provider=provider, config=config, output_file="None")
 
@@ -83,28 +83,28 @@ async def _run_doctor_report() -> str:
     return "\n".join(lines)
 
 
-# Same convention as the orchestrator's Grok<->Claude debate loop: the critic
-# signals "no further changes needed" by including this marker verbatim.
+# Same convention as the orchestrator's critic<->architect debate loop: the
+# critic signals "no further changes needed" by including this marker verbatim.
 DEBATE_APPROVAL_MARKER = "[APPROVED]"
 MAX_DEBATE_ROUNDS = 3
 
 
 async def _run_debate(design: str, prompt: str, rounds: int) -> str:
-    """In-process Grok-critiques / Claude-refines exchange over a draft design.
+    """In-process critic-critiques / Claude-refines exchange over a draft design.
 
     Both agents are built through execute_agent (make_provider role wiring, so
-    per-role fallback chains apply): the critic uses the grok role, the refiner
-    the claude role. Early-exits when the critic answers with
-    :data:`DEBATE_APPROVAL_MARKER`. Returns a JSON payload with the refined
-    design and a per-round summary.
+    per-role fallback chains apply): the critic uses the researcher role
+    (agy/Gemini by default), the refiner the claude role. Early-exits when the
+    critic answers with :data:`DEBATE_APPROVAL_MARKER`. Returns a JSON payload
+    with the refined design and a per-round summary.
     """
     current = design
     approved = False
     rounds_summary: List[Dict[str, Any]] = []
     for round_idx in range(1, rounds + 1):
         critic_prompt = (
-            "You are GrokReviewer, a critic agent. Analyze the following draft "
-            "design proposed by Claude.\n"
+            "You are CriticReviewer, a critic agent. Analyze the following "
+            "draft design proposed by Claude.\n"
             "Identify potential architectural flaws, security risks, missing "
             "requirements, or execution challenges.\n"
             "Provide constructive criticism and suggest concrete improvements. "
@@ -125,11 +125,11 @@ async def _run_debate(design: str, prompt: str, rounds: int) -> str:
             break
         refine_prompt = (
             "You are Claude, the architect agent. Refine your draft design "
-            "based on the constructive criticism from GrokReviewer.\n"
+            "based on the constructive criticism from CriticReviewer.\n"
             "Address the identified issues and incorporate the suggested "
             "improvements, producing a final refined design.\n\n"
             f"Previous Draft Design:\n{current}\n\n"
-            f"GrokReviewer's Criticism:\n{critique}\n\n"
+            f"CriticReviewer's Criticism:\n{critique}\n\n"
             f"Original Prompt:\n{prompt}"
         )
         current = await execute_agent("design", refine_prompt, {})
@@ -149,9 +149,9 @@ async def _run_review(code: str, instructions: str) -> str:
     with the submitted code as the only context (no workspace scan, no file
     writes thanks to output_file="None").
     """
-    role, agent_cls_name, legacy_backend = TOOL_AGENTS["code"]
+    role, agent_cls_name, default_chain = TOOL_AGENTS["code"]
     config = load_config()
-    provider = make_provider(role, config, legacy_backend=legacy_backend)
+    provider = make_provider(role, config, default_chain=default_chain)
     agent_class = globals()[agent_cls_name]
     agent = agent_class(provider=provider, config=config, output_file="None")
 
@@ -308,18 +308,20 @@ TOOLS = [
         "name": "doctor",
         "description": (
             "Preflight readiness check for Genius. Verifies the local vendor "
-            "CLIs (grok/claude/codex), SKILL_API_KEY, and the per-role "
-            "provider fallback chains, and returns a text report ending in "
-            "READY or NOT READY. Call this FIRST to check whether Genius is "
-            "ready before calling orchestrate. Read-only, no side effects."
+            "CLIs (agy/claude/codex, grok optional), SKILL_API_KEY, and the "
+            "per-role provider fallback chains, and returns a text report "
+            "ending in READY or NOT READY. Call this FIRST to check whether "
+            "Genius is ready before calling orchestrate. Read-only, no side "
+            "effects."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "debate",
         "description": (
-            "Adversarially refine a draft design: a Grok critic reviews it "
-            "and a Claude architect refines it, for up to 'rounds' exchanges "
+            "Adversarially refine a draft design: a researcher-role critic "
+            "(agy/Gemini by default) reviews it and a Claude architect "
+            "refines it, for up to 'rounds' exchanges "
             "(early exit when the critic replies [APPROVED]). Runs in-process "
             "(no skill servers needed). Returns JSON with the refined design, "
             "an 'approved' flag, and a per-round summary."
@@ -372,7 +374,9 @@ TOOLS = [
 RESOURCE_URI_PREFIX = "genius://artifacts/"
 
 _RESOURCE_ARTIFACTS = {
-    "research.md": "Requirements research produced by the research stage (Grok).",
+    "research.md": (
+        "Requirements research produced by the research stage (researcher role)."
+    ),
     "design.md": "Architecture design produced by the design stage (Claude).",
     "review.md": "Code review + lint/test logs produced by the code stage (Codex).",
     "audit.md": "Security audit produced by the security stage.",

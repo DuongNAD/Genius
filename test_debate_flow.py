@@ -128,8 +128,8 @@ async def test_debate_flow_instant_approval(mock_exec, mock_call_api, temp_works
     # Check sequence
     assert "8001" in calls_recorded[0][0]  # Grok research
     assert "8002" in calls_recorded[1][0]  # Claude initial
-    assert "8001" in calls_recorded[2][0]  # Grok critic round 1
-    assert "You are GrokReviewer" in calls_recorded[2][1]
+    assert "8001" in calls_recorded[2][0]  # Researcher critic round 1
+    assert "You are CriticReviewer" in calls_recorded[2][1]
 
     # Next call should skip Claude refine round 1 and Grok critic round 2, going straight to Codex review (8003)
     assert "8003" in calls_recorded[3][0]
