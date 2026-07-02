@@ -13,15 +13,17 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 from ag_core.config import load_config
-from ag_core.providers.grok_provider import GrokProvider
-from ag_core.providers.anthropic_provider import AnthropicProvider
-from ag_core.providers.openai_provider import OpenAIProvider
-from ag_core.agents.grok_researcher import GrokResearcherAgent
-from ag_core.agents.claude_architect import ClaudeArchitectAgent
-from ag_core.agents.codex_reviewer import CodexReviewerAgent
-from ag_core.agents.tester import TesterAgent
-from ag_core.agents.security_agent import SecurityAgent
-from ag_core.agents.devops_agent import DevOpsAgent
+from ag_core.provider_factory import make_provider
+
+# The agent classes are resolved through module globals at call time (see
+# execute_agent) so tests can patch e.g. ``mcp_server.DevOpsAgent`` - flake8
+# cannot see that usage, hence the noqa markers.
+from ag_core.agents.grok_researcher import GrokResearcherAgent  # noqa: F401
+from ag_core.agents.claude_architect import ClaudeArchitectAgent  # noqa: F401
+from ag_core.agents.codex_reviewer import CodexReviewerAgent  # noqa: F401
+from ag_core.agents.tester import TesterAgent  # noqa: F401
+from ag_core.agents.security_agent import SecurityAgent  # noqa: F401
+from ag_core.agents.devops_agent import DevOpsAgent  # noqa: F401
 
 app = FastAPI(title="Genius MCP Server")
 
@@ -31,47 +33,37 @@ class CallToolRequest(BaseModel):
     arguments: Dict[str, Any]
 
 
+# tool name -> (provider-factory role, agent class *name*, legacy backend
+# override). Provider selection (incl. GENIUS_PROVIDER_<ROLE> /
+# GENIUS_PROVIDER_FALLBACK chains) lives in ag_core.provider_factory. The agent
+# class is looked up through module globals at call time so tests can patch
+# e.g. ``mcp_server.DevOpsAgent``. The MCP ``deploy`` tool has always built its
+# devops agent on the claude backend (unlike the codex-backed skill server /
+# worker paths), so its legacy default is pinned to claude.
+TOOL_AGENTS = {
+    "research": ("grok", "GrokResearcherAgent", None),
+    "design": ("claude", "ClaudeArchitectAgent", None),
+    "code": ("codex", "CodexReviewerAgent", None),
+    "unit_test": ("tester", "TesterAgent", None),
+    "security_audit": ("security", "SecurityAgent", None),
+    "deploy": ("devops", "DevOpsAgent", "claude"),
+}
+
+
 async def execute_agent(
     agent_name: str, prompt: str, context: Dict[str, str] = None
 ) -> str:
-    config = load_config()
-    if agent_name == "research":
-        provider = GrokProvider(
-            api_key=config.grok_api_key, model_name=config.models.grok
-        )
-        agent = GrokResearcherAgent(
-            provider=provider, config=config, output_file="None"
-        )
-    elif agent_name == "design":
-        provider = AnthropicProvider(
-            api_key=config.anthropic_api_key, model_name=config.models.anthropic
-        )
-        agent = ClaudeArchitectAgent(
-            provider=provider, config=config, output_file="None"
-        )
-    elif agent_name == "code":
-        provider = OpenAIProvider(
-            api_key=config.openai_api_key, model_name=config.models.openai
-        )
-        agent = CodexReviewerAgent(provider=provider, config=config, output_file="None")
-        prompt = f"/code {prompt}"
-    elif agent_name == "unit_test":
-        provider = OpenAIProvider(
-            api_key=config.openai_api_key, model_name=config.models.openai
-        )
-        agent = TesterAgent(provider=provider, config=config, output_file="None")
-    elif agent_name == "security_audit":
-        provider = OpenAIProvider(
-            api_key=config.openai_api_key, model_name=config.models.openai
-        )
-        agent = SecurityAgent(provider=provider, config=config, output_file="None")
-    elif agent_name == "deploy":
-        provider = AnthropicProvider(
-            api_key=config.anthropic_api_key, model_name=config.models.anthropic
-        )
-        agent = DevOpsAgent(provider=provider, config=config, output_file="None")
-    else:
+    if agent_name not in TOOL_AGENTS:
         raise ValueError(f"Unknown agent: {agent_name}")
+
+    role, agent_cls_name, legacy_backend = TOOL_AGENTS[agent_name]
+    config = load_config()
+    provider = make_provider(role, config, legacy_backend=legacy_backend)
+    agent_class = globals()[agent_cls_name]
+    agent = agent_class(provider=provider, config=config, output_file="None")
+
+    if agent_name == "code":
+        prompt = f"/code {prompt}"
 
     return await agent.run(prompt=prompt, context_data=context)
 

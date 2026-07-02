@@ -120,4 +120,22 @@ Thêm Genius vào file cấu hình MCP của Antigravity tại `~/.gemini/antigr
 3. Gọi `orchestrate_status` với `job_id` để theo dõi, đến khi `status = completed` thì nhận artifacts (research/design/code/review/tests/security/deploy).
 
 ---
+
+## 🛟 Chạy không cần Grok (chỉ Claude CLI + Codex)
+
+Nếu Grok CLI hết credits (lỗi `403 spending-limit`) hoặc chưa cài, Genius vẫn chạy đầy đủ pipeline chỉ với Claude CLI + Codex nhờ cơ chế **provider fallback**:
+
+```bash
+# Cách 1 (khuyên dùng): bật fallback tự động — role nào lỗi runtime sẽ tự chuyển backend kế tiếp
+set GENIUS_PROVIDER_FALLBACK=1
+
+# Cách 2: chỉ định tường minh chuỗi backend cho role research (bỏ hẳn grok)
+set GENIUS_PROVIDER_GROK=claude,codex
+```
+
+- Chuỗi mặc định khi bật fallback: `grok → claude → codex` (research), `claude ↔ codex` (các role còn lại). Backend lỗi giữa chừng (403, timeout, CLI chết) sẽ tự động fall-through, và backend thành công được "ghi nhớ" cho các lần gọi sau trong cùng tiến trình.
+- Hai biến này áp dụng cho **cả ba đường gọi**: Skill Server (`serve.py`), **MCP/Antigravity** (`mcp_server.py`) và distributed worker — chỉ cần set trong `.env` hoặc trong khối `env` của `mcp_config.json`.
+- Kiểm tra chuỗi hiệu lực của từng role: `python serve.py --doctor`.
+
+---
 > **Lưu ý V2**: Hệ thống có khả năng fallback thông minh. Nếu thiếu API Key, GrokProvider sẽ tự động mở login prompt; nếu mã sinh ra bị độc hại, vòng lặp `Self-Healing` sẽ tự động vá lỗi thông qua phản hồi từ `pytest` và `flake8`.

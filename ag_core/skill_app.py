@@ -10,7 +10,6 @@ The agent/provider wiring mirrors ``ag_core.distributed.worker.execute_task``
 """
 
 import importlib
-import os
 import uuid
 from typing import Any, Optional
 
@@ -18,60 +17,19 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from ag_core.config import load_config
+from ag_core.provider_factory import make_provider
 from ag_core.utils.rate_limiter import rate_limit_dependency
 from ag_core.utils.security import checksum_middleware, verify_api_key
 
-# role -> (agent module, agent class, provider module, provider class,
-#          config prefix, default model)
+# role -> (agent module, agent class). Provider selection lives in
+# ag_core.provider_factory (role -> backend chain, env-overridable).
 ROLE_MAP = {
-    "grok": (
-        "ag_core.agents.grok_researcher",
-        "GrokResearcherAgent",
-        "ag_core.providers.grok_provider",
-        "GrokProvider",
-        "grok",
-        "grok-build-0.1",
-    ),
-    "claude": (
-        "ag_core.agents.claude_architect",
-        "ClaudeArchitectAgent",
-        "ag_core.providers.anthropic_provider",
-        "AnthropicProvider",
-        "anthropic",
-        "claude-sonnet-4-6",
-    ),
-    "codex": (
-        "ag_core.agents.codex_reviewer",
-        "CodexReviewerAgent",
-        "ag_core.providers.openai_provider",
-        "OpenAIProvider",
-        "openai",
-        "gpt-4o",
-    ),
-    "tester": (
-        "ag_core.agents.tester",
-        "TesterAgent",
-        "ag_core.providers.openai_provider",
-        "OpenAIProvider",
-        "openai",
-        "gpt-4o",
-    ),
-    "security": (
-        "ag_core.agents.security_agent",
-        "SecurityAgent",
-        "ag_core.providers.openai_provider",
-        "OpenAIProvider",
-        "openai",
-        "gpt-4o",
-    ),
-    "devops": (
-        "ag_core.agents.devops_agent",
-        "DevOpsAgent",
-        "ag_core.providers.openai_provider",
-        "OpenAIProvider",
-        "openai",
-        "gpt-4o",
-    ),
+    "grok": ("ag_core.agents.grok_researcher", "GrokResearcherAgent"),
+    "claude": ("ag_core.agents.claude_architect", "ClaudeArchitectAgent"),
+    "codex": ("ag_core.agents.codex_reviewer", "CodexReviewerAgent"),
+    "tester": ("ag_core.agents.tester", "TesterAgent"),
+    "security": ("ag_core.agents.security_agent", "SecurityAgent"),
+    "devops": ("ag_core.agents.devops_agent", "DevOpsAgent"),
 }
 
 
@@ -103,17 +61,11 @@ def build_agent(role: str, stateless: bool = True):
     if role not in ROLE_MAP:
         raise ValueError(f"Unknown role: {role}")
 
-    agent_mod, agent_cls, prov_mod, prov_cls, prefix, default_model = ROLE_MAP[role]
+    agent_mod, agent_cls = ROLE_MAP[role]
     agent_class = getattr(importlib.import_module(agent_mod), agent_cls)
-    provider_class = getattr(importlib.import_module(prov_mod), prov_cls)
 
     config = load_config()
-    provider_key = getattr(config, f"{prefix}_api_key", None) or os.getenv(
-        f"{prefix.upper()}_API_KEY", ""
-    )
-    model_name = getattr(config.models, prefix, default_model)
-
-    provider = provider_class(api_key=provider_key, model_name=model_name)
+    provider = make_provider(role, config)
 
     agent_kwargs = {"provider": provider, "config": config}
     if stateless:

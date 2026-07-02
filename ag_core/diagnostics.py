@@ -18,6 +18,7 @@ import os
 import shutil
 import sys
 
+from ag_core import provider_factory
 from ag_core.providers.grok_provider import resolve_grok_cli
 from ag_core.providers.anthropic_provider import resolve_claude_cli
 from ag_core.providers.openai_provider import resolve_codex_cli
@@ -148,6 +149,37 @@ def _header_lines():
     return lines, bool(skill_key)
 
 
+def provider_chain_lines(results):
+    """Render each role's effective provider chain (env-knob aware).
+
+    Pure (reads only env + the supplied check ``results``). Flags a role whose
+    PRIMARY backend CLI failed to resolve when a resolvable fallback backend
+    exists further down its chain.
+    """
+    lines = [
+        "Provider chains (override: GENIUS_PROVIDER_<ROLE>=a,b or "
+        "GENIUS_PROVIDER_FALLBACK=1):"
+    ]
+    statuses = {r["cli"]: r["status"] for r in results}
+    for role in provider_factory.DEFAULT_CHAINS:
+        try:
+            chain = provider_factory.resolve_chain(role)
+        except ValueError as exc:
+            lines.append(f"[ERROR]   role {role}: {exc}")
+            continue
+        source = provider_factory.chain_source(role)
+        suffix = f" ({source})" if source else ""
+        lines.append(f"[info]    role {role:8} -> {', '.join(chain)}{suffix}")
+        if len(chain) > 1 and statuses.get(chain[0]) == "MISSING":
+            alive = next((b for b in chain[1:] if statuses.get(b) != "MISSING"), None)
+            if alive:
+                lines.append(
+                    f"[warn]    {chain[0]} CLI missing; role {role} will "
+                    f"fall back to {alive}"
+                )
+    return lines
+
+
 def report_lines(results, skill_key_ok: bool):
     """Render the full report and an exit code from check results.
 
@@ -159,6 +191,9 @@ def report_lines(results, skill_key_ok: bool):
         deps = ", ".join(r["dependents"])
         lines.append(f"{tag.get(r['status'], '[?]')} {r['cli']:7} -> {r['detail']}")
         lines.append(f"            used by: {deps}")
+
+    lines.append("-" * 60)
+    lines.extend(provider_chain_lines(results))
 
     lines.append("=" * 60)
     missing = [r for r in results if r["status"] == "MISSING"]

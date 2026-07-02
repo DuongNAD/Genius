@@ -154,89 +154,61 @@ class ClientWorker:
                 prompt = task_data.get("prompt")
                 context = task_data.get("context", {})
 
+                # role alias -> (agent module, agent class, provider-factory
+                # role). Provider selection (incl. GENIUS_PROVIDER_<ROLE> /
+                # GENIUS_PROVIDER_FALLBACK chains) lives in
+                # ag_core.provider_factory - same wiring as skill_app.
                 ROLE_AGENT_MAP = {
                     "grok": (
                         "ag_core.agents.grok_researcher",
                         "GrokResearcherAgent",
-                        "ag_core.providers.grok_provider",
-                        "GrokProvider",
                         "grok",
                     ),
                     "grok_researcher": (
                         "ag_core.agents.grok_researcher",
                         "GrokResearcherAgent",
-                        "ag_core.providers.grok_provider",
-                        "GrokProvider",
                         "grok",
                     ),
                     "claude": (
                         "ag_core.agents.claude_architect",
                         "ClaudeArchitectAgent",
-                        "ag_core.providers.anthropic_provider",
-                        "AnthropicProvider",
                         "claude",
                     ),
                     "claude_architect": (
                         "ag_core.agents.claude_architect",
                         "ClaudeArchitectAgent",
-                        "ag_core.providers.anthropic_provider",
-                        "AnthropicProvider",
                         "claude",
                     ),
                     "codex": (
                         "ag_core.agents.codex_reviewer",
                         "CodexReviewerAgent",
-                        "ag_core.providers.openai_provider",
-                        "OpenAIProvider",
                         "codex",
                     ),
                     "codex_reviewer": (
                         "ag_core.agents.codex_reviewer",
                         "CodexReviewerAgent",
-                        "ag_core.providers.openai_provider",
-                        "OpenAIProvider",
                         "codex",
                     ),
-                    "tester": (
-                        "ag_core.agents.tester",
-                        "TesterAgent",
-                        "ag_core.providers.openai_provider",
-                        "OpenAIProvider",
-                        "tester",
-                    ),
-                    "tester_agent": (
-                        "ag_core.agents.tester",
-                        "TesterAgent",
-                        "ag_core.providers.openai_provider",
-                        "OpenAIProvider",
-                        "tester",
-                    ),
+                    "tester": ("ag_core.agents.tester", "TesterAgent", "tester"),
+                    "tester_agent": ("ag_core.agents.tester", "TesterAgent", "tester"),
                     "security": (
                         "ag_core.agents.security_agent",
                         "SecurityAgent",
-                        "ag_core.providers.openai_provider",
-                        "OpenAIProvider",
                         "security",
                     ),
                     "security_agent": (
                         "ag_core.agents.security_agent",
                         "SecurityAgent",
-                        "ag_core.providers.openai_provider",
-                        "OpenAIProvider",
                         "security",
                     ),
                     "devops": (
                         "ag_core.agents.devops_agent",
                         "DevOpsAgent",
-                        "ag_core.providers.openai_provider",
-                        "OpenAIProvider",
                         "devops",
                     ),
                     "devops_agent": (
                         "ag_core.agents.devops_agent",
                         "DevOpsAgent",
-                        "ag_core.providers.openai_provider",
-                        "OpenAIProvider",
                         "devops",
                     ),
                 }
@@ -252,9 +224,7 @@ class ClientWorker:
                     (
                         agent_mod_name,
                         agent_cls_name,
-                        prov_mod_name,
-                        prov_cls_name,
-                        default_model,
+                        factory_role,
                     ) = ROLE_AGENT_MAP[normalized_role]
                     try:
                         import importlib
@@ -262,28 +232,12 @@ class ClientWorker:
                         agent_mod = importlib.import_module(agent_mod_name)
                         agent_class = getattr(agent_mod, agent_cls_name)
 
-                        prov_mod = importlib.import_module(prov_mod_name)
-                        provider_class = getattr(prov_mod, prov_cls_name)
-
                         from ag_core.config import load_config
+                        from ag_core.provider_factory import make_provider
 
                         config = load_config()
 
-                        prefix = (
-                            "grok"
-                            if "grok" in normalized_role
-                            else (
-                                "anthropic" if "claude" in normalized_role else "openai"
-                            )
-                        )
-                        provider_key = getattr(
-                            config, f"{prefix}_api_key", None
-                        ) or os.getenv(f"{prefix.upper()}_API_KEY", "")
-                        model_name = getattr(config.models, prefix, default_model)
-
-                        provider = provider_class(
-                            api_key=provider_key, model_name=model_name
-                        )
+                        provider = make_provider(factory_role, config)
                         agent = agent_class(
                             provider=provider, config=config, output_file="None"
                         )
