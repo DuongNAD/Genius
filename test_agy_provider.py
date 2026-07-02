@@ -54,10 +54,14 @@ def test_resolve_env_path_override_wins(monkeypatch):
 
 def test_resolve_blank_env_path_treated_as_unset(monkeypatch):
     # A blank GENIUS_AGY_PATH shipped in .env.example must fall through to
-    # the PATH scan, not be returned as the (empty) executable.
+    # the PATH scan, not be returned as the (empty) executable. Use an
+    # absolute path outside the repo root for the current platform, or
+    # which_external treats the relative Windows literal as an in-repo
+    # wrapper (POSIX abspath) and re-scans it away.
+    real_cli = r"C:\real\agy.exe" if os.name == "nt" else "/opt/real/agy"
     monkeypatch.setenv("GENIUS_AGY_PATH", "   ")
-    with patch("shutil.which", return_value=r"C:\real\agy.exe"):
-        assert resolve_agy_cli() == r"C:\real\agy.exe"
+    with patch("shutil.which", return_value=real_cli):
+        assert resolve_agy_cli() == real_cli
 
 
 def test_resolve_falls_back_to_localappdata_default(monkeypatch):
