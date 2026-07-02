@@ -333,10 +333,15 @@ class ClientWorker:
                         await asyncio.sleep(backoff)
                         backoff *= 2
 
+            report_coro = report()
             try:
-                await asyncio.shield(report())
+                await asyncio.shield(report_coro)
             except Exception as e:
                 print(f"[Worker] Shielded report failed: {e}")
+                # shield() may fail before wrapping the coroutine in a task
+                # (e.g. no running event loop at shutdown); close it so it
+                # doesn't leak a "coroutine was never awaited" warning.
+                report_coro.close()
 
     def generate_jwt(self) -> str:
         # Use the same resolved key as checksums (config.skill_api_key or

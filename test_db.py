@@ -25,16 +25,17 @@ def setup_temp_db(tmp_path):
 
     yield temp_db
 
-    # Restore original environment variable
+    # Restore original environment variable. A blank original (e.g. the empty
+    # GENIUS_DB_PATH= line from .env.example loaded by python-dotenv) must not
+    # become the module-level DB_PATH — sqlite3.connect("") opens a throwaway
+    # temp database per connection.
     if original_db_path is not None:
         os.environ["GENIUS_DB_PATH"] = original_db_path
-        ag_core.utils.db.DB_PATH = original_db_path
     else:
         os.environ.pop("GENIUS_DB_PATH", None)
-        # Re-resolve default path
-        ag_core.utils.db.DB_PATH = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "genius.db")
-        )
+    ag_core.utils.db.DB_PATH = original_db_path or os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "genius.db")
+    )
 
 
 def test_db_initialization(setup_temp_db):
