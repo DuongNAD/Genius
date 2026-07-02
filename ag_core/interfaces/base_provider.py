@@ -55,6 +55,13 @@ class TokenBucket:
         self.tokens -= 1
 
 
+# Never wait longer than this on a Retry-After header. Tenacity does not catch
+# exceptions raised by wait callables, so raising on a large value (the old
+# behavior) crashed the whole pipeline on a real 429 with e.g. Retry-After: 30;
+# the delay is capped instead.
+MAX_RETRY_AFTER_DELAY = 10.0
+
+
 class wait_retry_after:
     def __init__(self, fallback):
         self.fallback = fallback
@@ -67,29 +74,20 @@ class wait_retry_after:
             if isinstance(ex, httpx.HTTPStatusError) and ex.response.status_code == 429:
                 retry_after = ex.response.headers.get("Retry-After")
                 if retry_after:
+                    delay = None
                     try:
                         delay = float(retry_after)
-                        if delay > 10.0:
-                            raise ValueError(f"Retry-After delay too large: {delay}s")
-                        return delay
-                    except ValueError as e:
-                        if "Retry-After delay too large" in str(e):
-                            raise
+                    except ValueError:
                         import email.utils
                         from datetime import datetime, timezone
 
                         try:
                             dt = email.utils.parsedate_to_datetime(retry_after)
                             delay = (dt - datetime.now(timezone.utc)).total_seconds()
-                            if delay < 0:
-                                delay = 0.0
-                            if delay > 10.0:
-                                raise ValueError(
-                                    f"Retry-After delay too large: {delay}s"
-                                )
-                            return delay
                         except Exception:
-                            pass
+                            delay = None
+                    if delay is not None:
+                        return min(max(delay, 0.0), MAX_RETRY_AFTER_DELAY)
         return self.fallback(retry_state)
 
 
@@ -114,7 +112,33 @@ class BaseProvider(abc.ABC):
         self.base_url = base_url
         self.extra_params = kwargs
         self.rate_limiter = TokenBucket(rate=10.0, capacity=10.0)
-        self.semaphore = asyncio.Semaphore(5)
+        # Concurrency-limit semaphores are created lazily, one per event loop
+        # (see the ``semaphore`` property): an ``asyncio.Semaphore`` created in
+        # ``__init__`` binds to whatever loop exists at construction time on
+        # Python 3.10/3.11, so reusing the provider across ``asyncio.run()``
+        # calls raised cross-event-loop errors or hung.
+        self._semaphores: Dict[Any, asyncio.Semaphore] = {}
+
+    @property
+    def semaphore(self) -> asyncio.Semaphore:
+        """Per-event-loop concurrency semaphore (max 5 in-flight prompts)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        # Drop semaphores bound to closed loops so the map cannot grow
+        # unboundedly across repeated asyncio.run() calls.
+        for stale in [
+            existing
+            for existing in self._semaphores
+            if existing is not None and existing.is_closed()
+        ]:
+            del self._semaphores[stale]
+        sem = self._semaphores.get(loop)
+        if sem is None:
+            sem = asyncio.Semaphore(5)
+            self._semaphores[loop] = sem
+        return sem
 
     @abc.abstractmethod
     async def send_prompt(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:

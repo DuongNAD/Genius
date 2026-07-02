@@ -2,6 +2,10 @@ import pytest
 from unittest.mock import AsyncMock, patch
 from ag_core.providers.openai_provider import OpenAIProvider
 
+# A minimal valid message line: appended to token-parsing fixtures because a
+# run that yields no content now raises instead of returning "" as a success.
+CONTENT_LINE = '{"event": "agent_message", "item": {"text": "ok"}}\n'
+
 
 @pytest.mark.asyncio
 async def test_openai_provider_blank_and_noise_lines():
@@ -133,7 +137,7 @@ async def test_openai_provider_tokens_non_scalar_types():
         '{"event": "turn.completed", "turn.completed": {"usage": {"input_tokens": 15, "output_tokens": 25}}}',
     ]
 
-    jsonl_output = "\n".join(lines) + "\n"
+    jsonl_output = CONTENT_LINE + "\n".join(lines) + "\n"
     mock_process.communicate.return_value = (jsonl_output.encode("utf-8"), b"")
 
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
@@ -155,7 +159,8 @@ async def test_openai_provider_tokens_flat_and_nested_combinations():
 
     # Check flat format
     flat_output = (
-        '{"event": "turn.completed", "input_tokens": 8, "output_tokens": 12}\n'
+        CONTENT_LINE
+        + '{"event": "turn.completed", "input_tokens": 8, "output_tokens": 12}\n'
     )
     mock_process.communicate.return_value = (flat_output.encode("utf-8"), b"")
 
@@ -167,7 +172,10 @@ async def test_openai_provider_tokens_flat_and_nested_combinations():
         assert response["usage"]["total_tokens"] == 20
 
     # Check nested format with "tokens" sub-dict
-    nested_tokens_output = '{"event": "turn.completed", "turn.completed": {"tokens": {"input_tokens": 30, "output_tokens": 40}}}\n'
+    nested_tokens_output = (
+        CONTENT_LINE
+        + '{"event": "turn.completed", "turn.completed": {"tokens": {"input_tokens": 30, "output_tokens": 40}}}\n'
+    )
     mock_process.communicate.return_value = (nested_tokens_output.encode("utf-8"), b"")
 
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
@@ -179,7 +187,8 @@ async def test_openai_provider_tokens_flat_and_nested_combinations():
 
     # Check multiple conflicting turn.completed events, last one should override
     multiple_output = (
-        '{"event": "turn.completed", "input_tokens": 5, "output_tokens": 5}\n'
+        CONTENT_LINE
+        + '{"event": "turn.completed", "input_tokens": 5, "output_tokens": 5}\n'
         '{"event": "turn.completed", "turn.completed": {"usage": {"input_tokens": 100, "output_tokens": 200, "total_tokens": 300}}}\n'
     )
     mock_process.communicate.return_value = (multiple_output.encode("utf-8"), b"")
@@ -203,9 +212,10 @@ async def test_openai_provider_tokens_invalid_strings_and_booleans():
     mock_process.returncode = 0
 
     lines = [
-        '{"event": "turn.completed", "input_tokens": "abc", "output_tokens": "50"}\n'
+        CONTENT_LINE,
+        '{"event": "turn.completed", "input_tokens": "abc", "output_tokens": "50"}\n',
     ]
-    mock_process.communicate.return_value = ("\n".join(lines).encode("utf-8"), b"")
+    mock_process.communicate.return_value = ("".join(lines).encode("utf-8"), b"")
 
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
@@ -218,10 +228,11 @@ async def test_openai_provider_tokens_invalid_strings_and_booleans():
 
     # Test booleans (which Python evaluates as 1 or 0 inside int())
     boolean_lines = [
-        '{"event": "turn.completed", "input_tokens": true, "output_tokens": false}\n'
+        CONTENT_LINE,
+        '{"event": "turn.completed", "input_tokens": true, "output_tokens": false}\n',
     ]
     mock_process.communicate.return_value = (
-        "\n".join(boolean_lines).encode("utf-8"),
+        "".join(boolean_lines).encode("utf-8"),
         b"",
     )
 

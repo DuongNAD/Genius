@@ -6,7 +6,11 @@ from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
 from ag_core.utils.cli_resolver import which_external
-from ag_core.utils.cli_runner import communicate_with_timeout, explain_cli_failure
+from ag_core.utils.cli_runner import (
+    communicate_with_timeout,
+    explain_cli_failure,
+    tail_text,
+)
 
 
 def _newest(paths):
@@ -32,7 +36,10 @@ def resolve_codex_cli() -> str:
     """Resolve the Codex CLI path (PATH, then Codex desktop install dirs).
 
     Shared by send_prompt and the ``--doctor`` preflight. Never returns the
-    bundled repo wrapper (``which_external`` excludes it).
+    bundled repo wrapper (``which_external`` excludes it). Raises
+    :class:`RuntimeError` when no real CLI is found - a bare-name fallback
+    would let ``shutil.which``/``cmd.exe`` resolve the repo's own
+    ``codex.cmd`` wrapper again (the recursion bug).
     """
     cli_path = which_external("codex") or which_external("codex.exe")
     if not cli_path:
@@ -68,7 +75,14 @@ def resolve_codex_cli() -> str:
                     cli_path = _newest(matches3)
 
         if not cli_path:
-            cli_path = "codex" if os.name != "nt" else "codex.exe"
+            if os.getenv("PYTEST_CURRENT_TEST"):
+                # Unit tests stub the subprocess layer; keep a harmless
+                # literal so they don't require a real install.
+                return "codex" if os.name != "nt" else "codex.exe"
+            raise RuntimeError(
+                "CLI 'codex' not found; install the OpenAI Codex CLI/desktop "
+                "app or run `python serve.py --doctor` to diagnose."
+            )
     return cli_path
 
 
@@ -103,8 +117,6 @@ class OpenAIProvider(BaseProvider):
             sys_prompt = extra.pop("system", None) or system
 
             # Locate codex prioritized in PATH, then Codex desktop install dirs
-            import shutil
-
             cli_path = resolve_codex_cli()
 
             if sys_prompt:
@@ -133,11 +145,13 @@ class OpenAIProvider(BaseProvider):
             )
             cmd = [cli_path, "exec", "-", *bypass_flags, "--json"]
 
+            # Wrap .cmd/.bat shims with cmd.exe /c, decided from the resolved
+            # path itself - never via a raw shutil.which on a bare name, which
+            # searches the cwd first and would re-introduce the repo-wrapper
+            # recursion.
             actual_cmd = cmd
-            if sys.platform == "win32":
-                resolved_cli = shutil.which(cli_path) or cli_path
-                if resolved_cli.lower().endswith((".cmd", ".bat")):
-                    actual_cmd = ["cmd.exe", "/c"] + cmd
+            if sys.platform == "win32" and cli_path.lower().endswith((".cmd", ".bat")):
+                actual_cmd = ["cmd.exe", "/c"] + cmd
 
             prompt_bytes = prompt.encode("utf-8")
             try:
@@ -162,15 +176,18 @@ class OpenAIProvider(BaseProvider):
                 process, input=prompt_bytes, cli_name="Codex CLI"
             )
 
+            stdout_str = stdout.decode("utf-8", errors="replace")
+            stderr_str = stderr.decode("utf-8", errors="replace").strip()
+
             if isinstance(process.returncode, int) and process.returncode != 0:
-                stderr_str = stderr.decode("utf-8", errors="ignore").strip()
                 raise RuntimeError(
-                    explain_cli_failure("Codex CLI", process.returncode, stderr_str)
+                    explain_cli_failure(
+                        "Codex CLI", process.returncode, stderr_str, stdout_str
+                    )
                 )
 
-            stdout_str = stdout.decode("utf-8", errors="ignore")
-
             content_parts = []
+            error_parts = []
             prompt_tokens = 0
             completion_tokens = 0
             total_tokens = 0
@@ -254,6 +271,15 @@ class OpenAIProvider(BaseProvider):
                         continue
 
                     event_type = data.get("event") or data.get("type")
+
+                    # Collect failure events so an empty run raises with the
+                    # real cause instead of returning "" as a success.
+                    if event_type in ("error", "turn.failed"):
+                        err = data.get("message")
+                        if err is None and isinstance(data.get("error"), dict):
+                            err = data["error"].get("message")
+                        error_parts.append(str(err) if err else json.dumps(data))
+
                     item = data.get("item")
                     if not isinstance(item, dict):
                         item = {}
@@ -358,6 +384,17 @@ class OpenAIProvider(BaseProvider):
                 total_tokens = prompt_tokens + completion_tokens
 
             content = "".join(content_parts)
+            if not content:
+                detail = (
+                    "; ".join(error_parts)
+                    if error_parts
+                    else "no agent_message content in output"
+                )
+                raise RuntimeError(
+                    f"Codex CLI produced no content: {detail} | "
+                    f"stdout tail: {tail_text(stdout_str)} | "
+                    f"stderr tail: {tail_text(stderr_str)}"
+                )
 
             response = ProviderResponse(
                 content=content,

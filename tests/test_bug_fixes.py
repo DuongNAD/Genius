@@ -94,8 +94,15 @@ async def test_r3_r4_windows_subprocess_and_length_limit():
         # Should be wrapped in cmd.exe /c
         assert args[0] == "cmd.exe"
         assert args[1] == "/c"
-        # Should have written the large prompt to a temp file and passed --input
-        assert "--input" in args
+        # The prompt is fed via stdin (the CLI has no --input flag, and argv
+        # would both hit the length limit and pass through cmd.exe
+        # metacharacter parsing).
+        assert "--input" not in args
+        assert large_prompt not in args
+        assert kwargs["stdin"] == asyncio.subprocess.PIPE
+        mock_process.communicate.assert_called_once_with(
+            input=large_prompt.encode("utf-8")
+        )
 
 
 # R5. Rate Limiter Clock Source Mixing / Instability

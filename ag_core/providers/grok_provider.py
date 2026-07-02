@@ -1,8 +1,8 @@
 import os
 import sys
-import shutil
-import json
 import asyncio
+import logging
+import tempfile
 from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
@@ -10,15 +10,27 @@ from ag_core.utils.cli_resolver import which_external
 from ag_core.utils.cli_runner import (
     communicate_with_timeout,
     explain_cli_failure,
+    extract_json_object,
+    tail_text,
+    cli_timeout,
     DEFAULT_AUX_TIMEOUT,
 )
+
+logger = logging.getLogger("ag_core")
+
+# ``grok login`` is attempted at most once per process (M1): it used to run on
+# *every* send_prompt when no API key was configured (the normal local setup),
+# spawning up to 5 concurrent login browsers.
+_LOGIN_ATTEMPTED = False
 
 
 def resolve_grok_cli() -> str:
     """Resolve the real Grok CLI path, never the bundled repo wrapper.
 
     Shared by send_prompt and the ``--doctor`` preflight so both agree on which
-    binary will actually run.
+    binary will actually run. Raises :class:`RuntimeError` when no real CLI is
+    found - a bare-name fallback would let ``shutil.which``/``cmd.exe`` resolve
+    the repo's own ``grok.cmd`` wrapper again (the recursion bug).
     """
     cli_path = which_external("grok")
     if not cli_path:
@@ -45,8 +57,27 @@ def resolve_grok_cli() -> str:
             if os.path.exists(fallback):
                 cli_path = fallback
     if not cli_path:
-        cli_path = "grok"
+        if os.getenv("PYTEST_CURRENT_TEST"):
+            # Unit tests stub the subprocess layer; keep a harmless literal so
+            # they don't require a real install.
+            return "grok"
+        raise RuntimeError(
+            "CLI 'grok' not found; install the xAI Grok CLI or run "
+            "`python serve.py --doctor` to diagnose."
+        )
     return cli_path
+
+
+def _wrap_windows(cmd, cli_path):
+    """Wrap ``.cmd``/``.bat`` shims with ``cmd.exe /c`` on Windows.
+
+    Decided from the already-resolved path - never via a raw ``shutil.which``
+    on a bare name, which searches the cwd first and would re-introduce the
+    repo-wrapper recursion.
+    """
+    if sys.platform == "win32" and cli_path.lower().endswith((".cmd", ".bat")):
+        return ["cmd.exe", "/c"] + cmd
+    return cmd
 
 
 class GrokProvider(BaseProvider):
@@ -67,6 +98,40 @@ class GrokProvider(BaseProvider):
             model_name=model_name, api_key=api_key, base_url=base_url, **kwargs
         )
 
+    async def _maybe_login(self, cli_path: str) -> None:
+        """Run ``grok login`` at most once per process when no API key is set."""
+        global _LOGIN_ATTEMPTED
+        if _LOGIN_ATTEMPTED:
+            return
+        _LOGIN_ATTEMPTED = True
+        try:
+            login_cmd = _wrap_windows([cli_path, "login"], cli_path)
+            try:
+                login_process = await asyncio.create_subprocess_exec(
+                    *login_cmd,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except OSError:
+                if sys.platform == "win32" and login_cmd[0] != "cmd.exe":
+                    login_cmd = ["cmd.exe", "/c"] + login_cmd
+                    login_process = await asyncio.create_subprocess_exec(
+                        *login_cmd,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                else:
+                    raise
+            await communicate_with_timeout(
+                login_process,
+                timeout=min(DEFAULT_AUX_TIMEOUT, cli_timeout()),
+                cli_name="Grok login",
+            )
+        except Exception as exc:
+            logger.warning("Grok login attempt failed (continuing anyway): %s", exc)
+
     async def send_prompt(
         self, prompt: str, system: str | None = None, **kwargs: Any
     ) -> Dict[str, Any]:
@@ -80,57 +145,27 @@ class GrokProvider(BaseProvider):
             cli_path = resolve_grok_cli()
 
             if not self.api_key:
-                try:
-                    login_cmd = [cli_path, "login"]
-                    if sys.platform == "win32":
-                        resolved_cli = shutil.which(cli_path) or cli_path
-                        if resolved_cli.lower().endswith((".cmd", ".bat")):
-                            login_cmd = ["cmd.exe", "/c"] + login_cmd
-                    try:
-                        login_process = await asyncio.create_subprocess_exec(
-                            *login_cmd,
-                            stdin=asyncio.subprocess.DEVNULL,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                    except OSError:
-                        if sys.platform == "win32" and login_cmd[0] != "cmd.exe":
-                            login_cmd = ["cmd.exe", "/c"] + login_cmd
-                            login_process = await asyncio.create_subprocess_exec(
-                                *login_cmd,
-                                stdin=asyncio.subprocess.DEVNULL,
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE,
-                            )
-                        else:
-                            raise
-                    await communicate_with_timeout(
-                        login_process,
-                        timeout=DEFAULT_AUX_TIMEOUT,
-                        cli_name="Grok login",
-                    )
-                except Exception:
-                    pass
-
-            import tempfile
+                await self._maybe_login(cli_path)
 
             temp_file_path = None
             try:
-                if len(prompt) > 1000:
-                    with tempfile.NamedTemporaryFile(
-                        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-                    ) as f:
-                        f.write(prompt)
-                        temp_file_path = f.name
-                    cmd = [
-                        cli_path,
-                        "--prompt-file",
-                        temp_file_path,
-                        "--output-format",
-                        "json",
-                    ]
-                else:
-                    cmd = [cli_path, "-p", prompt, "--output-format", "json"]
+                # Always pass the prompt via --prompt-file: inlining it as a
+                # `-p <prompt>` argument goes through cmd.exe on Windows,
+                # which interprets `&|<>^%` and newlines in LLM-generated
+                # prompt text (garbling/injection) and hits the command-line
+                # length limit.
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".txt", delete=False, encoding="utf-8"
+                ) as f:
+                    f.write(prompt)
+                    temp_file_path = f.name
+                cmd = [
+                    cli_path,
+                    "--prompt-file",
+                    temp_file_path,
+                    "--output-format",
+                    "json",
+                ]
 
                 session_id = (
                     extra.pop("session_id", None)
@@ -143,11 +178,7 @@ class GrokProvider(BaseProvider):
                 if sys_prompt:
                     cmd.extend(["--system-prompt-override", sys_prompt])
 
-                actual_cmd = cmd
-                if sys.platform == "win32":
-                    resolved_cli = shutil.which(cli_path) or cli_path
-                    if resolved_cli.lower().endswith((".cmd", ".bat")):
-                        actual_cmd = ["cmd.exe", "/c"] + cmd
+                actual_cmd = _wrap_windows(cmd, cli_path)
 
                 try:
                     process = await asyncio.create_subprocess_exec(
@@ -178,19 +209,37 @@ class GrokProvider(BaseProvider):
                     except Exception:
                         pass
 
+            stdout_str = stdout.decode("utf-8", errors="replace").strip()
+            stderr_str = stderr.decode("utf-8", errors="replace").strip()
+
             if isinstance(process.returncode, int) and process.returncode != 0:
-                stderr_str = stderr.decode("utf-8", errors="ignore").strip()
                 raise RuntimeError(
-                    explain_cli_failure("Grok CLI", process.returncode, stderr_str)
+                    explain_cli_failure(
+                        "Grok CLI", process.returncode, stderr_str, stdout_str
+                    )
                 )
 
-            stdout_str = stdout.decode("utf-8", errors="ignore").strip()
-            try:
-                res_json = json.loads(stdout_str)
-            except json.JSONDecodeError:
-                res_json = {}
+            res_json = extract_json_object(stdout_str) or {}
+
+            # Grok reports some failures with exit code 0 and an error-shaped
+            # JSON payload, e.g. {"type":"error","message":"...403 Forbidden
+            # ...spending-limit..."}. Surface it instead of returning "".
+            if res_json.get("type") == "error" or res_json.get("is_error"):
+                error_msg = str(res_json.get("message") or res_json.get("result") or "")
+                raise RuntimeError(
+                    f"Grok CLI reported an error: {error_msg} | "
+                    f"stderr tail: {tail_text(stderr_str)}"
+                )
 
             content = res_json.get("result", "")
+            if not content:
+                raise RuntimeError(
+                    "Grok CLI produced no result (output was empty or not the "
+                    "expected JSON envelope). "
+                    f"stdout tail: {tail_text(stdout_str)} | "
+                    f"stderr tail: {tail_text(stderr_str)}"
+                )
+
             prompt_tokens = res_json.get("usage", {}).get("input_tokens", 0)
             completion_tokens = res_json.get("usage", {}).get("output_tokens", 0)
             total_tokens = prompt_tokens + completion_tokens

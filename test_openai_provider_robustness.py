@@ -6,17 +6,15 @@ from ag_core.providers.openai_provider import OpenAIProvider
 
 @pytest.mark.asyncio
 async def test_openai_provider_empty_output():
+    # Empty stdout is no longer a silent "" success - it raises.
     provider = OpenAIProvider()
     mock_process = AsyncMock()
     mock_process.communicate.return_value = (b"", b"")
 
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
-        response = await provider.send_prompt("Test empty")
-        assert response["content"] == ""
-        assert response["usage"]["prompt_tokens"] == 0
-        assert response["usage"]["completion_tokens"] == 0
-        assert response["usage"]["total_tokens"] == 0
+        with pytest.raises(RuntimeError, match="no content"):
+            await provider.send_prompt("Test empty")
 
 
 @pytest.mark.asyncio
@@ -86,8 +84,9 @@ async def test_openai_provider_extremely_nested_json():
 
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
-        response = await provider.send_prompt("Test nested")
-        assert response["content"] == ""
+        # Nothing extractable -> raises instead of returning "" as success.
+        with pytest.raises(RuntimeError, match="no content"):
+            await provider.send_prompt("Test nested")
 
 
 @pytest.mark.asyncio
@@ -100,8 +99,8 @@ async def test_openai_provider_agent_message_crash_str():
 
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
-        response = await provider.send_prompt("Test crash str")
-        assert response["content"] == ""
+        with pytest.raises(RuntimeError, match="no content"):
+            await provider.send_prompt("Test crash str")
 
 
 @pytest.mark.asyncio
@@ -114,8 +113,8 @@ async def test_openai_provider_agent_message_crash_none():
 
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
-        response = await provider.send_prompt("Test crash null")
-        assert response["content"] == ""
+        with pytest.raises(RuntimeError, match="no content"):
+            await provider.send_prompt("Test crash null")
 
 
 @pytest.mark.asyncio
@@ -123,7 +122,10 @@ async def test_openai_provider_turn_completed_type_error():
     provider = OpenAIProvider()
     mock_process = AsyncMock()
     # "input_tokens" is a dict/list instead of int/str, causing TypeError in int()
-    crash_line = '{"event": "turn.completed", "input_tokens": {}}\n'
+    crash_line = (
+        '{"event": "agent_message", "item": {"text": "ok"}}\n'
+        '{"event": "turn.completed", "input_tokens": {}}\n'
+    )
     mock_process.communicate.return_value = (crash_line.encode("utf-8"), b"")
 
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
@@ -143,8 +145,8 @@ async def test_openai_provider_recursion_error():
 
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
-        response = await provider.send_prompt("Test recursion error")
-        assert response["content"] == ""
+        with pytest.raises(RuntimeError, match="no content"):
+            await provider.send_prompt("Test recursion error")
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ from unittest.mock import patch
 from ag_core.utils.cli_runner import (
     communicate_with_timeout,
     explain_cli_failure,
+    extract_json_object,
     cli_timeout,
     CLITimeoutError,
 )
@@ -53,6 +54,58 @@ def test_communicate_kills_process_on_timeout():
     assert proc.killed is True
 
 
+class _FakeKiller:
+    """Stand-in for the taskkill subprocess."""
+
+    def __init__(self, returncode=0):
+        self.returncode = returncode
+
+    async def wait(self):
+        return self.returncode
+
+
+def test_timeout_tree_kills_via_taskkill_on_windows():
+    # H3: when the direct child is cmd.exe (a .cmd shim), plain kill() orphans
+    # the node.exe grandchild - the whole tree must go through taskkill /T /F.
+    proc = _FakeProc(hang=True)
+    proc.pid = 4242
+    taskkill_calls = []
+
+    async def fake_exec(*args, **kwargs):
+        taskkill_calls.append(args)
+        return _FakeKiller(returncode=0)
+
+    with patch("sys.platform", "win32"), patch(
+        "asyncio.create_subprocess_exec", side_effect=fake_exec
+    ):
+        with pytest.raises(CLITimeoutError):
+            asyncio.run(
+                communicate_with_timeout(proc, timeout=0.05, cli_name="HangCLI")
+            )
+
+    assert taskkill_calls == [("taskkill", "/PID", "4242", "/T", "/F")]
+    # taskkill succeeded, so the bare kill() fallback must not fire.
+    assert proc.killed is False
+
+
+def test_timeout_falls_back_to_kill_when_taskkill_fails():
+    proc = _FakeProc(hang=True)
+    proc.pid = 4242
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeKiller(returncode=128)  # taskkill: process not found
+
+    with patch("sys.platform", "win32"), patch(
+        "asyncio.create_subprocess_exec", side_effect=fake_exec
+    ):
+        with pytest.raises(CLITimeoutError):
+            asyncio.run(
+                communicate_with_timeout(proc, timeout=0.05, cli_name="HangCLI")
+            )
+
+    assert proc.killed is True
+
+
 def test_cli_timeout_env_override():
     with patch.dict(os.environ, {"GENIUS_CLI_TIMEOUT": "12.5"}):
         assert cli_timeout() == 12.5
@@ -85,6 +138,50 @@ def test_explain_cli_failure_plain_when_unknown():
     msg = explain_cli_failure("X", 2, "some opaque error")
     assert "Hint" not in msg
     assert "exit code 2" in msg
+
+
+def test_explain_cli_failure_matches_and_includes_stdout():
+    # M3: claude/grok print auth and quota errors to *stdout*; hints must
+    # match against it and the message must include both tails.
+    msg = explain_cli_failure(
+        "Grok CLI",
+        1,
+        "unrelated log noise",
+        '{"type":"error","message":"403 Forbidden: spending-limit reached"}',
+    )
+    assert "credits" in msg.lower()
+    assert "spending-limit" in msg
+    assert "unrelated log noise" in msg
+
+
+# --- cli_runner: noise-tolerant JSON extraction ---------------------------
+
+
+def test_extract_json_object_plain():
+    assert extract_json_object('{"result": "hi"}') == {"result": "hi"}
+
+
+def test_extract_json_object_tolerates_banners_and_trailers():
+    noisy = 'WARN: update available\n{"result": "hi"}\ntrailing log line'
+    assert extract_json_object(noisy) == {"result": "hi"}
+
+
+def test_extract_json_object_grok_error_shape():
+    # Real grok out-of-credits output: error JSON line plus a plain-text
+    # "Error: {...}" trailer whose braces must not confuse extraction.
+    raw = (
+        '{"type":"error","message":"Internal error: 403 Forbidden"}\n'
+        "Error: {Internal error: 403 Forbidden}"
+    )
+    parsed = extract_json_object(raw)
+    assert parsed is not None
+    assert parsed["type"] == "error"
+
+
+def test_extract_json_object_returns_none_for_garbage():
+    assert extract_json_object("") is None
+    assert extract_json_object("no json here") is None
+    assert extract_json_object("[1, 2, 3]") is None  # not an object
 
 
 # --- diagnostics: report rendering + exit codes --------------------------

@@ -8,7 +8,8 @@ from ag_core.providers.openai_provider import OpenAIProvider
 async def test_openai_provider_empty_output():
     """
     Test empty stdout from CLI execution.
-    Should return empty string for content and 0 for tokens, without crashing.
+    An empty run is no longer a silent "" success: it must raise with the
+    stdout/stderr tails so the real failure is visible.
     """
     provider = OpenAIProvider()
 
@@ -17,12 +18,8 @@ async def test_openai_provider_empty_output():
 
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = mock_process
-        response = await provider.send_prompt("Test prompt")
-
-        assert response["content"] == ""
-        assert response["usage"]["prompt_tokens"] == 0
-        assert response["usage"]["completion_tokens"] == 0
-        assert response["usage"]["total_tokens"] == 0
+        with pytest.raises(RuntimeError, match="no content"):
+            await provider.send_prompt("Test prompt")
 
 
 @pytest.mark.asyncio

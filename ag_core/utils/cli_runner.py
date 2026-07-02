@@ -1,25 +1,36 @@
 """Resilient subprocess helpers shared by the provider CLI integrations.
 
-The providers shell out to local vendor CLIs (grok/claude/codex). Two failure
-modes were previously unguarded:
+The providers shell out to local vendor CLIs (grok/claude/codex). Failure
+modes guarded here:
 
 * A CLI that hangs (waiting for input, a stuck network call, a hidden login
   prompt) froze ``await process.communicate()`` - and therefore the whole
   pipeline - forever. :func:`communicate_with_timeout` bounds every call and
-  kills the process when it overruns.
+  kills the process when it overruns. On Windows the direct child is often
+  ``cmd.exe`` (wrapping a ``.cmd`` shim), so the whole process *tree* is
+  killed via ``taskkill /T /F`` - a plain ``kill()`` would orphan the real
+  node/exe grandchild.
 * A non-zero exit surfaced the raw stderr with no guidance.
   :func:`explain_cli_failure` recognises the common signatures (missing CLI,
-  auth/login, out-of-credits) and appends an actionable hint.
+  auth/login, out-of-credits) in *both* streams - several CLIs print their
+  errors to stdout - and appends an actionable hint.
+* CLIs wrap their JSON result in warning banners / log noise.
+  :func:`extract_json_object` tolerates that instead of silently yielding
+  an empty "success".
 """
 
 import asyncio
+import json
 import os
+import sys
 
 # LLM agent CLIs (notably ``codex exec``) can legitimately run for minutes, so
 # the default ceiling is generous; tune with GENIUS_CLI_TIMEOUT (seconds).
 DEFAULT_CLI_TIMEOUT = 600.0
 # Auxiliary, non-generative calls (login, --version) should be quick.
 DEFAULT_AUX_TIMEOUT = 60.0
+# How much of a CLI's stdout/stderr to embed in raised error messages.
+TAIL_CHARS = 2000
 
 
 class CLITimeoutError(RuntimeError):
@@ -39,12 +50,70 @@ def cli_timeout(default: float = DEFAULT_CLI_TIMEOUT) -> float:
     return default
 
 
+def tail_text(text: str, limit: int = TAIL_CHARS) -> str:
+    """Return the last ``limit`` characters of ``text`` (for error messages)."""
+    text = (text or "").strip()
+    return text[-limit:] if len(text) > limit else text
+
+
+def extract_json_object(text: str):
+    """Best-effort extraction of a single JSON object from noisy CLI output.
+
+    Vendor CLIs wrap their JSON result in warning banners, ANSI log lines or
+    plain-text trailers. Tries, in order: the whole text, the span from the
+    first ``{`` to the last ``}``, then each individual line that looks like
+    an object. Returns the parsed dict, or ``None`` when nothing parses.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    candidates = [text]
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(text[start : end + 1])
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            candidates.append(line)
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
 async def _terminate(process) -> None:
-    """Best-effort kill + reap so a timed-out CLI leaves no zombie."""
-    try:
-        process.kill()
-    except (ProcessLookupError, OSError):
-        return
+    """Best-effort kill + reap so a timed-out CLI leaves no zombie.
+
+    On Windows the direct child may be ``cmd.exe`` running a ``.cmd`` shim;
+    ``process.kill()`` would leave the real node/exe grandchild running, so
+    the whole tree is killed with ``taskkill /PID <pid> /T /F`` first, falling
+    back to a plain ``kill()`` if taskkill is unavailable or fails.
+    """
+    killed = False
+    pid = getattr(process, "pid", None)
+    if sys.platform == "win32" and isinstance(pid, int):
+        try:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            killed = (await killer.wait()) == 0
+        except Exception:
+            killed = False
+    if not killed:
+        try:
+            process.kill()
+        except (ProcessLookupError, OSError):
+            return
     try:
         await process.wait()
     except Exception:
@@ -61,7 +130,7 @@ async def communicate_with_timeout(
     """``process.communicate`` bounded by ``timeout``; kills the CLI on overrun.
 
     Returns the ``(stdout, stderr)`` tuple on success, raises
-    :class:`CLITimeoutError` (after terminating the process) on timeout.
+    :class:`CLITimeoutError` (after terminating the process tree) on timeout.
     """
     timeout = timeout if timeout is not None else cli_timeout()
     try:
@@ -74,10 +143,18 @@ async def communicate_with_timeout(
         )
 
 
-def explain_cli_failure(cli_name: str, returncode, stderr: str) -> str:
-    """Build an actionable error message for a non-zero CLI exit."""
-    stderr = (stderr or "").strip()
-    low = stderr.lower()
+def explain_cli_failure(
+    cli_name: str, returncode, stderr: str, stdout: str = ""
+) -> str:
+    """Build an actionable error message for a non-zero CLI exit.
+
+    Hints are matched against both streams because several CLIs (claude, grok)
+    print auth / quota errors to *stdout*; both tails are included in the
+    message so the real failure is never hidden.
+    """
+    stderr = tail_text(stderr)
+    stdout = tail_text(stdout)
+    low = f"{stderr}\n{stdout}".lower()
     hint = ""
     if any(
         k in low
@@ -104,4 +181,7 @@ def explain_cli_failure(cli_name: str, returncode, stderr: str) -> str:
             f" | Hint: the {cli_name} executable was not found or is not runnable - "
             f"install it or put it on PATH (try `python serve.py --doctor`)."
         )
-    return f"{cli_name} failed with exit code {returncode}: {stderr}{hint}"
+    msg = f"{cli_name} failed with exit code {returncode}: {stderr}"
+    if stdout:
+        msg += f" | stdout: {stdout}"
+    return msg + hint
