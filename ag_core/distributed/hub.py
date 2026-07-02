@@ -342,12 +342,21 @@ class CentralHub:
                 new_config = payload.get("config", {})
                 for k, v in new_config.items():
                     if k in ("max_workers", "heartbeat_timeout", "task_timeout"):
-                        if not isinstance(v, (int, float)):
+                        if not isinstance(v, (int, float)) or isinstance(v, bool):
                             return 400, {"error": f"Invalid type for {k}"}, {}
                         if v < 0:
                             return (
                                 400,
                                 {"error": f"Value for {k} cannot be negative"},
+                                {},
+                            )
+                        # A zero timeout makes every worker/task instantly
+                        # "stale" on the next sweep — an authenticated DoS.
+                        # (max_workers=0 is allowed: it's the drain/pause state.)
+                        if k in ("heartbeat_timeout", "task_timeout") and v <= 0:
+                            return (
+                                400,
+                                {"error": f"Value for {k} must be positive"},
                                 {},
                             )
                 self.config.update(new_config)

@@ -150,9 +150,9 @@ worker_registry = WorkerRegistry()
 
 
 async def prune_stale_workers(timeout_sec: float = 30.0, check_interval: float = 5.0):
-    try:
-        central_hub.config["heartbeat_timeout"] = timeout_sec
-        while True:
+    central_hub.config["heartbeat_timeout"] = timeout_sec
+    while True:
+        try:
             await asyncio.sleep(check_interval)
             await central_hub.sweep()
             for task_id, fut in list(pending_tasks.items()):
@@ -182,10 +182,17 @@ async def prune_stale_workers(timeout_sec: float = 30.0, check_interval: float =
                                 fut.set_exception(WorkerDisconnectedError(error_msg))
                             else:
                                 fut.set_exception(ValueError(error_msg))
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        pass
+        except asyncio.CancelledError:
+            # Shutdown: propagate so the task actually stops.
+            raise
+        except Exception:
+            # One bad sweep must not kill the pruner for the process lifetime;
+            # log and keep looping so future stale workers still get swept.
+            print(
+                "[Hub] prune_stale_workers: sweep iteration failed",
+                file=sys.stderr,
+            )
+            traceback.print_exc()
 
 
 @asynccontextmanager
@@ -878,7 +885,9 @@ async def main_async():
                     await asyncio.gather(*server_tasks, return_exceptions=True)
                 return
             try:
-                prompt = input("Enter prompt for orchestrator: ").strip()
+                prompt = (
+                    await asyncio.to_thread(input, "Enter prompt for orchestrator: ")
+                ).strip()
             except KeyboardInterrupt:
                 print("\nExiting.")
                 return

@@ -5,6 +5,7 @@ import time
 import uuid
 import hmac
 import asyncio
+import traceback
 from typing import Any, Dict, List
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
@@ -502,6 +503,26 @@ def _read_resource(uri: str, workspace: str = None) -> List[Dict[str, str]]:
 # The pipeline is long-running, so orchestrate launches it as a background job
 # and returns a job_id; clients poll orchestrate_status for the result.
 ORCHESTRATION_JOBS: Dict[str, Dict[str, Any]] = {}
+# Strong refs to running pipeline tasks: asyncio only holds a weak ref, so a
+# task with no strong reference can be GC'd and cancelled mid-run.
+_ORCHESTRATION_TASKS: set = set()
+# Cap retained finished jobs so a long-lived server doesn't accumulate their
+# artifact strings without bound.
+_MAX_FINISHED_JOBS = 200
+
+
+def _prune_finished_jobs() -> None:
+    finished = [
+        (j.get("finished_at") or 0.0, jid)
+        for jid, j in ORCHESTRATION_JOBS.items()
+        if j.get("status") in ("completed", "failed")
+    ]
+    if len(finished) <= _MAX_FINISHED_JOBS:
+        return
+    finished.sort()  # oldest first
+    for _, jid in finished[: len(finished) - _MAX_FINISHED_JOBS]:
+        ORCHESTRATION_JOBS.pop(jid, None)
+
 
 # Root-level artifact files produced by the pipeline, keyed by logical stage.
 _ARTIFACT_FILES = {
@@ -682,9 +703,13 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             "rejected": False,
             "reject_reason": None,
         }
-        asyncio.create_task(
+        _prune_finished_jobs()
+        task = asyncio.create_task(
             _run_orchestration(job_id, prompt, pipeline, workspace, require_approval)
         )
+        # Hold a strong ref until the task finishes so it isn't GC-cancelled.
+        _ORCHESTRATION_TASKS.add(task)
+        task.add_done_callback(_ORCHESTRATION_TASKS.discard)
         message = "Pipeline started. Poll orchestrate_status with this job_id."
         if require_approval:
             message = (
@@ -801,9 +826,13 @@ async def call_tool(req: CallToolRequest, authorization: str = Header(default=""
         result = await dispatch_tool(req.name, req.arguments)
         return {"content": [{"type": "text", "text": result}]}
     except ValueError as e:
+        # Client input errors are safe to echo (they describe the bad request).
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # Don't leak internal detail (paths, upstream response bodies, auth
+        # diagnostics) to the caller; log it server-side instead.
+        print(f"[MCP] tool '{req.name}' failed:\n{traceback.format_exc()}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 PROTOCOL_VERSION = "2024-11-05"

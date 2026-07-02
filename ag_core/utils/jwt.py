@@ -19,11 +19,13 @@ def base64url_decode(data_str: str) -> bytes:
 
 
 import uuid
-import threading
 
-_seen_jtis = {}
-_jtis_lock = threading.Lock()
-_cleaned_expired_jtis = False
+# Purge expired jtis from the replay table every N inserts so it doesn't grow
+# without bound on a long-lived process. The insert path runs on the single DB
+# writer thread (enqueue_db_write serializes it), so the plain counter is safe
+# without a lock.
+_JTI_PURGE_INTERVAL = 500
+_jti_insert_count = 0
 
 
 def encode_jwt(payload: dict, secret: str) -> str:
@@ -105,14 +107,14 @@ def decode_jwt(token: str, secret: str) -> dict:
     from ag_core.utils.db import enqueue_db_write
 
     def _verify_and_save_jti_impl(conn, jti_str: str, exp_val: float | None):
-        global _cleaned_expired_jtis
-        if not _cleaned_expired_jtis:
+        global _jti_insert_count
+        if _jti_insert_count % _JTI_PURGE_INTERVAL == 0:
             now = time.time()
             conn.execute(
                 "DELETE FROM seen_jtis WHERE exp IS NOT NULL AND ? > exp", (now,)
             )
             conn.commit()
-            _cleaned_expired_jtis = True
+        _jti_insert_count += 1
 
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM seen_jtis WHERE jti = ?", (jti_str,))

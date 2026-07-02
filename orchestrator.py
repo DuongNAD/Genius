@@ -1873,8 +1873,12 @@ async def run_pipeline(
         if interactive:
             print(f"\n[Claude Design Output]\n{claude_content}\n")
             while True:
-                feedback = input(
-                    "Verify architecture. Press Enter to proceed or type modifications/comments: "
+                feedback = (
+                    await asyncio.to_thread(
+                        input,
+                        "Verify architecture. Press Enter to proceed or type "
+                        "modifications/comments: ",
+                    )
                 ).strip()
                 if not feedback:
                     break
