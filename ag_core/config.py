@@ -79,6 +79,8 @@ class ModelsConfig(BaseModel):
     openai: str = "gpt-4o"
     anthropic: str = "claude-3-5-sonnet"
     grok: str = "grok-2"
+    # Antigravity 2.0 (agy CLI / Gemini). Empty = the account's default model.
+    agy: str = ""
 
 
 class ScannerConfig(BaseModel):

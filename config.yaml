@@ -5,6 +5,8 @@ models:
   openai: "gpt-4o"
   anthropic: "claude-sonnet-4-6"
   grok: "grok-build-0.1"
+  # Antigravity 2.0 (agy CLI / Gemini); empty = the account's default model.
+  agy: ""
 scanner:
   chunk_size_limit: 8000
   exclude_patterns:

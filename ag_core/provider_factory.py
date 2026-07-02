@@ -27,7 +27,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 logger = logging.getLogger("ag_core")
 
 # backend name -> (provider module, provider class,
-#                  config.models attr, config api-key attr)
+#                  config.models attr, config api-key attr or None for
+#                  keyless backends)
 BACKENDS = {
     "grok": (
         "ag_core.providers.grok_provider",
@@ -47,16 +48,26 @@ BACKENDS = {
         "openai",
         "openai_api_key",
     ),
+    # Antigravity 2.0 (Gemini) via the local agy CLI. Keyless: auth is shared
+    # with the Antigravity IDE login.
+    "agy": (
+        "ag_core.providers.agy_provider",
+        "AgyProvider",
+        "agy",
+        None,
+    ),
 }
 
 # role -> preferred backend order when GENIUS_PROVIDER_FALLBACK is enabled.
+# agy participates only here (and via explicit GENIUS_PROVIDER_<ROLE>); the
+# legacy no-env chains are unchanged.
 DEFAULT_CHAINS = {
-    "grok": ["grok", "claude", "codex"],
-    "claude": ["claude", "codex"],
-    "codex": ["codex", "claude"],
-    "tester": ["codex", "claude"],
-    "security": ["codex", "claude"],
-    "devops": ["codex", "claude"],
+    "grok": ["grok", "agy", "claude", "codex"],
+    "claude": ["claude", "agy", "codex"],
+    "codex": ["codex", "claude", "agy"],
+    "tester": ["codex", "claude", "agy"],
+    "security": ["codex", "claude", "agy"],
+    "devops": ["codex", "claude", "agy"],
 }
 
 # role -> the single backend each role used before fallback existed. Used when
@@ -138,7 +149,9 @@ def build_backend(backend: str, config):
     """Instantiate the provider for one backend from ``config``."""
     mod_name, cls_name, model_attr, key_attr = BACKENDS[backend]
     provider_class = getattr(importlib.import_module(mod_name), cls_name)
-    api_key = getattr(config, key_attr, None) or os.getenv(key_attr.upper(), "")
+    api_key = None
+    if key_attr:
+        api_key = getattr(config, key_attr, None) or os.getenv(key_attr.upper(), "")
     model_name = getattr(config.models, model_attr)
     return provider_class(api_key=api_key, model_name=model_name)
 

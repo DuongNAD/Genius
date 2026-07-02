@@ -56,11 +56,22 @@ def test_blank_env_values_treated_as_unset(monkeypatch):
 def test_fallback_env_enables_default_chains(monkeypatch):
     for truthy in ("1", "true", "auto"):
         monkeypatch.setenv("GENIUS_PROVIDER_FALLBACK", truthy)
-        assert resolve_chain("grok") == ["grok", "claude", "codex"]
-        assert resolve_chain("claude") == ["claude", "codex"]
-        assert resolve_chain("tester") == ["codex", "claude"]
+        assert resolve_chain("grok") == ["grok", "agy", "claude", "codex"]
+        assert resolve_chain("claude") == ["claude", "agy", "codex"]
+        assert resolve_chain("tester") == ["codex", "claude", "agy"]
     monkeypatch.setenv("GENIUS_PROVIDER_FALLBACK", "0")
     assert resolve_chain("grok") == ["grok"]
+
+
+def test_default_chains_include_agy_everywhere():
+    # agy is the Gemini backup backend: second choice for the generative
+    # roles, last resort for the code-centric ones. Legacy no-env chains
+    # (see test_legacy_defaults_single_backend_per_role) never include it.
+    assert DEFAULT_CHAINS["grok"] == ["grok", "agy", "claude", "codex"]
+    assert DEFAULT_CHAINS["claude"] == ["claude", "agy", "codex"]
+    for role in ("codex", "tester", "security", "devops"):
+        assert DEFAULT_CHAINS[role] == ["codex", "claude", "agy"]
+    assert "agy" not in LEGACY_BACKENDS.values()
 
 
 def test_explicit_role_env_wins_over_fallback_env(monkeypatch):
@@ -68,7 +79,7 @@ def test_explicit_role_env_wins_over_fallback_env(monkeypatch):
     monkeypatch.setenv("GENIUS_PROVIDER_GROK", "claude,codex")
     assert resolve_chain("grok") == ["claude", "codex"]
     # Other roles still follow the fallback default.
-    assert resolve_chain("claude") == ["claude", "codex"]
+    assert resolve_chain("claude") == ["claude", "agy", "codex"]
 
 
 def test_explicit_role_env_normalizes_names(monkeypatch):
@@ -115,7 +126,7 @@ def test_fallback_path_returns_fallback_provider(monkeypatch):
     monkeypatch.setenv("GENIUS_PROVIDER_FALLBACK", "1")
     provider = make_provider("grok", load_config())
     assert isinstance(provider, FallbackProvider)
-    assert provider.backend_names == ["grok", "claude", "codex"]
+    assert provider.backend_names == ["grok", "agy", "claude", "codex"]
 
 
 def test_legacy_backend_override_for_mcp_deploy(monkeypatch):
@@ -127,7 +138,7 @@ def test_legacy_backend_override_for_mcp_deploy(monkeypatch):
     monkeypatch.setenv("GENIUS_PROVIDER_FALLBACK", "1")
     provider = make_provider("devops", config, legacy_backend="claude")
     assert isinstance(provider, FallbackProvider)
-    assert provider.backend_names == ["codex", "claude"]
+    assert provider.backend_names == ["codex", "claude", "agy"]
 
 
 def test_single_element_explicit_chain_returns_raw_provider(monkeypatch):
@@ -135,6 +146,41 @@ def test_single_element_explicit_chain_returns_raw_provider(monkeypatch):
     provider = make_provider("grok", load_config())
     assert isinstance(provider, AnthropicProvider)
     assert not isinstance(provider, FallbackProvider)
+
+
+def test_explicit_agy_backend_builds_keyless_provider(monkeypatch):
+    # The agy backend has no config api-key attr; build_backend must tolerate
+    # a keyless backend instead of crashing on key_attr.upper().
+    from ag_core.providers.agy_provider import AgyProvider
+
+    monkeypatch.setenv("GENIUS_PROVIDER_GROK", "agy")
+    provider = make_provider("grok", load_config())
+    assert isinstance(provider, AgyProvider)
+    assert not isinstance(provider, FallbackProvider)
+
+
+@pytest.mark.asyncio
+async def test_explicit_grok_agy_chain_falls_back_to_agy(monkeypatch):
+    """Chain [grok, agy]: grok dying at runtime is served by the agy backend."""
+    from ag_core.providers.agy_provider import AgyProvider
+
+    monkeypatch.setenv("GENIUS_PROVIDER_GROK", "grok,agy")
+
+    async def grok_dies(self, prompt, **kwargs):
+        raise RuntimeError("403 out of credits")
+
+    async def agy_answers(self, prompt, **kwargs):
+        return {"content": "agy-served-this", "usage": {}}
+
+    monkeypatch.setattr(GrokProvider, "send_prompt", grok_dies)
+    monkeypatch.setattr(AgyProvider, "send_prompt", agy_answers)
+
+    provider = make_provider("grok", load_config())
+    assert isinstance(provider, FallbackProvider)
+    assert provider.backend_names == ["grok", "agy"]
+
+    res = await provider.send_prompt("research this")
+    assert res["content"] == "agy-served-this"
 
 
 # --- FallbackProvider ------------------------------------------------------
@@ -282,6 +328,16 @@ envelope = {"type": "result", "is_error": False,
 sys.stdout.buffer.write((json.dumps(envelope) + "\n").encode("utf-8"))
 """
 
+# agy shim that is installed but dead (plain-text CLI, exit 1) - keeps the
+# chain hermetic: without it the real machine's agy.exe would serve the
+# prompt before claude ever got a chance.
+AGY_DEAD = r"""
+import sys
+sys.stdin.buffer.read()
+sys.stderr.buffer.write(b"agy: request failed: 401 unauthorized\n")
+sys.exit(1)
+"""
+
 
 @pytest.fixture
 def shim_dir(tmp_path, monkeypatch):
@@ -318,8 +374,10 @@ async def test_grok_out_of_credits_falls_back_to_claude_backend(
     shim_dir, monkeypatch, caplog
 ):
     """The real machine condition: grok CLI resolves but dies with 403 at
-    runtime - the research role must be served by the claude backend."""
+    runtime (and agy is dead too) - the research role must be served by the
+    claude backend, two fall-throughs down the default chain."""
     _install_shim(shim_dir, "grok", GROK_403)
+    _install_shim(shim_dir, "agy", AGY_DEAD)
     _install_shim(shim_dir, "claude", CLAUDE_HAPPY)
     monkeypatch.setenv("GENIUS_PROVIDER_FALLBACK", "1")
 
@@ -389,7 +447,7 @@ def test_doctor_reports_fallback_chains(monkeypatch):
     lines, _ = diagnostics.report_lines(_ALL_OK, skill_key_ok=True)
     assert any(
         "role grok" in ln
-        and "grok, claude, codex" in ln
+        and "grok, agy, claude, codex" in ln
         and "(GENIUS_PROVIDER_FALLBACK=1)" in ln
         for ln in lines
     )
@@ -405,8 +463,15 @@ def test_doctor_reports_explicit_role_chain(monkeypatch):
 
 
 def test_doctor_warns_when_primary_missing_but_fallback_available(monkeypatch):
+    # agy (the second backend in the default grok chain) is missing too: the
+    # warn must name the first backend that actually resolved.
     monkeypatch.setenv("GENIUS_PROVIDER_FALLBACK", "1")
-    results = [_r("grok", "MISSING"), _r("claude", "OK"), _r("codex", "OK")]
+    results = [
+        _r("grok", "MISSING"),
+        _r("agy", "MISSING"),
+        _r("claude", "OK"),
+        _r("codex", "OK"),
+    ]
     lines, _ = diagnostics.report_lines(results, skill_key_ok=True)
     assert any(
         "[warn]" in ln

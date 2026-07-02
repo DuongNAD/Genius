@@ -19,6 +19,7 @@ import shutil
 import sys
 
 from ag_core import provider_factory
+from ag_core.providers.agy_provider import resolve_agy_cli
 from ag_core.providers.grok_provider import resolve_grok_cli
 from ag_core.providers.anthropic_provider import resolve_claude_cli
 from ag_core.providers.openai_provider import resolve_codex_cli
@@ -33,7 +34,13 @@ CLI_CHECKS = [
         resolve_codex_cli,
         ["Codex Reviewer", "Tester", "Security", "DevOps"],
     ),
+    ("agy", resolve_agy_cli, ["fallback chains (Antigravity 2.0)"]),
 ]
+
+# Backends that no role depends on by default: a missing one never makes the
+# doctor NOT READY. When an env knob puts it in an effective chain, a [warn]
+# line is emitted instead (see provider_chain_lines).
+OPTIONAL_CLIS = {"agy"}
 
 
 def _is_located(path: str) -> bool:
@@ -177,6 +184,12 @@ def provider_chain_lines(results):
                     f"[warn]    {chain[0]} CLI missing; role {role} will "
                     f"fall back to {alive}"
                 )
+        for backend in chain[1:]:
+            if statuses.get(backend) == "MISSING":
+                lines.append(
+                    f"[warn]    {backend} CLI missing; role {role} cannot "
+                    f"fall back to it"
+                )
     return lines
 
 
@@ -196,16 +209,25 @@ def report_lines(results, skill_key_ok: bool):
     lines.extend(provider_chain_lines(results))
 
     lines.append("=" * 60)
-    missing = [r for r in results if r["status"] == "MISSING"]
+    # Optional backends (agy) never fail the doctor: no role depends on them
+    # unless an env knob adds them to a chain, and then the chain report
+    # already carries a [warn] line.
+    missing = [
+        r for r in results if r["status"] == "MISSING" and r["cli"] not in OPTIONAL_CLIS
+    ]
+    optional_missing = [
+        r for r in results if r["status"] == "MISSING" and r["cli"] in OPTIONAL_CLIS
+    ]
     if missing or not skill_key_ok:
         lines.append(
             "Result: NOT READY - resolve the items above before running the "
             "real pipeline."
         )
         return lines, 1
-    if any(r["status"] == "WARN" for r in results):
+    if any(r["status"] == "WARN" for r in results) or optional_missing:
         lines.append(
-            "Result: READY (with warnings) - version probes failed but CLIs resolved."
+            "Result: READY (with warnings) - optional/backup items above are "
+            "degraded but the pipeline can run."
         )
         return lines, 0
     lines.append("Result: READY - all CLIs resolved and responded.")
