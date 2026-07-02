@@ -68,7 +68,7 @@ from fastapi import Depends, HTTPException, Header, status, Request
 from fastapi.responses import JSONResponse
 from fastapi.responses import Response as FastAPIResponse
 from fastapi.security import APIKeyHeader
-from ag_core.utils.jwt import decode_jwt
+from ag_core.utils.jwt import decode_jwt, jwt_max_lifetime
 from ag_core.config import load_config
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -94,7 +94,12 @@ def verify_api_key(
     config = load_config()
     expected_key = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
     try:
-        payload = decode_jwt(token, expected_key)
+        payload = decode_jwt(
+            token,
+            expected_key,
+            require_exp=True,
+            max_lifetime=jwt_max_lifetime(),
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

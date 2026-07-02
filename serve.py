@@ -9,7 +9,7 @@ import traceback
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
-from ag_core.utils.jwt import decode_jwt
+from ag_core.utils.jwt import decode_jwt, jwt_max_lifetime
 
 # Add project root to sys.path
 root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -268,7 +268,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         await websocket.close(code=4001)
         return
     try:
-        payload = decode_jwt(token, secret)
+        payload = decode_jwt(
+            token, secret, require_exp=True, max_lifetime=jwt_max_lifetime()
+        )
         worker_id_from_jwt = payload.get("sub") or payload.get("worker_id")
     except Exception:
         await websocket.accept()

@@ -1,9 +1,18 @@
 ﻿import os
 import sys
+import hmac
 import socket
 import sqlite3
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    WebSocket,
+    WebSocketDisconnect,
+    Depends,
+    Header,
+    Query,
+    HTTPException,
+)
 from fastapi.responses import HTMLResponse
 
 # Add project root to sys.path
@@ -23,6 +32,26 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Genius Agent Dashboard", lifespan=lifespan)
+
+
+def _dashboard_token() -> str:
+    return (os.environ.get("GENIUS_DASHBOARD_TOKEN") or "").strip()
+
+
+def require_dashboard_auth(
+    x_dashboard_token: str = Header(default="", alias="X-Dashboard-Token"),
+    token: str = Query(default=""),
+) -> None:
+    """Guard the data endpoints. The dashboard dumps every stored prompt,
+    result, and error, so an exposed instance must not be open. Enforced only
+    when GENIUS_DASHBOARD_TOKEN is set (the default localhost bind keeps it
+    optional for the trusted single-user case)."""
+    expected = _dashboard_token()
+    if not expected:
+        return
+    provided = (x_dashboard_token or token or "").strip()
+    if not (provided and hmac.compare_digest(provided, expected)):
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def check_port(host: str, port: int) -> bool:
@@ -98,15 +127,18 @@ def get_distributed_workers() -> dict:
                 pass
     try:
         import httpx
-        import hashlib
-        import json
+        from ag_core.config import load_config
+        from ag_core.utils.security import calculate_checksum
 
+        # Authenticate the same way every other client does: the real
+        # SKILL_API_KEY in X-API-Key and an HMAC (not plain SHA-256) body
+        # checksum. The old hardcoded "valid-api-key" only ever worked under
+        # pytest (where conftest seeds that literal) and 401s in production.
+        secret = load_config().skill_api_key or os.getenv("SKILL_API_KEY", "")
         payload = {}
-        serialized = json.dumps(payload, sort_keys=True).encode("utf-8")
-        checksum = hashlib.sha256(serialized).hexdigest()
         headers = {
-            "X-API-Key": "valid-api-key",
-            "X-Payload-SHA256": checksum,
+            "X-API-Key": secret,
+            "X-Payload-SHA256": calculate_checksum(payload, secret),
             "Content-Type": "application/json",
         }
         response = httpx.post(
@@ -130,7 +162,7 @@ def get_distributed_workers() -> dict:
     return {}
 
 
-@app.get("/api/status")
+@app.get("/api/status", dependencies=[Depends(require_dashboard_auth)])
 def get_status():
     if IS_DISTRIBUTED:
         return get_distributed_workers()
@@ -159,7 +191,7 @@ def get_status():
     return result
 
 
-@app.get("/api/conversations")
+@app.get("/api/conversations", dependencies=[Depends(require_dashboard_auth)])
 def get_conversations():
     try:
         with get_db_connection() as conn:
@@ -174,7 +206,7 @@ def get_conversations():
         return []
 
 
-@app.get("/api/logs")
+@app.get("/api/logs", dependencies=[Depends(require_dashboard_auth)])
 def get_logs():
     try:
         with get_db_connection() as conn:
@@ -191,12 +223,21 @@ def get_logs():
 
 @app.websocket("/ws")
 async def ws_dashboard(websocket: WebSocket):
+    expected = _dashboard_token()
+    if expected:
+        provided = (websocket.query_params.get("token") or "").strip()
+        if not (provided and hmac.compare_digest(provided, expected)):
+            await websocket.close(code=1008)  # policy violation
+            return
     await websocket.accept()
 
     async def send_updates():
-        status_data = get_status()
-        conversations_data = get_conversations()
-        logs_data = get_logs()
+        # get_status/get_conversations/get_logs do blocking socket + sqlite I/O;
+        # run them off the event loop so a slow probe or DB read doesn't stall
+        # the whole dashboard process.
+        status_data = await asyncio.to_thread(get_status)
+        conversations_data = await asyncio.to_thread(get_conversations)
+        logs_data = await asyncio.to_thread(get_logs)
         await websocket.send_json(
             {
                 "status": status_data,
@@ -356,6 +397,13 @@ def get_index():
     </footer>
 
     <script>
+        // When the dashboard is token-protected, open /?token=<token>; the
+        // page forwards it to the data endpoints and the websocket.
+        const DASH_TOKEN = new URLSearchParams(window.location.search).get('token') || '';
+        function authHeaders() {
+            return DASH_TOKEN ? { 'X-Dashboard-Token': DASH_TOKEN } : {};
+        }
+
         function escapeHtml(str) {
             if (!str) return '';
             return String(str)
@@ -423,7 +471,7 @@ def get_index():
 
         async function updateStatus() {
             try {
-                const response = await fetch('/api/status');
+                const response = await fetch('/api/status', { headers: authHeaders() });
                 const data = await response.json();
                 renderStatusData(data);
             } catch (e) {
@@ -434,7 +482,7 @@ def get_index():
         let allConversations = [];
         async function updateConversations() {
             try {
-                const response = await fetch('/api/conversations');
+                const response = await fetch('/api/conversations', { headers: authHeaders() });
                 allConversations = await response.json();
                 renderConversations();
             } catch (e) {
@@ -474,7 +522,7 @@ def get_index():
         let allLogs = [];
         async function updateLogs() {
             try {
-                const response = await fetch('/api/logs');
+                const response = await fetch('/api/logs', { headers: authHeaders() });
                 allLogs = await response.json();
                 renderLogs();
             } catch (e) {
@@ -533,7 +581,7 @@ def get_index():
         let ws;
         function connectWebSocket() {
             const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUri = proto + '//' + window.location.host + '/ws';
+            const wsUri = proto + '//' + window.location.host + '/ws' + (DASH_TOKEN ? ('?token=' + encodeURIComponent(DASH_TOKEN)) : '');
             ws = new WebSocket(wsUri);
 
             ws.onmessage = function(event) {
@@ -586,4 +634,9 @@ def get_index():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("dashboard:app", host="0.0.0.0", port=8080, ws="auto")
+    # Bind localhost by default so the data endpoints (full prompt/result/error
+    # history) aren't reachable off-box. To expose it (GENIUS_DASHBOARD_HOST=
+    # 0.0.0.0), set GENIUS_DASHBOARD_TOKEN and open /?token=<token>.
+    host = os.environ.get("GENIUS_DASHBOARD_HOST", "127.0.0.1")
+    port = int(os.environ.get("GENIUS_DASHBOARD_PORT") or 8080)
+    uvicorn.run("dashboard:app", host=host, port=port, ws="auto")
