@@ -3,9 +3,10 @@ import sys
 import json
 import time
 import uuid
+import hmac
 import asyncio
 from typing import Any, Dict, List
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 
 # Add project root to sys.path
@@ -632,6 +633,13 @@ async def _run_orchestration(
         job["finished_at"] = time.time()
 
 
+def _jobs_root() -> str:
+    """Root directory for per-job workspaces (override via GENIUS_JOBS_DIR)."""
+    return os.environ.get("GENIUS_JOBS_DIR") or os.path.join(
+        os.getcwd(), ".genius_jobs"
+    )
+
+
 async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
     """Route a tool call to either the full pipeline or a single agent.
 
@@ -652,6 +660,12 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
                 "pipeline (the e2e variant has no stage gates)."
             )
         job_id = uuid.uuid4().hex
+        if not workspace:
+            # Isolate each job in its own directory. Concurrent jobs sharing the
+            # CWD clobber each other's fixed-name artifacts (design.md, app.py,
+            # ...) and one job's clean_output_files archives another's live
+            # files mid-run.
+            workspace = os.path.join(_jobs_root(), job_id)
         ORCHESTRATION_JOBS[job_id] = {
             "job_id": job_id,
             "status": "running",
@@ -761,8 +775,24 @@ async def list_tools():
     return {"tools": TOOLS}
 
 
+def _require_http_auth(authorization: str) -> None:
+    """Guard the HTTP tool endpoint. ``/tools/call`` drives local vendor CLIs,
+    the full pipeline, and filesystem writes, so an exposed (non-localhost)
+    server must not be open. When GENIUS_MCP_TOKEN is set, require a matching
+    bearer token; the default localhost bind keeps the token optional for the
+    trusted single-user case."""
+    expected = (os.environ.get("GENIUS_MCP_TOKEN") or "").strip()
+    if not expected:
+        return
+    header = (authorization or "").strip()
+    provided = header[7:].strip() if header.lower().startswith("bearer ") else header
+    if not (provided and hmac.compare_digest(provided, expected)):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 @app.post("/tools/call")
-async def call_tool(req: CallToolRequest):
+async def call_tool(req: CallToolRequest, authorization: str = Header(default="")):
+    _require_http_auth(authorization)
     valid_tool_names = {t["name"] for t in TOOLS}
     if req.name not in valid_tool_names:
         raise HTTPException(status_code=400, detail=f"Tool {req.name} not found")
@@ -945,4 +975,9 @@ if __name__ == "__main__":
     else:
         import uvicorn
 
-        uvicorn.run("mcp_server:app", host="0.0.0.0", port=8000)
+        # Bind localhost by default so the unauthenticated tool endpoint isn't
+        # reachable off-box. To expose it (GENIUS_MCP_HOST=0.0.0.0), set
+        # GENIUS_MCP_TOKEN so /tools/call requires a bearer token.
+        host = os.environ.get("GENIUS_MCP_HOST", "127.0.0.1")
+        port = int(os.environ.get("GENIUS_MCP_PORT") or 8000)
+        uvicorn.run("mcp_server:app", host=host, port=port)

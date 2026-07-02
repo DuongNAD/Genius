@@ -93,3 +93,6 @@ config.yaml
 .chroma/
 # Scratch/generated workspace from stress runs
 temp_workspace_f4_large/
+
+# Per-job orchestrate workspaces (MCP server isolates each job here by default)
+/.genius_jobs/

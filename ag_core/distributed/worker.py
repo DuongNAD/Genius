@@ -352,8 +352,11 @@ class ClientWorker:
         while True:
             token = self.generate_jwt()
             uri = f"ws://{hub_ip}:{hub_port}/ws/connect?token={token}"
+            # The token is a bearer credential in the query string — never log
+            # the full URI (stdout/log capture would leak a replayable token).
+            safe_uri = f"ws://{hub_ip}:{hub_port}/ws/connect"
             try:
-                print(f"[Worker] Connecting to {uri}...")
+                print(f"[Worker] Connecting to {safe_uri} ...")
                 async with websockets.connect(uri) as websocket:
                     self.ws = websocket
                     backoff = 1.0  # Reset backoff

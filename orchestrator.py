@@ -574,7 +574,23 @@ async def perform_get_with_retry(client, url, headers):
     return response
 
 
-_API_RESPONSE_CACHE = {}
+from collections import OrderedDict
+
+# Process-global response cache. Bounded with LRU eviction so a long-lived
+# server (MCP / hub) can't grow it without limit — every distinct agent call
+# used to store its full response string forever. Size configurable via
+# GENIUS_CACHE_MAXSIZE (entries).
+_API_RESPONSE_CACHE: "OrderedDict[str, str]" = OrderedDict()
+_API_RESPONSE_CACHE_MAXSIZE = max(1, int(os.environ.get("GENIUS_CACHE_MAXSIZE") or 256))
+
+
+def _cache_store(key: str, value: str) -> None:
+    cache = _API_RESPONSE_CACHE
+    if key in cache:
+        cache.move_to_end(key)
+    cache[key] = value
+    while len(cache) > _API_RESPONSE_CACHE_MAXSIZE:
+        cache.popitem(last=False)
 
 
 async def call_api(
@@ -608,6 +624,7 @@ async def call_api(
 
     if use_cache and cache_key in _API_RESPONSE_CACHE:
         logger.info(f"Cache hit for URL: {url}")
+        _API_RESPONSE_CACHE.move_to_end(cache_key)
         return _API_RESPONSE_CACHE[cache_key]
 
     if DISTRIBUTED_MODE:
@@ -767,7 +784,7 @@ async def call_api(
                     if status == "completed":
                         result = task_info.get("result")
                         if use_cache:
-                            _API_RESPONSE_CACHE[cache_key] = result
+                            _cache_store(cache_key, result)
                         return result
                     elif status == "failed":
                         err = task_info.get("result", {}).get(
@@ -858,7 +875,7 @@ async def call_api(
                 result = await asyncio.wait_for(fut, timeout=poll_timeout)
                 logger.info(f"[Distributed] Task '{task_id}' completed successfully")
                 if use_cache:
-                    _API_RESPONSE_CACHE[cache_key] = result
+                    _cache_store(cache_key, result)
                 return result
             except (asyncio.TimeoutError, TimeoutError) as e:
                 logger.error(f"[Distributed] Task '{task_id}' timed out: {e}")
@@ -1048,7 +1065,7 @@ async def call_api(
             result = await _execute(local_client)
 
     if use_cache:
-        _API_RESPONSE_CACHE[cache_key] = result
+        _cache_store(cache_key, result)
     return result
 
 
