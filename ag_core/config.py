@@ -76,13 +76,15 @@ class AppConfig(BaseModel):
 
 
 class ModelsConfig(BaseModel):
-    openai: str = "gpt-4o"
-    anthropic: str = "claude-3-5-sonnet"
+    # Empty = the CLI's own default model; a value is passed through to the
+    # CLI's model flag (codex -m / claude --model / agy --model). Per-backend
+    # env override: GENIUS_MODEL_<BACKEND>.
+    openai: str = ""
+    anthropic: str = ""
     # grok is an opt-in backend only (kept for GENIUS_PROVIDER_<ROLE>
-    # overrides; no default provider chain uses it).
+    # overrides; no default provider chain uses it). Not passed to the CLI.
     grok: str = "grok-2"
     # Antigravity 2.0 (agy CLI / Gemini), the default Researcher primary.
-    # Empty = the account's default model.
     agy: str = ""
 
 
@@ -100,7 +102,9 @@ class ScannerConfig(BaseModel):
 
 
 class ServicesConfig(BaseModel):
-    grok_researcher: str = "http://localhost:8001"
+    # The Researcher service (role id "researcher"; formerly "grok" — the
+    # legacy yaml key "grok_researcher" is still accepted by load_config).
+    researcher: str = "http://localhost:8001"
     claude_architect: str = "http://localhost:8002"
     codex_reviewer: str = "http://localhost:8003"
     tester_agent: str = "http://localhost:8004"
@@ -193,11 +197,17 @@ def load_config(config_path: str = "config.yaml") -> Config:
         if val is not None:
             yaml_data[field_name] = val
 
+    # Legacy config.yaml key: the Researcher service used to be
+    # "grok_researcher" (role id "grok"); map it to the renamed field.
+    services_yaml = yaml_data.get("services")
+    if isinstance(services_yaml, dict) and "grok_researcher" in services_yaml:
+        services_yaml.setdefault("researcher", services_yaml.pop("grok_researcher"))
+
     config = Config(**yaml_data)
     import sys
 
     if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
-        config.services.grok_researcher = "http://localhost:8001/grok"
+        config.services.researcher = "http://localhost:8001/researcher"
         config.services.claude_architect = "http://localhost:8002/claude"
         config.services.codex_reviewer = "http://localhost:8003/codex"
         config.services.tester_agent = "http://localhost:8004/tester"
@@ -223,7 +233,10 @@ def load_config(config_path: str = "config.yaml") -> Config:
             with open(registry_path, "r", encoding="utf-8") as f:
                 registry = json.load(f)
             role_to_field = {
-                "grok": "grok_researcher",
+                "researcher": "researcher",
+                # Legacy registry keys from before the role rename.
+                "grok": "researcher",
+                "grok_researcher": "researcher",
                 "claude": "claude_architect",
                 "codex": "codex_reviewer",
                 "tester": "tester_agent",

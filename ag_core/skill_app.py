@@ -17,14 +17,16 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from ag_core.config import load_config
-from ag_core.provider_factory import make_provider
+from ag_core.provider_factory import canonical_role, make_provider
 from ag_core.utils.rate_limiter import rate_limit_dependency
 from ag_core.utils.security import checksum_middleware, verify_api_key
 
 # role -> (agent module, agent class). Provider selection lives in
-# ag_core.provider_factory (role -> backend chain, env-overridable).
+# ag_core.provider_factory (role -> backend chain, env-overridable). Keys are
+# CANONICAL role ids; legacy ids ("grok", "grok_researcher") are folded in by
+# canonical_role() before lookup.
 ROLE_MAP = {
-    "grok": ("ag_core.agents.grok_researcher", "GrokResearcherAgent"),
+    "researcher": ("ag_core.agents.researcher", "ResearcherAgent"),
     "claude": ("ag_core.agents.claude_architect", "ClaudeArchitectAgent"),
     "codex": ("ag_core.agents.codex_reviewer", "CodexReviewerAgent"),
     "tester": ("ag_core.agents.tester", "TesterAgent"),
@@ -57,7 +59,7 @@ def build_agent(role: str, stateless: bool = True):
     output files nor touches the vector memory DB, so a request leaves no trace
     on the server's working directory.
     """
-    role = role.lower()
+    role = canonical_role(role)
     if role not in ROLE_MAP:
         raise ValueError(f"Unknown role: {role}")
 
@@ -75,8 +77,9 @@ def build_agent(role: str, stateless: bool = True):
 
 
 def create_skill_app(role: str) -> FastAPI:
-    """Build the FastAPI skill server for a single agent role."""
-    role = role.lower()
+    """Build the FastAPI skill server for a single agent role. The /health
+    body reports the CANONICAL role id (legacy input ids are normalized)."""
+    role = canonical_role(role)
     if role not in ROLE_MAP:
         raise ValueError(f"Unknown role: {role}")
 

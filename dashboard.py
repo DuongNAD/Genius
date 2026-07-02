@@ -36,8 +36,9 @@ def check_port(host: str, port: int) -> bool:
 
 def check_agent_busy(agent_name: str) -> str:
     names_to_check = [agent_name]
-    if agent_name == "grok":
-        names_to_check.append("grok_researcher")
+    if agent_name == "researcher":
+        # Legacy DB rows from before the role rename.
+        names_to_check.extend(["grok", "grok_researcher"])
     elif agent_name == "claude":
         names_to_check.append("claude_architect")
     elif agent_name == "codex":
@@ -135,7 +136,11 @@ def get_status():
         return get_distributed_workers()
 
     agents = {
-        "grok": {"port": 8001, "db_name": "grok", "roles": ["grok"]},
+        "researcher": {
+            "port": 8001,
+            "db_name": "researcher",
+            "roles": ["researcher"],
+        },
         "claude": {"port": 8002, "db_name": "claude", "roles": ["claude"]},
         "codex": {"port": 8003, "db_name": "codex", "roles": ["codex"]},
         "tester": {"port": 8004, "db_name": "tester", "roles": ["tester"]},

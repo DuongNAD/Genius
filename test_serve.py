@@ -38,10 +38,12 @@ def test_resolve_registry_path_honours_explicit_env(tmp_path, monkeypatch):
 
 
 def test_normalize_roles():
-    assert normalize_roles("grok,claude") == ["grok", "claude"]
-    assert normalize_roles("grok-api,4") == ["grok", "tester"]
+    assert normalize_roles("researcher,claude") == ["researcher", "claude"]
+    # Legacy "grok"-flavoured tokens map to the renamed researcher role.
+    assert normalize_roles("grok,claude") == ["researcher", "claude"]
+    assert normalize_roles("grok-api,4") == ["researcher", "tester"]
     assert normalize_roles("grok, 2, 3, 5") == [
-        "grok",
+        "researcher",
         "claude",
         "codex",
         "orchestrator",
@@ -55,7 +57,7 @@ def test_normalize_roles():
 async def test_serve_cli_roles_only(
     mock_parse_args, mock_run_pipeline, mock_start_server
 ):
-    # Simulate '--roles grok,claude'
+    # Simulate '--roles grok,claude' (legacy researcher alias on the CLI)
     mock_args = MagicMock()
     mock_args.roles = "grok,claude"
     mock_args.prompt = None
@@ -64,7 +66,7 @@ async def test_serve_cli_roles_only(
     await main_async()
 
     assert mock_start_server.call_count == 2
-    mock_start_server.assert_any_call("grok", 8001)
+    mock_start_server.assert_any_call("researcher", 8001)
     mock_start_server.assert_any_call("claude", 8002)
     assert not mock_run_pipeline.called
 
@@ -149,7 +151,7 @@ async def test_serve_cli_auto_pilot(
 
     # All 7 microservice servers should have been started
     assert mock_start_server.call_count == 7
-    mock_start_server.assert_any_call("grok", 8001)
+    mock_start_server.assert_any_call("researcher", 8001)
     mock_start_server.assert_any_call("claude", 8002)
     mock_start_server.assert_any_call("codex", 8003)
     mock_start_server.assert_any_call("tester", 8004)
@@ -190,11 +192,13 @@ def test_skill_app_health_endpoint_is_unauthenticated():
     from fastapi.testclient import TestClient
     from ag_core.skill_app import create_skill_app
 
+    # Built with the legacy "grok" role id: the alias still boots the
+    # researcher app, and /health reports the CANONICAL role id.
     client = TestClient(create_skill_app("grok"))
     # No JWT / checksum headers at all: /health must still answer.
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "role": "grok"}
+    assert resp.json() == {"status": "ok", "role": "researcher"}
 
 
 @pytest.mark.asyncio
@@ -295,12 +299,14 @@ def test_load_config_reads_registry_with_blank_env(monkeypatch, tmp_path):
         with open(default_path, "r", encoding="utf-8") as f:
             original = f.read()
     try:
+        # Legacy registry key "grok" (pre-rename) must still map onto the
+        # renamed services.researcher field.
         with open(default_path, "w", encoding="utf-8") as f:
             json.dump({"grok": 9166}, f)
         monkeypatch.setenv("GENIUS_SERVICE_REGISTRY", "")
         config = load_config()
-        # Under pytest, URLs get a /role suffix.
-        assert config.services.grok_researcher == "http://localhost:9166/grok"
+        # Under pytest, URLs get a /role suffix (the raw registry key).
+        assert config.services.researcher == "http://localhost:9166/grok"
     finally:
         if original is None:
             os.remove(default_path)

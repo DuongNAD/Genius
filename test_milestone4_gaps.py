@@ -134,7 +134,8 @@ def test_orchestrator_cli_arguments():
         assert kwargs["security_args"] == ["arg1", "arg2"]
         assert kwargs["devops_cmd"] == "my-dev"
         assert kwargs["devops_args"] == ["arg3"]
-        assert kwargs["grok_url"] == "http://grok-override"
+        # --grok-url is the legacy alias flag; it lands in researcher_url.
+        assert kwargs["researcher_url"] == "http://grok-override"
         assert kwargs["claude_url"] == "http://claude-override"
         assert kwargs["codex_url"] == "http://codex-override"
         assert kwargs["tester_url"] == "http://tester-override"

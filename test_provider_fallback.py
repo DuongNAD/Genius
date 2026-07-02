@@ -1,4 +1,4 @@
-"""Tests for provider fallback chains (ag_core/provider_factory.py):
+﻿"""Tests for provider fallback chains (ag_core/provider_factory.py):
 chain resolution env knobs, the lazy sticky FallbackProvider, the rewired
 construction sites (MCP path), and the doctor's chain report."""
 
@@ -23,7 +23,9 @@ from ag_core.providers.openai_provider import OpenAIProvider
 from ag_core.utils.cli_runner import CLITimeoutError
 
 _ENV_VARS = [f"GENIUS_PROVIDER_{r.upper()}" for r in DEFAULT_CHAINS] + [
-    "GENIUS_PROVIDER_FALLBACK"
+    "GENIUS_PROVIDER_FALLBACK",
+    # Legacy spelling for the researcher role (old role id "grok").
+    "GENIUS_PROVIDER_GROK",
 ]
 
 
@@ -39,7 +41,7 @@ def _clean_provider_env(monkeypatch):
 # The no-env default chain for every role: the grok backend is in none of
 # them (opt-in only), agy (Antigravity/Gemini) is the researcher primary.
 EXPECTED_DEFAULT_CHAINS = {
-    "grok": ["agy", "claude", "codex"],
+    "researcher": ["agy", "claude", "codex"],
     "claude": ["claude", "agy", "codex"],
     "codex": ["codex", "claude", "agy"],
     "tester": ["codex", "claude", "agy"],
@@ -52,6 +54,24 @@ def test_default_chains_no_env_for_all_six_roles():
     for role, chain in EXPECTED_DEFAULT_CHAINS.items():
         assert resolve_chain(role) == chain
     assert DEFAULT_CHAINS == EXPECTED_DEFAULT_CHAINS
+
+
+def test_legacy_grok_role_id_is_an_alias_for_researcher(monkeypatch):
+    # The Researcher role was renamed grok -> researcher; the old id keeps
+    # resolving everywhere through canonical_role.
+    assert provider_factory.canonical_role("grok") == "researcher"
+    assert provider_factory.canonical_role("grok_researcher") == "researcher"
+    assert resolve_chain("grok") == resolve_chain("researcher")
+
+    # GENIUS_PROVIDER_RESEARCHER wins over the legacy GENIUS_PROVIDER_GROK.
+    monkeypatch.setenv("GENIUS_PROVIDER_GROK", "claude")
+    monkeypatch.setenv("GENIUS_PROVIDER_RESEARCHER", "agy,codex")
+    assert resolve_chain("researcher") == ["agy", "codex"]
+    assert provider_factory.chain_source("researcher") == "GENIUS_PROVIDER_RESEARCHER"
+    # Legacy env alone is still honored (queried via either role id).
+    monkeypatch.delenv("GENIUS_PROVIDER_RESEARCHER")
+    assert resolve_chain("grok") == ["claude"]
+    assert provider_factory.chain_source("grok") == "GENIUS_PROVIDER_GROK"
 
 
 def test_grok_backend_absent_from_every_default_chain():
@@ -172,6 +192,19 @@ def test_single_element_explicit_chain_returns_raw_provider(monkeypatch):
     provider = make_provider("grok", load_config())
     assert isinstance(provider, AnthropicProvider)
     assert not isinstance(provider, FallbackProvider)
+
+
+def test_genius_model_env_overrides_config_model(monkeypatch):
+    # GENIUS_MODEL_<BACKEND> beats config.models.<backend>; blank = unset.
+    from ag_core.provider_factory import build_backend
+
+    monkeypatch.setenv("GENIUS_MODEL_CLAUDE", "claude-fable-5")
+    provider = build_backend("claude", load_config())
+    assert provider.model_name == "claude-fable-5"
+
+    monkeypatch.setenv("GENIUS_MODEL_CLAUDE", "")
+    provider = build_backend("claude", load_config())
+    assert provider.model_name == load_config().models.anthropic
 
 
 def test_explicit_agy_backend_builds_keyless_provider(monkeypatch):
@@ -471,7 +504,7 @@ def test_doctor_reports_default_chains_by_default():
     lines, _ = diagnostics.report_lines(_ALL_OK, skill_key_ok=True)
     text = "\n".join(lines)
     assert "Provider chains" in text
-    assert any("role grok" in ln and "agy, claude, codex" in ln for ln in lines)
+    assert any("role researcher" in ln and "agy, claude, codex" in ln for ln in lines)
     # Default chains: no knob annotation on any role line.
     assert not any("role " in ln and "(GENIUS_PROVIDER" in ln for ln in lines)
 
@@ -481,7 +514,7 @@ def test_doctor_reports_same_default_chains_with_deprecated_knob(monkeypatch):
     # reported as a chain source.
     monkeypatch.setenv("GENIUS_PROVIDER_FALLBACK", "1")
     lines, _ = diagnostics.report_lines(_ALL_OK, skill_key_ok=True)
-    assert any("role grok" in ln and "agy, claude, codex" in ln for ln in lines)
+    assert any("role researcher" in ln and "agy, claude, codex" in ln for ln in lines)
     assert not any("GENIUS_PROVIDER_FALLBACK" in ln and "role " in ln for ln in lines)
 
 
@@ -489,7 +522,7 @@ def test_doctor_reports_explicit_role_chain(monkeypatch):
     monkeypatch.setenv("GENIUS_PROVIDER_GROK", "claude")
     lines, _ = diagnostics.report_lines(_ALL_OK, skill_key_ok=True)
     assert any(
-        "role grok" in ln and "-> claude" in ln and "(GENIUS_PROVIDER_GROK)" in ln
+        "role researcher" in ln and "-> claude" in ln and "(GENIUS_PROVIDER_GROK)" in ln
         for ln in lines
     )
 
@@ -507,7 +540,7 @@ def test_doctor_warns_when_primary_missing_but_fallback_available():
     assert any(
         "[warn]" in ln
         and "agy CLI missing" in ln
-        and "role grok" in ln
+        and "role researcher" in ln
         and "fall back to claude" in ln
         for ln in lines
     )
@@ -516,4 +549,4 @@ def test_doctor_warns_when_primary_missing_but_fallback_available():
 def test_doctor_reports_bad_env_instead_of_crashing(monkeypatch):
     monkeypatch.setenv("GENIUS_PROVIDER_GROK", "nonsense")
     lines, _ = diagnostics.report_lines(_ALL_OK, skill_key_ok=True)
-    assert any("[ERROR]" in ln and "role grok" in ln for ln in lines)
+    assert any("[ERROR]" in ln and "role researcher" in ln for ln in lines)

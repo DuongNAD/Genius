@@ -64,21 +64,27 @@ class WorkerRegistry:
         return self._lock
 
     async def select_idle_worker(self, role: str):
+        # Both sides go through canonical_role so old workers advertising the
+        # legacy "grok"/"grok_researcher" role ids still match "researcher"
+        # dispatches (and vice versa).
+        from ag_core.provider_factory import canonical_role
+
+        want = canonical_role(role)
         async with self.lock:
             now = time.time()
             timeout = central_hub.config.get("heartbeat_timeout", 30.0)
             for worker_id, info in list(self.workers.items()):
-                worker_roles = [r.lower() for r in info.get("roles", [])]
+                worker_roles = [canonical_role(r) for r in info.get("roles", [])]
                 role_matched = False
                 for r in worker_roles:
                     if (
-                        r == role.lower()
-                        or (role.lower() == "grok" and "grok" in r)
-                        or (role.lower() == "claude" and "claude" in r)
-                        or (role.lower() == "codex" and "codex" in r)
-                        or (role.lower() == "tester" and "tester" in r)
-                        or (role.lower() == "security" and "security" in r)
-                        or (role.lower() == "devops" and "devops" in r)
+                        r == want
+                        or (want == "researcher" and "researcher" in r)
+                        or (want == "claude" and "claude" in r)
+                        or (want == "codex" and "codex" in r)
+                        or (want == "tester" and "tester" in r)
+                        or (want == "security" and "security" in r)
+                        or (want == "devops" and "devops" in r)
                     ):
                         role_matched = True
                         break
@@ -399,9 +405,9 @@ async def start_hub_server(port: int):
 
 
 ROUTING_TABLE = {
-    "/research": ("grok", 8001),
-    "/summarize": ("grok", 8001),
-    "/fact-check": ("grok", 8001),
+    "/research": ("researcher", 8001),
+    "/summarize": ("researcher", 8001),
+    "/fact-check": ("researcher", 8001),
     "/plan": ("claude", 8002),
     "/design": ("claude", 8002),
     "/review-architecture": ("claude", 8002),
@@ -420,8 +426,18 @@ def normalize_roles(roles_str: str) -> list:
     raw_roles = [r.strip().lower() for r in roles_str.split(",") if r.strip()]
     normalized = []
     for r in raw_roles:
-        if r in ["1", "grok", "grok_researcher", "grok api", "grok-api"]:
-            normalized.append("grok")
+        # "grok"-flavoured tokens are the researcher role's legacy id.
+        if r in [
+            "1",
+            "researcher",
+            "researcher api",
+            "researcher-api",
+            "grok",
+            "grok_researcher",
+            "grok api",
+            "grok-api",
+        ]:
+            normalized.append("researcher")
         elif r in ["2", "claude", "claude_architect", "claude api", "claude-api"]:
             normalized.append("claude")
         elif r in ["3", "codex", "codex_reviewer", "codex api", "codex-api"]:
@@ -449,7 +465,7 @@ def normalize_roles(roles_str: str) -> list:
 def interactive_prompt() -> list:
     print("=== Antigravity 2.0 Unified Startup Menu ===")
     print("Select specific roles/agents this machine will run (comma-separated):")
-    print("1. grok         - Researcher API (Port 8001)")
+    print("1. researcher   - Researcher API (Port 8001)")
     print("2. claude       - Claude Architect API (Port 8002)")
     print("3. codex        - Codex Reviewer API (Port 8003)")
     print("4. tester       - Tester Agent API (Port 8004)")
@@ -459,7 +475,7 @@ def interactive_prompt() -> list:
     print("8. devops       - DevOps Agent API (Port 8006)")
     try:
         choice = input(
-            "Enter selection (e.g. 'grok,claude' or '5' or '1,2,3,4,5,6,7,8'): "
+            "Enter selection (e.g. 'researcher,claude' or '5' or '1,2,3,4,5,6,7,8'): "
         ).strip()
         return normalize_roles(choice)
     except KeyboardInterrupt:
@@ -468,8 +484,11 @@ def interactive_prompt() -> list:
 
 
 def get_api_app(role: str):
-    if role == "grok":
-        path = os.path.join(root_dir, ".agents", "skills", "grok_researcher", "api.py")
+    from ag_core.provider_factory import canonical_role
+
+    role = canonical_role(role)
+    if role == "researcher":
+        path = os.path.join(root_dir, ".agents", "skills", "researcher", "api.py")
     elif role == "claude":
         path = os.path.join(root_dir, ".agents", "skills", "claude_architect", "api.py")
     elif role == "codex":
@@ -493,7 +512,7 @@ def get_api_app(role: str):
 
 # Default ports for the agent skill servers (the roles that expose /health).
 AGENT_DEFAULT_PORTS = {
-    "grok": 8001,
+    "researcher": 8001,
     "claude": 8002,
     "codex": 8003,
     "tester": 8004,
@@ -625,6 +644,12 @@ def _prune_registry_entry(registry_path: str, role: str, port: int) -> None:
 
 
 async def start_server(role: str, port: int):
+    # Canonicalize here (not just in normalize_roles) so direct callers using
+    # a legacy role id ("grok") boot the right app AND register the canonical
+    # key in the service registry.
+    from ag_core.provider_factory import canonical_role
+
+    role = canonical_role(role)
     app = get_api_app(role)
 
     def _make_server(bind_port: int) -> uvicorn.Server:
@@ -696,7 +721,11 @@ async def main_async():
     parser.add_argument(
         "--roles",
         default=None,
-        help="Comma-separated roles to run (grok, claude, codex, tester, orchestrator, dashboard)",
+        help=(
+            "Comma-separated roles to run (researcher, claude, codex, tester, "
+            "security, devops, orchestrator, dashboard); legacy alias 'grok' "
+            "still maps to researcher"
+        ),
     )
     parser.add_argument("--prompt", default=None, help="Prompt for orchestrator role")
     parser.add_argument(
@@ -744,7 +773,7 @@ async def main_async():
 
     if auto_pilot:
         selected_roles = [
-            "grok",
+            "researcher",
             "claude",
             "codex",
             "tester",

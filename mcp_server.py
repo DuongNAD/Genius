@@ -19,7 +19,11 @@ from ag_core.provider_factory import make_provider
 # The agent classes are resolved through module globals at call time (see
 # execute_agent) so tests can patch e.g. ``mcp_server.DevOpsAgent`` - flake8
 # cannot see that usage, hence the noqa markers.
-from ag_core.agents.grok_researcher import GrokResearcherAgent  # noqa: F401
+from ag_core.agents.researcher import ResearcherAgent  # noqa: F401
+
+# Legacy alias for older imports of mcp_server.GrokResearcherAgent (same
+# class object; execute_agent resolves the canonical "ResearcherAgent" name).
+GrokResearcherAgent = ResearcherAgent
 from ag_core.agents.claude_architect import ClaudeArchitectAgent  # noqa: F401
 from ag_core.agents.codex_reviewer import CodexReviewerAgent  # noqa: F401
 from ag_core.agents.tester import TesterAgent  # noqa: F401
@@ -42,7 +46,7 @@ class CallToolRequest(BaseModel):
 # backend (unlike the codex-first skill server / worker paths), so its default
 # chain keeps that claude-first tradition.
 TOOL_AGENTS = {
-    "research": ("grok", "GrokResearcherAgent", None),
+    "research": ("researcher", "ResearcherAgent", None),
     "design": ("claude", "ClaudeArchitectAgent", None),
     "code": ("codex", "CodexReviewerAgent", None),
     "unit_test": ("tester", "TesterAgent", None),

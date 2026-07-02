@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -7,4 +7,4 @@ if _ROOT not in sys.path:
 
 from ag_core.skill_app import create_skill_app
 
-app = create_skill_app("grok")
+app = create_skill_app("researcher")

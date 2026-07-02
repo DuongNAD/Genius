@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import time
 import json
@@ -215,7 +215,7 @@ async def test_orchestrator_concurrency_bounds():
 
     mock_config = MagicMock()
     mock_config.scanner.exclude_patterns = []
-    mock_config.services.grok_researcher = "http://127.0.0.1:8001"
+    mock_config.services.researcher = "http://127.0.0.1:8001"
     mock_config.services.claude_architect = "http://127.0.0.1:8002"
     mock_config.services.codex_reviewer = "http://127.0.0.1:8003"
     mock_config.services.tester_agent = "http://127.0.0.1:8004"

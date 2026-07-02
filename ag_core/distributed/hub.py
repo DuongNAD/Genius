@@ -438,9 +438,16 @@ class CentralHub:
         return 404, {"error": "Endpoint not found"}, {}
 
     def _find_eligible_worker(self, role: str) -> Optional[str]:
+        # Canonicalize both sides so a "researcher" dispatch matches workers
+        # that registered under the legacy "grok"/"grok_researcher" ids (and
+        # vice versa). Non-aliased role strings compare unchanged.
+        from ag_core.provider_factory import canonical_role
+
+        want = canonical_role(role)
         now = time.time()
         for w_id, w_info in self.workers.items():
-            if role in w_info["roles"] and w_info["status"] == "idle":
+            registered = (canonical_role(r) for r in w_info["roles"])
+            if want in registered and w_info["status"] == "idle":
                 if now - w_info["last_heartbeat"] < self.config["heartbeat_timeout"]:
                     return w_id
         return None
@@ -527,11 +534,15 @@ class CentralHub:
                 processed_tasks.append(task_id)
                 continue
 
-            # Find an idle worker that matches
+            # Find an idle worker that matches (same alias-tolerant matching
+            # as _find_eligible_worker).
+            from ag_core.provider_factory import canonical_role
+
+            want = canonical_role(task["role"])
             target_worker = None
             for w_id in idle_workers:
                 w_info = self.workers[w_id]
-                if task["role"] in w_info["roles"]:
+                if want in (canonical_role(r) for r in w_info["roles"]):
                     target_worker = w_id
                     break
 

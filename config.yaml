@@ -1,14 +1,22 @@
 app:
   name: "Antigravity Core"
   version: "2.0"
+# Per-backend model selection. Empty = the CLI's own default model; a value
+# is passed straight to the CLI's model flag. Override per backend without
+# editing this file via GENIUS_MODEL_<BACKEND> (e.g. GENIUS_MODEL_CLAUDE).
 models:
-  openai: "gpt-4o"
-  anthropic: "claude-sonnet-4-6"
+  # codex CLI (-m). Examples (2026-07): gpt-5.5 (recommended), gpt-5.4,
+  # gpt-5.4-mini (fast/cheap).
+  openai: ""
+  # claude CLI (--model). Accepts aliases (sonnet, opus, haiku) or full ids.
+  # Examples (2026-07): claude-sonnet-5, claude-fable-5, claude-opus-4-8,
+  # claude-haiku-4-5-20251001.
+  anthropic: ""
   # grok is an OPT-IN backend only (no default chain uses it); enable it per
-  # role with GENIUS_PROVIDER_<ROLE>=grok,...
+  # role with GENIUS_PROVIDER_<ROLE>=grok,... (model not passed to the CLI).
   grok: "grok-build-0.1"
-  # Antigravity 2.0 (agy CLI / Gemini), the default Researcher primary;
-  # empty = the account's default model.
+  # agy CLI (--model), Antigravity 2.0 / Gemini, the default Researcher
+  # primary. Examples (2026-07): gemini-3.5-flash, gemini-3.1-pro-preview.
   agy: ""
 scanner:
   chunk_size_limit: 8000
@@ -20,7 +28,8 @@ scanner:
     - ".pytest_cache/"
 
 services:
-  grok_researcher: "http://localhost:8001"
+  # Researcher service (the legacy key "grok_researcher" is still accepted).
+  researcher: "http://localhost:8001"
   claude_architect: "http://localhost:8002"
   codex_reviewer: "http://localhost:8003"
   tester_agent: "http://localhost:8004"

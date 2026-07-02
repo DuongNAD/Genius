@@ -1,4 +1,4 @@
-"""Real server boot smoke tests for serve.py.
+﻿"""Real server boot smoke tests for serve.py.
 
 Unlike test_serve.py (which mocks serve.start_server entirely), these tests
 actually bind sockets:
@@ -57,8 +57,8 @@ async def test_start_server_port_fallback_health_and_registry_prune(
                 pytest.fail("start_server exited prematurely without error")
             if registry_path.exists():
                 registry = json.loads(registry_path.read_text(encoding="utf-8"))
-                if isinstance(registry.get("grok"), int):
-                    dynamic_port = registry["grok"]
+                if isinstance(registry.get("researcher"), int):
+                    dynamic_port = registry["researcher"]
                     break
             await asyncio.sleep(0.1)
 
@@ -66,7 +66,7 @@ async def test_start_server_port_fallback_health_and_registry_prune(
         assert dynamic_port != blocked_port
         # The registry stays a FLAT {"role": port} map.
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        assert registry == {"grok": dynamic_port}
+        assert registry == {"researcher": dynamic_port}
 
         # Real HTTP over localhost against the fallback port.
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -80,7 +80,7 @@ async def test_start_server_port_fallback_health_and_registry_prune(
                     await asyncio.sleep(0.2)
             assert resp is not None, "/health never became reachable"
             assert resp.status_code == 200
-            assert resp.json() == {"status": "ok", "role": "grok"}
+            assert resp.json() == {"status": "ok", "role": "researcher"}
     finally:
         task.cancel()
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=20)
@@ -89,13 +89,13 @@ async def test_start_server_port_fallback_health_and_registry_prune(
     # The fallback warning was printed with enough detail to act on.
     out = capsys.readouterr().out
     assert "WARNING" in out
-    assert "grok" in out
+    assert "researcher" in out
     assert str(blocked_port) in out
     assert str(dynamic_port) in out
 
     # Clean shutdown pruned this role's entry from the registry.
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    assert "grok" not in registry
+    assert "researcher" not in registry
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -148,11 +148,11 @@ def test_serve_subprocess_boots_grok_and_answers_health(tmp_path):
                     registry = json.loads(registry_path.read_text(encoding="utf-8"))
                 except (ValueError, OSError):
                     registry = {}
-                if isinstance(registry.get("grok"), int):
-                    port = registry["grok"]
+                if isinstance(registry.get("researcher"), int):
+                    port = registry["researcher"]
                     break
             time.sleep(0.25)
-        assert port is not None, "registry never published the grok port"
+        assert port is not None, "registry never published the researcher port"
 
         healthy = False
         with httpx.Client(timeout=3.0) as client:
@@ -160,7 +160,7 @@ def test_serve_subprocess_boots_grok_and_answers_health(tmp_path):
                 try:
                     resp = client.get(f"http://127.0.0.1:{port}/health")
                     if resp.status_code == 200:
-                        assert resp.json() == {"status": "ok", "role": "grok"}
+                        assert resp.json() == {"status": "ok", "role": "researcher"}
                         healthy = True
                         break
                 except httpx.TransportError:

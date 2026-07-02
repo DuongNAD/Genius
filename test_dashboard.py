@@ -46,12 +46,13 @@ def test_get_root():
 def test_api_status():
     client = TestClient(app)
 
-    # Insert a log to make grok 'busy'
+    # Insert a log to make the researcher 'busy' — under its LEGACY DB name
+    # (grok_researcher), which check_agent_busy must still recognize.
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO agent_logs (task_id, agent_name, prompt, status) VALUES (?, ?, ?, ?)",
-            ("task-1", "grok_researcher", "Test Grok prompt", "processing"),
+            ("task-1", "grok_researcher", "Test Researcher prompt", "processing"),
         )
         # Insert an idle/completed log for Claude to verify it doesn't report busy
         cursor.execute(
@@ -61,17 +62,17 @@ def test_api_status():
         conn.commit()
 
     with patch("dashboard.check_port") as mock_check_port:
-        # Mock port 8001 (grok) and 8002 (claude) online, others offline
+        # Mock port 8001 (researcher) and 8002 (claude) online, others offline
         mock_check_port.side_effect = lambda host, port: port in [8001, 8002]
 
         response = client.get("/api/status")
         assert response.status_code == 200
         data = response.json()
 
-        # Verify Grok
-        assert data["grok"]["port"] == 8001
-        assert data["grok"]["online"] is True
-        assert data["grok"]["status"] == "busy"
+        # Verify Researcher
+        assert data["researcher"]["port"] == 8001
+        assert data["researcher"]["online"] is True
+        assert data["researcher"]["status"] == "busy"
 
         # Verify Claude
         assert data["claude"]["port"] == 8002

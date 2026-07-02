@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import os
 import sys
 
@@ -11,7 +11,7 @@ from ag_core.skill_app import build_agent
 
 def main():
     prompt = " ".join(sys.argv[1:])
-    agent = build_agent("grok", stateless=False)
+    agent = build_agent("researcher", stateless=False)
     asyncio.run(agent.run(prompt=prompt))
 
 

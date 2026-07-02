@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import pytest
 import shutil
@@ -77,7 +77,7 @@ def check_serve_py_exists():
 
 def get_any_available_api():
     """Get any available api module, or fail if none are implemented."""
-    for name in ["grok_researcher", "claude_architect", "codex_reviewer"]:
+    for name in ["researcher", "claude_architect", "codex_reviewer"]:
         try:
             return import_skill_api(name)
         except Exception:
@@ -212,7 +212,7 @@ def mock_llm_providers():
 
 def test_f1_grok_server_startup():
     """Attempts to load grok's api.py and verify test client GET /docs or POST /run exists."""
-    api = import_skill_api("grok_researcher")
+    api = import_skill_api("researcher")
 
     assert hasattr(api, "app"), "Grok api.py does not define 'app'"
     routes = [r.path for r in api.app.routes]
@@ -271,7 +271,7 @@ def test_f1_swagger_docs_accessible():
 
 def test_f2_grok_auth_success():
     """POST /run on Grok service with valid X-API-Key succeeds (returns non-401)."""
-    api = import_skill_api("grok_researcher")
+    api = import_skill_api("researcher")
     from fastapi.testclient import TestClient
 
     client = TestClient(api.app)
@@ -341,7 +341,7 @@ def test_f2_auth_invalid_key():
 
 def test_f2_status_auth_grok():
     """Verify grok researcher status endpoint auth."""
-    api = import_skill_api("grok_researcher")
+    api = import_skill_api("researcher")
     from fastapi.testclient import TestClient
 
     client = TestClient(api.app)
@@ -586,7 +586,7 @@ def test_f4_orchestrator_url_args_override():
     import inspect
 
     sig = inspect.signature(orchestrator.run_pipeline)
-    if "grok_url" not in sig.parameters:
+    if "researcher_url" not in sig.parameters:
         pytest.fail("Orchestrator command-line URL overrides not yet implemented")
 
 
@@ -1056,7 +1056,9 @@ def test_f4_orchestrator_invalid_port_in_url():
     ):
         with pytest.raises(Exception):
             asyncio.run(
-                run_pipeline(prompt="invalid port", grok_url="http://localhost:999999")
+                run_pipeline(
+                    prompt="invalid port", researcher_url="http://localhost:999999"
+                )
             )
 
 
@@ -1260,7 +1262,7 @@ def test_f6_orchestrator_whitespace_only_urls():
     import inspect
 
     sig = inspect.signature(orchestrator.run_pipeline)
-    if "grok_url" not in sig.parameters:
+    if "researcher_url" not in sig.parameters:
         pytest.fail("Orchestrator URL overrides not yet implemented")
 
 

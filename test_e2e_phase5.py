@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import pytest
 import sqlite3
@@ -747,7 +747,7 @@ async def test_t3_sequential_pipeline_with_security_and_devops(tmp_path):
         return make_mock_response(200, {"task_id": "test_task"})
 
     def mock_get(url, *args, **kwargs):
-        if "grok" in url:
+        if "researcher" in url or "grok" in url:
             res = "Grok research output"
         elif "claude" in url:
             res = "Claude design output"
@@ -863,7 +863,7 @@ async def test_t4_mocked_e2e_full_microservice_build(tmp_path):
         return make_mock_response(200, {"task_id": "task_id"})
 
     def mock_get(url, *args, **kwargs):
-        if "grok" in url:
+        if "researcher" in url or "grok" in url:
             res = "Grok research report"
         elif "claude" in url:
             res = "Claude design document"

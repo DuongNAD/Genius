@@ -106,6 +106,31 @@ async def test_agent_slash_command_rewriting_codex():
 
 
 @pytest.mark.asyncio
+async def test_codex_generation_mode_returns_model_output_untouched():
+    # Regression: /code responses used to get flake8 + pytest logs appended,
+    # and the pytest log (this repo's own suite) became the largest fenced
+    # block — extract_code() then materialized the log instead of the code
+    # and the pipeline's AST guard rejected every attempt.
+    provider = MagicMock()
+    code_reply = "```python\ndef f():\n    return 1\n```"
+    provider.send_prompt = AsyncMock(return_value={"content": code_reply, "usage": {}})
+    provider.model_name = "gpt-4o"
+
+    agent = CodexReviewerAgent(provider=provider, output_file="None")
+
+    result = await agent.run(prompt="/code implement f")
+    assert result == code_reply
+    assert "### Linter Findings" not in result
+    assert "### Pytest Logs" not in result
+
+    # Review mode (no generation slash command) keeps the verification report.
+    provider.send_prompt.reset_mock()
+    result = await agent.run(prompt="/security audit this")
+    assert "### Linter Findings" in result
+    assert "### Pytest Logs" in result
+
+
+@pytest.mark.asyncio
 async def test_agent_slash_command_rewriting_tester():
     provider = MagicMock()
     provider.send_prompt = AsyncMock(return_value={"content": "mocked", "usage": {}})
@@ -137,7 +162,7 @@ async def test_orchestrator_smart_routing(mock_call_api, tmp_path):
     result = await run_pipeline(
         prompt="/research detailed research query",
         workspace=str(tmp_path),
-        grok_url="http://localhost:8001",
+        researcher_url="http://localhost:8001",
         api_key_override="test-key",
     )
 
@@ -174,15 +199,17 @@ async def test_serve_slash_command_dynamic_role(
 
 @patch("sys.argv", ["run.py", "/research", "query"])
 @patch("ag_core.agents.grok_researcher.GrokResearcherAgent.run", new_callable=AsyncMock)
-def test_grok_run_cli(mock_agent_run):
+def test_researcher_run_cli(mock_agent_run):
+    # The patch above goes through the legacy grok_researcher shim module on
+    # purpose: it must keep patching the real ResearcherAgent.
     base_dir = os.path.dirname(os.path.abspath(__file__))
     spec = importlib.util.spec_from_file_location(
-        "grok_run",
-        os.path.join(base_dir, ".agents", "skills", "grok_researcher", "run.py"),
+        "researcher_run",
+        os.path.join(base_dir, ".agents", "skills", "researcher", "run.py"),
     )
-    grok_run = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(grok_run)
-    grok_run.main()
+    researcher_run = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(researcher_run)
+    researcher_run.main()
     mock_agent_run.assert_called_once_with(prompt="/research query")
 
 

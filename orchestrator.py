@@ -299,10 +299,10 @@ DISTRIBUTED_MODE = False
 DEFAULT_ANTIGRAVITY_ARGS = ["--design", "{input}", "--output", "{output}"]
 
 ROUTING_TABLE = {
-    # Researcher (role id "grok")
-    "/research": ("grok", "research.md"),
-    "/summarize": ("grok", "research.md"),
-    "/fact-check": ("grok", "research.md"),
+    # Researcher
+    "/research": ("researcher", "research.md"),
+    "/summarize": ("researcher", "research.md"),
+    "/fact-check": ("researcher", "research.md"),
     # Claude
     "/plan": ("claude", "design.md"),
     "/design": ("claude", "design.md"),
@@ -585,8 +585,9 @@ async def call_api(
             role = ROUTING_TABLE[first_word][0]
         else:
             url_lower = url.lower()
-            if "8001" in url_lower or "grok" in url_lower:
-                role = "grok"
+            # "grok" in the URL is the researcher's legacy service name.
+            if "8001" in url_lower or "researcher" in url_lower or "grok" in url_lower:
+                role = "researcher"
             elif "8002" in url_lower or "claude" in url_lower:
                 role = "claude"
             elif "8003" in url_lower or "codex" in url_lower:
@@ -641,11 +642,19 @@ async def call_api(
                 resp.raise_for_status()
                 workers_dict = resp.json()
 
+                # Alias-tolerant role matching: workers may still advertise
+                # the legacy "grok"/"grok_researcher" ids for the researcher.
+                from ag_core.provider_factory import canonical_role
+
+                def _eligible(w_info):
+                    registered = (canonical_role(r) for r in w_info.get("roles", []))
+                    return (
+                        canonical_role(role) in registered
+                        and w_info.get("status") == "idle"
+                    )
+
                 idle_worker_ids = [
-                    w_id
-                    for w_id, w_info in workers_dict.items()
-                    if role in w_info.get("roles", [])
-                    and w_info.get("status") == "idle"
+                    w_id for w_id, w_info in workers_dict.items() if _eligible(w_info)
                 ]
                 poll_start = time.time()
                 while not idle_worker_ids:
@@ -662,8 +671,7 @@ async def call_api(
                     idle_worker_ids = [
                         w_id
                         for w_id, w_info in workers_dict.items()
-                        if role in w_info.get("roles", [])
-                        and w_info.get("status") == "idle"
+                        if _eligible(w_info)
                     ]
 
                 worker_id = idle_worker_ids[0]
@@ -1389,7 +1397,7 @@ async def run_pipeline(
     security_args: list = None,
     devops_args: list = None,
     workspace: str = None,
-    grok_url: str = None,
+    researcher_url: str = None,
     claude_url: str = None,
     codex_url: str = None,
     tester_url: str = None,
@@ -1456,7 +1464,7 @@ async def run_pipeline(
 
     config = load_config()
     api_key = api_key_override or config.skill_api_key or os.getenv("SKILL_API_KEY", "")
-    grok_url = grok_url or config.services.grok_researcher
+    researcher_url = researcher_url or config.services.researcher
     claude_url = claude_url or config.services.claude_architect
     codex_url = codex_url or config.services.codex_reviewer
     tester_url = tester_url or config.services.tester_agent
@@ -1482,8 +1490,8 @@ async def run_pipeline(
             )
 
             url = None
-            if agent_key == "grok":
-                url = grok_url
+            if agent_key == "researcher":
+                url = researcher_url
             elif agent_key == "claude":
                 url = claude_url
             elif agent_key == "codex":
@@ -1538,8 +1546,8 @@ async def run_pipeline(
         )
 
         try:
-            grok_content = await call_api(
-                grok_url,
+            research_content = await call_api(
+                researcher_url,
                 api_key,
                 prompt,
                 context=scanned_files,
@@ -1557,19 +1565,23 @@ async def run_pipeline(
                 "WITHOUT research context - design quality may suffer.",
                 e,
             )
-            grok_content = f"(research unavailable: {e})\n\nOriginal request: {prompt}"
+            research_content = (
+                f"(research unavailable: {e})\n\nOriginal request: {prompt}"
+            )
 
         # Publish to MessageBus
-        grok_art_id = message_bus.publish(
-            Artifact(name="research_data", content=grok_content, created_by="grok")
+        research_art_id = message_bus.publish(
+            Artifact(
+                name="research_data", content=research_content, created_by="researcher"
+            )
         )
 
         try:
             with open(research_file, "w", encoding="utf-8") as f:
-                f.write(grok_content)
+                f.write(research_content)
             proj_research_file = os.path.join(project_dir, "research.md")
             with open(proj_research_file, "w", encoding="utf-8") as f:
-                f.write(grok_content)
+                f.write(research_content)
         except Exception as e:
             logger.warning(f"Failed to write research debug output: {e}")
         validate_file(research_file, "Research", is_input=False)
@@ -1582,8 +1594,8 @@ async def run_pipeline(
         validate_file(research_file, "Claude", is_input=True)
 
         # Retrieve research content from message bus
-        research_art = message_bus.retrieve(grok_art_id)
-        claude_prompt = research_art["content"] if research_art else grok_content
+        research_art = message_bus.retrieve(research_art_id)
+        claude_prompt = research_art["content"] if research_art else research_content
 
         scanned_files["research.md"] = claude_prompt
 
@@ -1637,7 +1649,7 @@ async def run_pipeline(
                 # on disk, and in degraded mode the debate simply stops here.
                 try:
                     critic_content = await call_api(
-                        grok_url,
+                        researcher_url,
                         api_key,
                         critic_prompt,
                         context=scanned_files,
@@ -1705,7 +1717,7 @@ async def run_pipeline(
                 name="design_plan",
                 content=claude_content,
                 created_by="claude",
-                parent_id=grok_art_id,
+                parent_id=research_art_id,
             )
         )
 
@@ -1741,7 +1753,7 @@ async def run_pipeline(
                         name="design_plan",
                         content=claude_content,
                         created_by="claude",
-                        parent_id=grok_art_id,
+                        parent_id=research_art_id,
                     )
                 )
                 _write_design_files(claude_content)
@@ -2240,7 +2252,7 @@ async def run_e2e_pipeline(
     codex_cmd: str = "codex",
     tester_cmd: str = "tester",
     workspace: str = None,
-    grok_url: str = None,
+    researcher_url: str = None,
     claude_url: str = None,
     codex_url: str = None,
     tester_url: str = None,
@@ -2272,7 +2284,7 @@ async def run_e2e_pipeline(
 
     config = load_config()
     api_key = api_key_override or config.skill_api_key or os.getenv("SKILL_API_KEY", "")
-    grok_url = grok_url or config.services.grok_researcher
+    researcher_url = researcher_url or config.services.researcher
     claude_url = claude_url or config.services.claude_architect
     codex_url = codex_url or config.services.codex_reviewer
     tester_url = tester_url or config.services.tester_agent
@@ -2339,7 +2351,7 @@ async def run_e2e_pipeline(
                 # lose the plan already written to disk before the debate.
                 try:
                     critic_content = await call_api(
-                        grok_url,
+                        researcher_url,
                         api_key,
                         critic_prompt,
                         context=scanned_files,
@@ -2770,9 +2782,11 @@ def main():
 
     # Service URL overrides
     parser.add_argument(
-        "--grok-url",
+        "--researcher-url",
+        "--grok-url",  # legacy alias from when the role id was "grok"
+        dest="researcher_url",
         default=None,
-        help="Service URL override for the Researcher service (role grok)",
+        help="Service URL override for the Researcher service",
     )
     parser.add_argument(
         "--claude-url", default=None, help="Service URL override for Claude"
@@ -2844,7 +2858,7 @@ def main():
                     codex_cmd=args.codex_cmd,
                     tester_cmd=args.tester_cmd,
                     workspace=args.workspace,
-                    grok_url=args.grok_url,
+                    researcher_url=args.researcher_url,
                     claude_url=args.claude_url,
                     codex_url=args.codex_url,
                     tester_url=args.tester_url,
@@ -2874,7 +2888,7 @@ def main():
                     security_args=args.security_args,
                     devops_args=args.devops_args,
                     workspace=args.workspace,
-                    grok_url=args.grok_url,
+                    researcher_url=args.researcher_url,
                     claude_url=args.claude_url,
                     codex_url=args.codex_url,
                     tester_url=args.tester_url,

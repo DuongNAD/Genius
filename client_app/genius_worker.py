@@ -38,7 +38,9 @@ def main():
     parser.add_argument("--hub-ip", default="127.0.0.1", help="Central hub IP address")
     parser.add_argument("--hub-port", type=int, default=8000, help="Central hub port")
     parser.add_argument(
-        "--roles", default="grok", help="Comma-separated roles this worker supports"
+        "--roles",
+        default="researcher",
+        help="Comma-separated roles this worker supports",
     )
     parser.add_argument(
         "--worker-id",

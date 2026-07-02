@@ -9,9 +9,10 @@ one place and can be redirected without code changes:
   chain (a :class:`FallbackProvider`): a backend that dies at runtime is
   retried on the next backend. The default chains do NOT include the grok
   backend (the grok CLI is opt-in only; its account is out of credits).
-* ``GENIUS_PROVIDER_<ROLE>`` (e.g. ``GENIUS_PROVIDER_GROK=grok,claude``) -
-  explicit comma-separated backend chain for one role; overrides everything,
-  including bringing the grok backend back.
+* ``GENIUS_PROVIDER_<ROLE>`` (e.g. ``GENIUS_PROVIDER_RESEARCHER=grok,claude``)
+  - explicit comma-separated backend chain for one role; overrides everything,
+  including bringing the grok backend back. The researcher role also honors
+  the legacy ``GENIUS_PROVIDER_GROK`` spelling (the role's old id).
 * ``GENIUS_PROVIDER_FALLBACK`` - DEPRECATED no-op, accepted for backward
   compatibility only. Fallback chains are now always the default; setting
   this variable (truthy or falsy) changes nothing.
@@ -60,13 +61,24 @@ BACKENDS = {
     ),
 }
 
+# Legacy role ids accepted at every entry point; canonical id on the right.
+# The Researcher ROLE was renamed "grok" -> "researcher" (the grok BACKEND
+# keeps its name in BACKENDS above). Old env vars, --roles values, registry
+# keys and worker registrations keep working through this map.
+ROLE_ALIASES = {"grok": "researcher", "grok_researcher": "researcher"}
+
+
+def canonical_role(role: str) -> str:
+    """Normalize a role id: lower-case, strip, resolve legacy aliases."""
+    role = (role or "").strip().lower()
+    return ROLE_ALIASES.get(role, role)
+
+
 # role -> default backend order (the no-env default for every role). The grok
 # backend is deliberately absent: it stays registered in BACKENDS for explicit
 # opt-in via GENIUS_PROVIDER_<ROLE>, but no default chain ever invokes it.
-# The "grok" KEY below is the Researcher ROLE id (wired through config, ports
-# and the service registry) - not the grok backend.
 DEFAULT_CHAINS = {
-    "grok": ["agy", "claude", "codex"],  # Researcher: Antigravity/Gemini first
+    "researcher": ["agy", "claude", "codex"],  # Antigravity/Gemini first
     "claude": ["claude", "agy", "codex"],  # Architect
     "codex": ["codex", "claude", "agy"],
     "tester": ["codex", "claude", "agy"],
@@ -74,12 +86,23 @@ DEFAULT_CHAINS = {
     "devops": ["codex", "claude", "agy"],
 }
 
+# Env vars consulted per canonical role, in precedence order. Every role reads
+# GENIUS_PROVIDER_<ROLE>; the researcher role also honors the legacy
+# GENIUS_PROVIDER_GROK spelling (from when the role id was "grok").
+_ROLE_CHAIN_ENVS = {
+    "researcher": ["GENIUS_PROVIDER_RESEARCHER", "GENIUS_PROVIDER_GROK"],
+}
 
-def _explicit_chain_env(role: str) -> Optional[str]:
-    """The raw GENIUS_PROVIDER_<ROLE> value, or None when unset/blank."""
-    raw = os.environ.get(f"GENIUS_PROVIDER_{role.upper()}") or ""
-    raw = raw.strip()
-    return raw or None
+
+def _explicit_chain_env(role: str) -> Optional[Tuple[str, str]]:
+    """The (env var name, raw value) of the explicit chain override for
+    ``role`` (canonical), or None when unset/blank."""
+    names = _ROLE_CHAIN_ENVS.get(role, [f"GENIUS_PROVIDER_{role.upper()}"])
+    for name in names:
+        raw = (os.environ.get(name) or "").strip()
+        if raw:
+            return name, raw
+    return None
 
 
 def resolve_chain(role: str) -> List[str]:
@@ -90,7 +113,7 @@ def resolve_chain(role: str) -> List[str]:
     no-op and never consulted. Raises :class:`ValueError` for unknown roles or
     unknown backend names in the explicit env value.
     """
-    role = role.lower()
+    role = canonical_role(role)
     if role not in DEFAULT_CHAINS:
         raise ValueError(
             f"Unknown role: {role!r}; expected one of {sorted(DEFAULT_CHAINS)}"
@@ -98,11 +121,12 @@ def resolve_chain(role: str) -> List[str]:
 
     explicit = _explicit_chain_env(role)
     if explicit:
-        chain = [name.strip().lower() for name in explicit.split(",") if name.strip()]
+        env_name, raw = explicit
+        chain = [name.strip().lower() for name in raw.split(",") if name.strip()]
         unknown = sorted(set(chain) - set(BACKENDS))
         if not chain or unknown:
             raise ValueError(
-                f"GENIUS_PROVIDER_{role.upper()}={explicit!r} names unknown "
+                f"{env_name}={raw!r} names unknown "
                 f"backend(s) {unknown or ['<empty>']}; valid backends: "
                 f"{', '.join(sorted(BACKENDS))} (comma-separated, in fallback "
                 "order)"
@@ -115,24 +139,32 @@ def resolve_chain(role: str) -> List[str]:
 def chain_source(role: str) -> Optional[str]:
     """Which knob produced the chain for ``role`` (for diagnostics output).
 
-    Returns ``"GENIUS_PROVIDER_<ROLE>"`` for an explicit override, or ``None``
-    for the built-in default chain (``GENIUS_PROVIDER_FALLBACK`` is a
-    deprecated no-op and never reported).
+    Returns the env var name (``GENIUS_PROVIDER_<ROLE>``, or the legacy
+    ``GENIUS_PROVIDER_GROK`` for the researcher role) for an explicit
+    override, or ``None`` for the built-in default chain
+    (``GENIUS_PROVIDER_FALLBACK`` is a deprecated no-op and never reported).
     """
-    role = role.lower()
-    if _explicit_chain_env(role):
-        return f"GENIUS_PROVIDER_{role.upper()}"
+    explicit = _explicit_chain_env(canonical_role(role))
+    if explicit:
+        return explicit[0]
     return None
 
 
 def build_backend(backend: str, config):
-    """Instantiate the provider for one backend from ``config``."""
+    """Instantiate the provider for one backend from ``config``.
+
+    Model precedence: ``GENIUS_MODEL_<BACKEND>`` env (blank = unset) >
+    ``config.models.<backend>``. An empty final value means "the CLI's own
+    default model" — every provider only passes a model flag when non-empty.
+    """
     mod_name, cls_name, model_attr, key_attr = BACKENDS[backend]
     provider_class = getattr(importlib.import_module(mod_name), cls_name)
     api_key = None
     if key_attr:
         api_key = getattr(config, key_attr, None) or os.getenv(key_attr.upper(), "")
-    model_name = getattr(config.models, model_attr)
+    model_name = os.environ.get(f"GENIUS_MODEL_{backend.upper()}") or getattr(
+        config.models, model_attr
+    )
     return provider_class(api_key=api_key, model_name=model_name)
 
 
@@ -238,7 +270,7 @@ def make_provider(role: str, config, default_chain: Optional[List[str]] = None):
     Single-backend chains return the raw provider instance; multi-backend
     chains return a lazy :class:`FallbackProvider`.
     """
-    role = role.lower()
+    role = canonical_role(role)
     chain = resolve_chain(role)
     if default_chain and not _explicit_chain_env(role):
         unknown = sorted(set(default_chain) - set(BACKENDS))

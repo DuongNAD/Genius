@@ -88,8 +88,9 @@ def test_config_loading_and_merging():
     config = load_config()
     assert config.app.name == "Antigravity Core"
     assert config.app.version == "2.0"
-    assert config.models.openai == "gpt-4o"
-    assert config.models.anthropic == "claude-sonnet-4-6"
+    # Empty = "use the CLI's own default model" (no model flag injected).
+    assert config.models.openai == ""
+    assert config.models.anthropic == ""
     assert config.models.grok == "grok-build-0.1"
     assert config.scanner.chunk_size_limit == 8000
     assert ".git/" in config.scanner.exclude_patterns
@@ -275,7 +276,7 @@ def test_skill_bootstrap_grok_researcher(tmp_path, monkeypatch):
             os.path.dirname(os.path.abspath(__file__)),
             ".agents",
             "skills",
-            "grok_researcher",
+            "researcher",
             "run.py",
         )
 
@@ -418,7 +419,7 @@ import importlib.util
 def load_api_app(role: str):
     root_dir = os.path.dirname(os.path.abspath(__file__))
     if role == "grok":
-        path = os.path.join(root_dir, ".agents", "skills", "grok_researcher", "api.py")
+        path = os.path.join(root_dir, ".agents", "skills", "researcher", "api.py")
     elif role == "claude":
         path = os.path.join(root_dir, ".agents", "skills", "claude_architect", "api.py")
     elif role == "codex":

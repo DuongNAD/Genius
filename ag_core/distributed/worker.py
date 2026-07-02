@@ -154,20 +154,17 @@ class ClientWorker:
                 prompt = task_data.get("prompt")
                 context = task_data.get("context", {})
 
-                # role alias -> (agent module, agent class, provider-factory
-                # role). Provider selection (default fallback chains +
-                # explicit GENIUS_PROVIDER_<ROLE> overrides) lives in
-                # ag_core.provider_factory - same wiring as skill_app.
+                # canonical role -> (agent module, agent class,
+                # provider-factory role). Provider selection (default fallback
+                # chains + explicit GENIUS_PROVIDER_<ROLE> overrides) lives in
+                # ag_core.provider_factory - same wiring as skill_app. Legacy
+                # role ids ("grok", "grok_researcher") are folded in by
+                # canonical_role() below.
                 ROLE_AGENT_MAP = {
-                    "grok": (
-                        "ag_core.agents.grok_researcher",
-                        "GrokResearcherAgent",
-                        "grok",
-                    ),
-                    "grok_researcher": (
-                        "ag_core.agents.grok_researcher",
-                        "GrokResearcherAgent",
-                        "grok",
+                    "researcher": (
+                        "ag_core.agents.researcher",
+                        "ResearcherAgent",
+                        "researcher",
                     ),
                     "claude": (
                         "ag_core.agents.claude_architect",
@@ -213,7 +210,9 @@ class ClientWorker:
                     ),
                 }
 
-                normalized_role = role.lower()
+                from ag_core.provider_factory import canonical_role
+
+                normalized_role = canonical_role(role)
                 if normalized_role not in ROLE_AGENT_MAP:
                     status = "failed"
                     result = {
