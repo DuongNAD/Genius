@@ -29,11 +29,20 @@ class CodexReviewerAgent(BaseAgent):
             or "Perform a code review of the project files, checking for bugs, style issues, and security vulnerabilities."
         )
 
-        # Parse and wrap specialized slash commands
+        # Parse and wrap specialized slash commands. /code and /refactor are
+        # GENERATION requests: the caller (orchestrator / MCP tool) writes and
+        # verifies the produced file itself, so this agent must return the
+        # model output untouched — no lint/test verification loop, and no log
+        # sections appended (a real run poisoned extract_code downstream: the
+        # appended pytest log of this host repo's own suite was the largest
+        # fenced block and got extracted instead of the code).
+        generation_mode = False
         words = user_prompt.strip().split(maxsplit=1)
         if words and words[0].startswith("/"):
             cmd = words[0]
             query = words[1] if len(words) > 1 else ""
+            if cmd in ("/code", "/refactor"):
+                generation_mode = True
             if cmd == "/code":
                 user_prompt = f"Write clean, robust, and well-documented code for the following request:\n\n{query}"
             elif cmd == "/refactor":
@@ -84,6 +93,12 @@ class CodexReviewerAgent(BaseAgent):
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
         )
+
+        # Generation requests return the model output untouched — the caller
+        # writes and verifies the file (see the slash-command comment above).
+        if generation_mode:
+            self._write_output_file(content)
+            return content
 
         def _detect_target_file(prompt_str, content_str, scanned_keys):
             import re
@@ -252,7 +267,11 @@ class CodexReviewerAgent(BaseAgent):
             + f"\n\n### Linter Findings (flake8)\n```\n{linter_findings}\n```\n\n### Pytest Logs\n```\n{pytest_logs}\n```"
         )
 
-        # Write to output file
+        self._write_output_file(content)
+
+        return content
+
+    def _write_output_file(self, content: str) -> None:
         output_file = self.extra_params.get("output_file")
         if output_file is None:
             if "output_file" in self.extra_params:
@@ -269,5 +288,3 @@ class CodexReviewerAgent(BaseAgent):
                     f.write(content)
             except Exception as e:
                 print(f"Warning: Failed to write output file {output_file}: {e}")
-
-        return content
