@@ -391,7 +391,7 @@ async def test_pipeline_early_exit_on_missing_or_empty_output(
 @pytest.mark.asyncio
 @patch("httpx.AsyncClient.post", new_callable=MagicMock)
 async def test_pipeline_cleanup_old_files(mock_post, temp_workspace):
-    """Verify that old context files are deleted before the pipeline runs."""
+    """Verify that old context files are archived to .bak before the pipeline runs."""
     project_dir = temp_workspace / "projects" / "build_a_calculator_app"
     os.makedirs(project_dir, exist_ok=True)
     research_file = project_dir / "research.md"
@@ -421,6 +421,18 @@ async def test_pipeline_cleanup_old_files(mock_post, temp_workspace):
     assert not app_file.exists()
     assert not review_file.exists()
     assert not test_generated_file.exists()
+
+    # The old content is preserved as .bak archives instead of being deleted.
+    for original in (
+        research_file,
+        design_file,
+        app_file,
+        review_file,
+        test_generated_file,
+    ):
+        backup = original.with_name(original.name + ".bak")
+        assert backup.exists()
+        assert backup.read_text(encoding="utf-8") == "old"
 
 
 @patch("httpx.AsyncClient.post", new_callable=MagicMock)

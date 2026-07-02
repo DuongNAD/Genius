@@ -5,6 +5,7 @@ import importlib.util
 import os
 import sys
 import time
+import traceback
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
@@ -490,6 +491,106 @@ def get_api_app(role: str):
     return module.app
 
 
+# Default ports for the agent skill servers (the roles that expose /health).
+AGENT_DEFAULT_PORTS = {
+    "grok": 8001,
+    "claude": 8002,
+    "codex": 8003,
+    "tester": 8004,
+    "security": 8005,
+    "devops": 8006,
+}
+
+
+def _under_pytest() -> bool:
+    return "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST") is not None
+
+
+def _startup_timeout(default: float = 30.0) -> float:
+    """Resolve the server-readiness deadline (seconds) from
+    ``GENIUS_STARTUP_TIMEOUT`` or the default."""
+    raw = os.environ.get("GENIUS_STARTUP_TIMEOUT")
+    if raw:
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return default
+
+
+def _log_server_task_failure(task: asyncio.Task) -> None:
+    """Done-callback for server tasks: surface a crash immediately instead of
+    letting gather(..., return_exceptions=True) swallow it until exit."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        print(f"ERROR: server task '{task.get_name()}' crashed: {exc}")
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+
+def _server_task_crash(server_tasks):
+    """Return the exception of the first already-crashed server task, if any."""
+    for task in server_tasks:
+        if task.done() and not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                return exc
+    return None
+
+
+async def wait_for_servers_ready(agent_ports: dict, server_tasks=(), timeout=None):
+    """Poll each launched agent server's ``GET /health`` until it answers 200.
+
+    ``agent_ports`` maps role -> configured port; the service registry is
+    consulted on every sweep so a server that fell back to a dynamic port is
+    still found. Raises RuntimeError on deadline (listing the roles that never
+    became ready) or as soon as a server task has crashed.
+    """
+    import httpx
+
+    if timeout is None:
+        timeout = _startup_timeout()
+    deadline = time.time() + timeout
+    pending = dict(agent_ports)
+    registry_path = _resolve_registry_path()
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        while pending:
+            crash = _server_task_crash(server_tasks)
+            if crash is not None:
+                raise RuntimeError(
+                    f"A server task crashed during startup: {crash!r}"
+                ) from crash
+            registry = {}
+            if os.path.exists(registry_path):
+                try:
+                    with open(registry_path, "r", encoding="utf-8") as f:
+                        registry = json.load(f)
+                except Exception:
+                    registry = {}
+            for role in list(pending):
+                port = registry.get(role, pending[role])
+                if not isinstance(port, int):
+                    port = pending[role]
+                try:
+                    resp = await client.get(f"http://127.0.0.1:{port}/health")
+                    if resp.status_code == 200:
+                        pending.pop(role)
+                except Exception:
+                    pass
+            if not pending:
+                break
+            if time.time() > deadline:
+                raise RuntimeError(
+                    f"Agent servers did not become ready within {timeout:.0f}s: "
+                    f"{', '.join(sorted(pending))}. Check the server logs above "
+                    f"for startup errors, or raise GENIUS_STARTUP_TIMEOUT."
+                )
+            await asyncio.sleep(0.25)
+
+
 def _resolve_registry_path() -> str:
     """Resolve the service-registry path and ensure its parent dir exists.
 
@@ -505,6 +606,22 @@ def _resolve_registry_path() -> str:
     if registry_dir:
         os.makedirs(registry_dir, exist_ok=True)
     return registry_path
+
+
+def _prune_registry_entry(registry_path: str, role: str, port: int) -> None:
+    """Drop this role's entry from the (flat ``role -> port``) service registry
+    on clean shutdown, so later readers don't route to a dead dynamic port.
+    Only prunes when the entry still points at OUR port — a newer instance may
+    have re-registered the role in the meantime. Failures are non-fatal."""
+    try:
+        with open(registry_path, "r", encoding="utf-8") as f:
+            registry = json.load(f)
+        if registry.get(role) == port:
+            registry.pop(role, None)
+            with open(registry_path, "w", encoding="utf-8") as f:
+                json.dump(registry, f, indent=2)
+    except Exception:
+        pass
 
 
 async def start_server(role: str, port: int):
@@ -524,7 +641,12 @@ async def start_server(role: str, port: int):
     try:
         server = _make_server(port)
         await server.startup()
-    except OSError:
+    except (OSError, SystemExit):
+        # uvicorn's Server.startup() intercepts the bind failure itself
+        # (logs the OSError and raises SystemExit(1) via sys.exit), so a bare
+        # `except OSError` never fires and the server task just crashed when
+        # the configured port was taken. Catch both so the dynamic-port
+        # fallback actually runs.
         server = _make_server(0)
         await server.startup()
 
@@ -539,6 +661,14 @@ async def start_server(role: str, port: int):
         bound_port = server.config.port
 
     registry_path = _resolve_registry_path()
+
+    if bound_port != port:
+        print(
+            f"WARNING: role '{role}' could not bind its configured port {port} "
+            f"(already in use?); fell back to dynamic port {bound_port} "
+            f"({port} -> {bound_port}). Clients discover the new port via the "
+            f"service registry: {registry_path}"
+        )
 
     registry = {}
     if os.path.exists(registry_path):
@@ -556,6 +686,7 @@ async def start_server(role: str, port: int):
         await server.main_loop()
     finally:
         await server.shutdown()
+        _prune_registry_entry(registry_path, role, bound_port)
 
 
 async def main_async():
@@ -650,31 +781,56 @@ async def main_async():
     print(f"Starting selected roles: {selected_roles}")
 
     server_tasks = []
+    # role -> configured port, for the agent servers we must health-check
+    # before running a pipeline (hub/dashboard expose no /health).
+    agent_ports = {}
+
+    def _spawn(coro, name):
+        task = asyncio.create_task(coro, name=name)
+        # Surface crashes immediately instead of only at shutdown, where
+        # gather(..., return_exceptions=True) would swallow them.
+        task.add_done_callback(_log_server_task_failure)
+        server_tasks.append(task)
+
     if distributed:
         print(f"Starting central hub on port {args.hub_port}")
-        server_tasks.append(asyncio.create_task(start_hub_server(args.hub_port)))
+        _spawn(start_hub_server(args.hub_port), "server-hub")
 
     # Start requested API servers
-    if "grok" in selected_roles:
-        server_tasks.append(asyncio.create_task(start_server("grok", 8001)))
-    if "claude" in selected_roles:
-        server_tasks.append(asyncio.create_task(start_server("claude", 8002)))
-    if "codex" in selected_roles:
-        server_tasks.append(asyncio.create_task(start_server("codex", 8003)))
-    if "tester" in selected_roles:
-        server_tasks.append(asyncio.create_task(start_server("tester", 8004)))
-    if "security" in selected_roles:
-        server_tasks.append(asyncio.create_task(start_server("security", 8005)))
-    if "devops" in selected_roles:
-        server_tasks.append(asyncio.create_task(start_server("devops", 8006)))
+    for agent_role, agent_port in AGENT_DEFAULT_PORTS.items():
+        if agent_role in selected_roles:
+            _spawn(start_server(agent_role, agent_port), f"server-{agent_role}")
+            agent_ports[agent_role] = agent_port
     if "dashboard" in selected_roles:
-        server_tasks.append(asyncio.create_task(start_server("dashboard", 8080)))
+        _spawn(start_server("dashboard", 8080), "server-dashboard")
 
     # If prompt is provided or orchestrator is explicitly selected
     if "orchestrator" in selected_roles or prompt:
         if server_tasks:
-            print("Waiting 1 second for API servers to initialize...")
-            await asyncio.sleep(1.0)
+            if _under_pytest() and not os.environ.get("GENIUS_STARTUP_TIMEOUT"):
+                # Tests patch start_server with mocks that never open a
+                # socket; a yield lets those tasks run without a real poll.
+                await asyncio.sleep(0)
+            else:
+                try:
+                    print("Waiting for API servers to become ready...")
+                    await wait_for_servers_ready(agent_ports, server_tasks)
+                    print("All requested agent servers are ready.")
+                except Exception as e:
+                    print(f"Startup aborted: {e}")
+                    for task in server_tasks:
+                        task.cancel()
+                    await asyncio.gather(*server_tasks, return_exceptions=True)
+                    raise SystemExit(1)
+            # A server task that already died means the pipeline cannot work;
+            # abort with that error rather than failing later and murkier.
+            crash = _server_task_crash(server_tasks)
+            if crash is not None:
+                print(f"Startup aborted, a server task crashed: {crash!r}")
+                for task in server_tasks:
+                    task.cancel()
+                await asyncio.gather(*server_tasks, return_exceptions=True)
+                raise SystemExit(1)
 
         if not prompt:
             if auto_pilot:
@@ -695,6 +851,7 @@ async def main_async():
             return
 
         pipeline_run = False
+        pipeline_failed = False
         try:
             print(f"Launching orchestrator pipeline with prompt: '{prompt}'")
             pipeline_run = True
@@ -714,12 +871,17 @@ async def main_async():
             print("Orchestrator pipeline completed successfully.")
         except Exception as e:
             print(f"Orchestrator pipeline failed: {e}")
+            pipeline_failed = True
         finally:
             if pipeline_run:
                 for task in server_tasks:
                     task.cancel()
                 if server_tasks:
                     await asyncio.gather(*server_tasks, return_exceptions=True)
+                if pipeline_failed:
+                    # Propagate the failure to the shell (exit code 1) so
+                    # auto-pilot cannot exit 0 on a failed pipeline.
+                    raise SystemExit(1)
                 return
 
     # If we started servers, we await them to run continuously

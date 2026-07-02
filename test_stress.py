@@ -174,13 +174,17 @@ def test_stress_missing_cli(temp_workspace):
 
 
 def test_stress_file_permissions_and_stale_data(temp_workspace):
-    """Test behavior when output files are read-only or locked, and stale data usage risk."""
+    """Stale output files from a previous run (even read-only ones) are archived
+    to <name>.bak before the pipeline starts, so stale data can't be consumed."""
     research_path = temp_workspace / "research.md"
+    backup_path = temp_workspace / "research.md.bak"
     research_path.write_text("Stale grok output from previous run.", encoding="utf-8")
     os.chmod(str(research_path), stat.S_IREAD)
 
     try:
-        with pytest.raises(PipelineError) as exc_info:
+        # The pipeline still fails later (Antigravity exits 1), but the stale
+        # research.md must already have been archived out of the way.
+        with pytest.raises(PipelineError):
             asyncio.run(
                 run_pipeline(
                     prompt="Test",
@@ -215,13 +219,22 @@ def test_stress_file_permissions_and_stale_data(temp_workspace):
                     codex_args=[DUMMY_CLI, "--code", "{input}", "--output", "{output}"],
                 )
             )
+        assert backup_path.exists()
         assert (
-            "Failed to delete" in str(exc_info.value)
-            or "Access is denied" in str(exc_info.value)
-            or "permission" in str(exc_info.value).lower()
+            backup_path.read_text(encoding="utf-8")
+            == "Stale grok output from previous run."
         )
+        # The fresh run regenerated research.md from the (mocked) Grok call,
+        # so its content is no longer the stale text.
+        if research_path.exists():
+            assert (
+                research_path.read_text(encoding="utf-8")
+                != "Stale grok output from previous run."
+            )
     finally:
-        os.chmod(str(research_path), stat.S_IWRITE)
+        for p in (research_path, backup_path):
+            if p.exists():
+                os.chmod(str(p), stat.S_IWRITE)
 
 
 def test_unreadable_input_file_raises_pipeline_error(temp_workspace):

@@ -14,7 +14,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
-from ag_core.skill_app import create_skill_app
+from ag_core.skill_app import MAX_TRACKED_TASKS, create_skill_app, evict_oldest
 
 
 def _jwt():
@@ -92,7 +92,46 @@ def test_different_keys_create_distinct_tasks():
     assert agent.run.call_count == 2
 
 
-# --- Client-side stable key across a transient retry ------------------------
+# --- Bounded task / idempotency stores (F7) ----------------------------------
+
+
+def test_evict_oldest_drops_oldest_insertions():
+    store = {f"k{i}": i for i in range(10)}
+    evict_oldest(store, cap=4)
+    assert len(store) == 4
+    # Insertion order preserved -> the oldest six were dropped.
+    assert list(store) == ["k6", "k7", "k8", "k9"]
+
+
+def test_evict_oldest_noop_under_cap():
+    store = {"a": 1, "b": 2}
+    evict_oldest(store, cap=4)
+    assert store == {"a": 1, "b": 2}
+
+
+def test_run_endpoint_task_store_is_bounded():
+    app = create_skill_app("grok")
+    client = TestClient(app)
+    with patch("ag_core.skill_app.build_agent", return_value=_mock_agent()):
+        for i in range(MAX_TRACKED_TASKS + 25):
+            r = _post(client, {"prompt": "hi"}, idempotency_key=f"key-{i}")
+            assert r.status_code == 200
+        # The newest task must still be queryable...
+        last_task = r.json()["task_id"]
+        headers = {
+            "X-API-Key": _jwt(),
+            "X-Payload-SHA256": hashlib.sha256(b"").hexdigest(),
+        }
+        status = client.get(f"/status/{last_task}", headers=headers)
+        assert status.status_code == 200
+    # ...and a fresh repeat of the OLDEST key is treated as new (evicted), not
+    # as an unbounded-memory dedup hit.
+    # (The stores are closures; the observable contract is bounded memory, so
+    # this asserts the dedup map forgot the oldest key rather than growing.)
+    with patch("ag_core.skill_app.build_agent", return_value=_mock_agent()) as _:
+        r_old = _post(client, {"prompt": "hi"}, idempotency_key="key-0")
+        assert r_old.status_code == 200
+        assert r_old.json()["status"] == "processing"
 
 
 class _FakeResp:

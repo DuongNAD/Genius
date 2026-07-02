@@ -113,12 +113,13 @@ class MemoryConfig(BaseModel):
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "genius.db"
         )
     )
+    # `or` (not a get() default) so a blank CHROMA_PERSIST_DIR shipped in
+    # .env.example and loaded into os.environ by python-dotenv is treated as
+    # unset instead of silently overriding the default with "".
     chroma_persist_dir: str = Field(
-        default_factory=lambda: os.getenv(
-            "CHROMA_PERSIST_DIR",
-            os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".chroma"
-            ),
+        default_factory=lambda: os.getenv("CHROMA_PERSIST_DIR")
+        or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".chroma"
         )
     )
 
@@ -202,13 +203,15 @@ def load_config(config_path: str = "config.yaml") -> Config:
 
     import json
 
-    registry_path = os.environ.get(
-        "GENIUS_SERVICE_REGISTRY",
-        os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            ".agents",
-            "service_registry.json",
-        ),
+    # `or` (not a get() default) so the blank GENIUS_SERVICE_REGISTRY shipped
+    # in .env.example (and put into os.environ as "" by python-dotenv) falls
+    # back to the in-repo default instead of silently disabling the registry
+    # override (which would break dynamic-port discovery). Mirrors the write
+    # side in serve._resolve_registry_path().
+    registry_path = os.environ.get("GENIUS_SERVICE_REGISTRY") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ".agents",
+        "service_registry.json",
     )
     if os.path.exists(registry_path):
         try:

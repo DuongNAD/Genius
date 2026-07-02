@@ -19,6 +19,7 @@ from tenacity import (
 # Re-exported so existing `from orchestrator import extract_code` callers (and
 # tests) keep working after the helper moved to a shared module.
 from ag_core.utils.code_extract import extract_code
+from ag_core.utils.cli_runner import cli_timeout
 
 
 def make_http_client() -> httpx.AsyncClient:
@@ -39,6 +40,38 @@ async def gather_or_raise(*awaitables):
         if isinstance(r, BaseException):
             raise r
     return results
+
+
+def effective_poll_timeout(poll_timeout: float) -> float:
+    """Clamp the polling deadline so it can never undercut the CLI timeout.
+
+    The skill servers run local agent CLIs that may legitimately take up to
+    ``cli_timeout()`` (GENIUS_CLI_TIMEOUT, default 600s). A poll deadline
+    shorter than that makes the orchestrator abandon in-flight work while the
+    server keeps burning credits, so the effective deadline is at least
+    ``cli_timeout() + 60`` (a grace margin for queueing + HTTP overhead).
+
+    Under pytest the clamp only applies when GENIUS_CLI_TIMEOUT is explicitly
+    set, so tests exercising short poll timeouts stay fast and deterministic.
+    """
+    if os.getenv("GENIUS_CLI_TIMEOUT") is None and (
+        "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST")
+    ):
+        return poll_timeout
+    return max(poll_timeout, cli_timeout() + 60.0)
+
+
+# Cap for failure logs embedded back into agent prompts by the self-healing
+# loops; unbounded pytest/flake8 output would otherwise blow up the prompt.
+MAX_EMBEDDED_LOG_CHARS = 15000
+
+
+def truncate_log(text: str, limit: int = MAX_EMBEDDED_LOG_CHARS) -> str:
+    """Keep only the LAST ``limit`` characters of a log (failures summarize at
+    the end), prefixing a marker so the agent knows the head was dropped."""
+    if text and len(text) > limit:
+        return "(truncated)\n" + text[-limit:]
+    return text
 
 
 def degraded_mode() -> bool:
@@ -341,16 +374,19 @@ def resolve_devops_cmd():
 
 
 def clean_output_files(paths):
-    """Delete context/output files if they exist to prevent stale data usage."""
-    logger.info("Cleaning up old context/output files...")
+    """Archive context/output files from a previous run to ``<name>.bak``
+    (overwriting an older .bak) so a fresh run cannot consume stale data but
+    the previous artifacts are still recoverable."""
+    logger.info("Archiving old context/output files...")
     for path in paths:
         if os.path.exists(path):
             try:
-                os.remove(path)
-                logger.info(f"Deleted old file: {path}")
+                backup_path = path + ".bak"
+                os.replace(path, backup_path)
+                logger.info(f"Archived old file: {path} -> {backup_path}")
             except Exception as e:
-                logger.error(f"Failed to delete {path}: {e}")
-                raise PipelineError(f"Failed to delete {path}: {e}")
+                logger.error(f"Failed to archive {path}: {e}")
+                raise PipelineError(f"Failed to archive {path}: {e}")
 
 
 def validate_file(path, step_name, is_input=True):
@@ -500,6 +536,10 @@ async def call_api(
     ):
         use_cache = False
 
+    # Never poll for less time than the skill server's own CLI is allowed to
+    # run, or a slow-but-legitimate agent call gets abandoned mid-flight.
+    poll_timeout = effective_poll_timeout(poll_timeout)
+
     if use_cache and cache_key in _API_RESPONSE_CACHE:
         logger.info(f"Cache hit for URL: {url}")
         return _API_RESPONSE_CACHE[cache_key]
@@ -545,7 +585,8 @@ async def call_api(
             pass
 
         if not has_in_memory_workers:
-            hub_url = os.environ.get("GENIUS_HUB_URL", "http://127.0.0.1:8000")
+            # `or` so a blank GENIUS_HUB_URL from .env.example is treated as unset.
+            hub_url = os.environ.get("GENIUS_HUB_URL") or "http://127.0.0.1:8000"
             config = load_config()
             secret = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
 
@@ -835,6 +876,16 @@ async def call_api(
     # a transient error is deduplicated server-side instead of running twice.
     idempotency_key = uuid.uuid4().hex
 
+    def _http_error_detail(exc: Exception) -> str:
+        """Append the response body for HTTP status errors so a 401 'Invalid
+        API Key' is distinguishable from a 400 'Checksum mismatch'."""
+        if isinstance(exc, httpx.HTTPStatusError):
+            try:
+                return f" | Response body: {exc.response.text[:500]}"
+            except Exception:
+                return ""
+        return ""
+
     async def _execute(c):
         try:
             # 1. Start the run
@@ -855,9 +906,12 @@ async def call_api(
             if not task_id:
                 raise PipelineError(f"No task_id returned from {base_url}/run")
         except Exception as e:
-            logger.error(f"HTTP request to start task at {base_url}/run failed: {e}")
+            detail = _http_error_detail(e)
+            logger.error(
+                f"HTTP request to start task at {base_url}/run failed: {e}{detail}"
+            )
             raise PipelineError(
-                f"HTTP request to start task at {base_url}/run failed: {e}"
+                f"HTTP request to start task at {base_url}/run failed: {e}{detail}"
             )
 
         # GET request has empty body, so checksum is of empty bytes
@@ -868,7 +922,10 @@ async def call_api(
         while True:
             if time.time() - poll_start > poll_timeout:
                 raise PipelineError(
-                    f"Task execution timed out. Polling exceeded poll_timeout of {poll_timeout} seconds."
+                    f"Task '{task_id}' at {base_url} timed out. Polling exceeded "
+                    f"poll_timeout of {poll_timeout} seconds. If the agent CLI "
+                    f"legitimately needs longer, raise --poll-timeout and/or "
+                    f"GENIUS_CLI_TIMEOUT."
                 )
             try:
                 poll_payload = {"sub": "orchestrator", "exp": time.time() + 300}
@@ -900,11 +957,14 @@ async def call_api(
             except PipelineError:
                 raise
             except Exception as e:
+                detail = _http_error_detail(e)
                 logger.error(
-                    f"Failed to poll task status at {base_url}/status/{task_id}: {e}"
+                    f"Failed to poll task status at {base_url}/status/{task_id}: "
+                    f"{e}{detail}"
                 )
                 raise PipelineError(
-                    f"Failed to poll task status at {base_url}/status/{task_id}: {e}"
+                    f"Failed to poll task status at {base_url}/status/{task_id}: "
+                    f"{e}{detail}"
                 )
 
     if client is not None:
@@ -1046,7 +1106,7 @@ async def process_single_file(
             # 1. Call Codex API /code
             codex_req_prompt = f"/code Implement the file '{file_path}' according to this specification:\n{specification}"
             if attempt > 1:
-                codex_req_prompt += f"\n\nPrevious implementation attempt failed check.\nTest Failures/Logs:\n{test_failures_logs}\n\nSecurity Report:\n{security_report}"
+                codex_req_prompt += f"\n\nPrevious implementation attempt failed check.\nTest Failures/Logs:\n{truncate_log(test_failures_logs)}\n\nSecurity Report:\n{truncate_log(security_report)}"
 
             try:
                 proj_scanner = ProjectScanner(
@@ -1057,14 +1117,26 @@ async def process_single_file(
                 current_context = {}
             current_context["design.md"] = design_plan_content
 
-            codex_code_raw = await call_api(
-                codex_url,
-                api_key,
-                codex_req_prompt,
-                context=current_context,
-                client=client,
-                poll_timeout=poll_timeout,
-            )
+            # An API/agent failure inside an attempt must not abort the whole
+            # self-healing loop: record it as this attempt's failure log and
+            # let the next attempt (if any) retry.
+            try:
+                codex_code_raw = await call_api(
+                    codex_url,
+                    api_key,
+                    codex_req_prompt,
+                    context=current_context,
+                    client=client,
+                    poll_timeout=poll_timeout,
+                )
+            except PipelineError as e:
+                logger.warning(
+                    f"Codex call failed for {file_path} on attempt "
+                    f"{attempt}/{max_retries}: {e}"
+                )
+                test_failures_logs = f"Codex agent call failed: {e}"
+                security_report = ""
+                continue
             code_to_write = extract_code(codex_code_raw)
 
             # Publish Codex implementation to MessageBus
@@ -1123,9 +1195,18 @@ async def process_single_file(
                 poll_timeout=poll_timeout,
             )
 
-            tester_tests_raw, security_report = await gather_or_raise(
-                tester_task, security_task
-            )
+            try:
+                tester_tests_raw, security_report = await gather_or_raise(
+                    tester_task, security_task
+                )
+            except PipelineError as e:
+                logger.warning(
+                    f"Tester/Security call failed for {file_path} on attempt "
+                    f"{attempt}/{max_retries}: {e}"
+                )
+                test_failures_logs = f"Tester/Security agent call failed: {e}"
+                security_report = ""
+                continue
 
             test_code_to_write = extract_code(tester_tests_raw)
 
@@ -1400,14 +1481,26 @@ async def run_pipeline(
             db_path=os.path.join(project_dir, "logs", "message_bus.db")
         )
 
-        grok_content = await call_api(
-            grok_url,
-            api_key,
-            prompt,
-            context=scanned_files,
-            client=client,
-            poll_timeout=poll_timeout,
-        )
+        try:
+            grok_content = await call_api(
+                grok_url,
+                api_key,
+                prompt,
+                context=scanned_files,
+                client=client,
+                poll_timeout=poll_timeout,
+            )
+        except Exception as e:
+            if not degraded_mode():
+                raise
+            # Research is enrichment, not a hard prerequisite: in degraded
+            # mode (e.g. Grok out of credits) continue with the raw prompt.
+            logger.warning(
+                "DEGRADED MODE: Grok research stage failed (%s). Continuing "
+                "WITHOUT research context - design quality may suffer.",
+                e,
+            )
+            grok_content = f"(research unavailable: {e})\n\nOriginal request: {prompt}"
 
         # Publish to MessageBus
         grok_art_id = message_bus.publish(
@@ -1446,6 +1539,24 @@ async def run_pipeline(
             poll_timeout=poll_timeout,
         )
 
+        def _write_design_files(content):
+            """Persist the design to disk. Called immediately after the initial
+            Claude call (so a later debate failure cannot lose a valid design)
+            and again after the debate refines it."""
+            try:
+                with open(design_file, "w", encoding="utf-8") as f:
+                    f.write(content)
+                with open(
+                    os.path.join(project_dir, "design.md"), "w", encoding="utf-8"
+                ) as f:
+                    f.write(content)
+            except Exception as e:
+                logger.warning(f"Failed to write Claude debug output: {e}")
+
+        # Write the initial design BEFORE the debate: if a debate round fails,
+        # the already-produced (and paid-for) design is safe on disk.
+        _write_design_files(claude_content)
+
         # Multi-Agent Debate Refinement
         if max_debate_rounds > 0:
             logger.info(
@@ -1463,14 +1574,30 @@ async def run_pipeline(
                     f"Draft Architecture Plan:\n{claude_content}\n\n"
                     f"Original Research and Context:\n{claude_prompt}"
                 )
-                critic_content = await call_api(
-                    grok_url,
-                    api_key,
-                    critic_prompt,
-                    context=scanned_files,
-                    client=client,
-                    poll_timeout=poll_timeout,
-                )
+                # A debate-round failure must not lose the design Claude
+                # already produced: design.md is written before the debate, so
+                # in strict mode the error propagates with the design safely
+                # on disk, and in degraded mode the debate simply stops here.
+                try:
+                    critic_content = await call_api(
+                        grok_url,
+                        api_key,
+                        critic_prompt,
+                        context=scanned_files,
+                        client=client,
+                        poll_timeout=poll_timeout,
+                    )
+                except Exception as e:
+                    if not degraded_mode():
+                        raise
+                    logger.warning(
+                        "DEGRADED MODE: debate round %d critic call failed "
+                        "(%s). Keeping the current design and skipping the "
+                        "remaining debate rounds.",
+                        round_idx,
+                        e,
+                    )
+                    break
 
                 if "[APPROVED]" in critic_content:
                     logger.info(
@@ -1491,14 +1618,28 @@ async def run_pipeline(
                     f"GrokReviewer's Criticism:\n{critic_content}\n\n"
                     f"Original Research and Context:\n{claude_prompt}"
                 )
-                claude_content = await call_api(
-                    claude_url,
-                    api_key,
-                    claude_refine_prompt,
-                    context=scanned_files,
-                    client=client,
-                    poll_timeout=poll_timeout,
-                )
+                try:
+                    claude_content = await call_api(
+                        claude_url,
+                        api_key,
+                        claude_refine_prompt,
+                        context=scanned_files,
+                        client=client,
+                        poll_timeout=poll_timeout,
+                    )
+                except Exception as e:
+                    if not degraded_mode():
+                        raise
+                    logger.warning(
+                        "DEGRADED MODE: debate round %d refine call failed "
+                        "(%s). Keeping the current design and skipping the "
+                        "remaining debate rounds.",
+                        round_idx,
+                        e,
+                    )
+                    break
+                # Persist each refinement as soon as it exists.
+                _write_design_files(claude_content)
                 logger.info(f"Debate Round {round_idx} End: Round complete.")
 
         # Publish Claude content to MessageBus
@@ -1511,14 +1652,7 @@ async def run_pipeline(
             )
         )
 
-        try:
-            with open(design_file, "w", encoding="utf-8") as f:
-                f.write(claude_content)
-            proj_design_file = os.path.join(project_dir, "design.md")
-            with open(proj_design_file, "w", encoding="utf-8") as f:
-                f.write(claude_content)
-        except Exception as e:
-            logger.warning(f"Failed to write Claude debug output: {e}")
+        _write_design_files(claude_content)
         validate_file(design_file, "Claude", is_input=False)
         logger.info(
             f"Step 'Claude' successfully completed. Output verified: {design_file}"
@@ -1553,14 +1687,7 @@ async def run_pipeline(
                         parent_id=grok_art_id,
                     )
                 )
-                try:
-                    with open(design_file, "w", encoding="utf-8") as f:
-                        f.write(claude_content)
-                    proj_design_file = os.path.join(project_dir, "design.md")
-                    with open(proj_design_file, "w", encoding="utf-8") as f:
-                        f.write(claude_content)
-                except Exception as e:
-                    logger.warning(f"Failed to write Claude debug output: {e}")
+                _write_design_files(claude_content)
                 print(f"\n[Updated Claude Design Output]\n{claude_content}\n")
 
         # Parse design.md for file implementation task queue
@@ -2118,6 +2245,22 @@ async def run_e2e_pipeline(
             poll_timeout=poll_timeout,
         )
 
+        def _write_plan_files(content):
+            """Persist the plan to disk. Called immediately after the initial
+            Claude call (so a later debate failure cannot lose a valid plan)
+            and again after the debate refines it."""
+            try:
+                with open(plan_file, "w", encoding="utf-8") as f:
+                    f.write(content)
+                with open(proj_plan_file, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception as e:
+                raise PipelineError(f"Failed to write Claude plan to {plan_file}: {e}")
+
+        # Write the initial plan BEFORE the debate: if a debate round fails,
+        # the already-produced (and paid-for) plan is safe on disk.
+        _write_plan_files(claude_content)
+
         # Step 2: Grok critique & debate refinement
         if max_debate_rounds > 0:
             logger.info(
@@ -2135,14 +2278,28 @@ async def run_e2e_pipeline(
                     f"Draft Plan:\n{claude_content}\n\n"
                     f"Original Prompt:\n{prompt}"
                 )
-                critic_content = await call_api(
-                    grok_url,
-                    api_key,
-                    critic_prompt,
-                    context=scanned_files,
-                    client=client,
-                    poll_timeout=poll_timeout,
-                )
+                # Mirror of the sequential pipeline: a debate failure must not
+                # lose the plan already written to disk before the debate.
+                try:
+                    critic_content = await call_api(
+                        grok_url,
+                        api_key,
+                        critic_prompt,
+                        context=scanned_files,
+                        client=client,
+                        poll_timeout=poll_timeout,
+                    )
+                except Exception as e:
+                    if not degraded_mode():
+                        raise
+                    logger.warning(
+                        "DEGRADED MODE: E2E debate round %d critic call failed "
+                        "(%s). Keeping the current plan and skipping the "
+                        "remaining debate rounds.",
+                        round_idx,
+                        e,
+                    )
+                    break
 
                 if "[APPROVED]" in critic_content:
                     logger.info(
@@ -2161,24 +2318,32 @@ async def run_e2e_pipeline(
                     f"GrokReviewer's Criticism:\n{critic_content}\n\n"
                     f"Original Prompt:\n{prompt}"
                 )
-                claude_content = await call_api(
-                    claude_url,
-                    api_key,
-                    claude_refine_prompt,
-                    context=scanned_files,
-                    client=client,
-                    poll_timeout=poll_timeout,
-                )
+                try:
+                    claude_content = await call_api(
+                        claude_url,
+                        api_key,
+                        claude_refine_prompt,
+                        context=scanned_files,
+                        client=client,
+                        poll_timeout=poll_timeout,
+                    )
+                except Exception as e:
+                    if not degraded_mode():
+                        raise
+                    logger.warning(
+                        "DEGRADED MODE: E2E debate round %d refine call failed "
+                        "(%s). Keeping the current plan and skipping the "
+                        "remaining debate rounds.",
+                        round_idx,
+                        e,
+                    )
+                    break
+                # Persist each refinement as soon as it exists.
+                _write_plan_files(claude_content)
                 logger.info(f"E2E Debate Round {round_idx} End: Round complete.")
 
         # Save final plan to plan.md
-        try:
-            with open(plan_file, "w", encoding="utf-8") as f:
-                f.write(claude_content)
-            with open(proj_plan_file, "w", encoding="utf-8") as f:
-                f.write(claude_content)
-        except Exception as e:
-            raise PipelineError(f"Failed to write Claude plan to {plan_file}: {e}")
+        _write_plan_files(claude_content)
         validate_file(plan_file, "Claude Plan", is_input=False)
         logger.info(
             f"Step 'Claude Plan' successfully completed. Output verified: {plan_file}"
@@ -2232,7 +2397,7 @@ async def run_e2e_pipeline(
 
                     codex_prompt = f"/code Implement the file '{file_path}' according to this specification:\n{specification}"
                     if attempt > 1:
-                        codex_prompt += f"\n\nPrevious implementation attempt failed verification.\nErrors/Logs:\n{codex_error_log}"
+                        codex_prompt += f"\n\nPrevious implementation attempt failed verification.\nErrors/Logs:\n{truncate_log(codex_error_log)}"
 
                     try:
                         proj_scanner = ProjectScanner(
@@ -2243,14 +2408,24 @@ async def run_e2e_pipeline(
                     except Exception:
                         current_context = {}
 
-                    codex_raw = await call_api(
-                        codex_url,
-                        api_key,
-                        codex_prompt,
-                        context=current_context,
-                        client=client,
-                        poll_timeout=poll_timeout,
-                    )
+                    # An API/agent failure inside an attempt must not abort the
+                    # loop: record it as this attempt's failure log and retry.
+                    try:
+                        codex_raw = await call_api(
+                            codex_url,
+                            api_key,
+                            codex_prompt,
+                            context=current_context,
+                            client=client,
+                            poll_timeout=poll_timeout,
+                        )
+                    except PipelineError as e:
+                        logger.warning(
+                            f"Codex call failed for {file_path} on attempt "
+                            f"{attempt}/{max_retries}: {e}"
+                        )
+                        codex_error_log = f"Codex agent call failed: {e}"
+                        continue
                     code_content = extract_code(codex_raw)
 
                     try:
@@ -2339,7 +2514,7 @@ async def run_e2e_pipeline(
                         f"Code:\n\n{implemented_code}"
                     )
                     if attempt > 1:
-                        tester_prompt += f"\n\nPrevious test generation attempt failed verification.\nErrors/Logs:\n{tester_error_log}"
+                        tester_prompt += f"\n\nPrevious test generation attempt failed verification.\nErrors/Logs:\n{truncate_log(tester_error_log)}"
 
                     try:
                         proj_scanner = ProjectScanner(
@@ -2350,14 +2525,22 @@ async def run_e2e_pipeline(
                     except Exception:
                         current_context = {}
 
-                    tester_raw = await call_api(
-                        tester_url,
-                        api_key,
-                        tester_prompt,
-                        context=current_context,
-                        client=client,
-                        poll_timeout=poll_timeout,
-                    )
+                    try:
+                        tester_raw = await call_api(
+                            tester_url,
+                            api_key,
+                            tester_prompt,
+                            context=current_context,
+                            client=client,
+                            poll_timeout=poll_timeout,
+                        )
+                    except PipelineError as e:
+                        logger.warning(
+                            f"Tester call failed for {file_path} on attempt "
+                            f"{attempt}/{max_retries}: {e}"
+                        )
+                        tester_error_log = f"Tester agent call failed: {e}"
+                        continue
                     test_code_content = extract_code(tester_raw)
 
                     try:

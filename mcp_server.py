@@ -397,6 +397,17 @@ async def run_stdio_mcp():
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
 
+    if sys.platform == "win32":
+        # The win32 branch reads text-mode sys.stdin, which decodes with the
+        # locale codepage (e.g. cp1252) for pipes. A client's UTF-8 BOM then
+        # arrives as 'ï»¿' (and any non-ASCII JSON as mojibake), so the BOM
+        # strip below never matches and the request fails to parse. Force
+        # UTF-8 to match the JSON-RPC wire format.
+        try:
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     loop = asyncio.get_running_loop()
 
     if sys.platform != "win32":

@@ -1,3 +1,5 @@
+import asyncio
+import json
 import sys
 import os
 import pytest
@@ -5,7 +7,14 @@ from unittest.mock import patch, AsyncMock, MagicMock
 
 # Add current workspace to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from serve import normalize_roles, main_async, _resolve_registry_path
+from serve import (
+    normalize_roles,
+    main_async,
+    wait_for_servers_ready,
+    _prune_registry_entry,
+    _resolve_registry_path,
+    _startup_timeout,
+)
 
 
 def test_resolve_registry_path_empty_env_falls_back_to_default(tmp_path, monkeypatch):
@@ -150,3 +159,161 @@ async def test_serve_cli_auto_pilot(
 
     # run_pipeline should be called with interactive=False
     mock_run_pipeline.assert_called_once_with("Build a calculator", interactive=False)
+
+
+@pytest.mark.asyncio
+@patch("serve.start_server", new_callable=AsyncMock)
+@patch("serve.run_pipeline", new_callable=AsyncMock)
+@patch("argparse.ArgumentParser.parse_args")
+async def test_serve_auto_pilot_exits_nonzero_on_pipeline_failure(
+    mock_parse_args, mock_run_pipeline, mock_start_server
+):
+    # Regression (F3): auto-pilot used to swallow pipeline errors and exit 0.
+    mock_args = MagicMock()
+    mock_args.roles = None
+    mock_args.prompt = "Build a calculator"
+    mock_args.interactive = False
+    mock_args.auto_pilot = True
+    mock_parse_args.return_value = mock_args
+
+    mock_run_pipeline.side_effect = RuntimeError("pipeline exploded")
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main_async()
+    assert exc_info.value.code == 1
+
+
+# --- Skill server /health + startup readiness poll -------------------------
+
+
+def test_skill_app_health_endpoint_is_unauthenticated():
+    from fastapi.testclient import TestClient
+    from ag_core.skill_app import create_skill_app
+
+    client = TestClient(create_skill_app("grok"))
+    # No JWT / checksum headers at all: /health must still answer.
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "role": "grok"}
+
+
+@pytest.mark.asyncio
+async def test_wait_for_servers_ready_success(monkeypatch):
+    async def fake_get(self, url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        return resp
+
+    monkeypatch.setattr("httpx.AsyncClient.get", fake_get)
+    # Must return without raising once every role answered 200.
+    await wait_for_servers_ready({"grok": 8001, "claude": 8002}, timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_servers_ready_deadline_lists_missing_roles(monkeypatch):
+    import httpx
+
+    async def fake_get(self, url, **kwargs):
+        raise httpx.ConnectError("nobody home")
+
+    monkeypatch.setattr("httpx.AsyncClient.get", fake_get)
+    with pytest.raises(RuntimeError) as exc_info:
+        await wait_for_servers_ready({"grok": 8001}, timeout=0.3)
+    assert "grok" in str(exc_info.value)
+    assert "ready" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_servers_ready_aborts_on_crashed_server_task(monkeypatch):
+    import httpx
+
+    async def fake_get(self, url, **kwargs):
+        raise httpx.ConnectError("nobody home")
+
+    monkeypatch.setattr("httpx.AsyncClient.get", fake_get)
+
+    async def boom():
+        raise RuntimeError("server crashed at startup")
+
+    task = asyncio.get_running_loop().create_task(boom())
+    await asyncio.sleep(0)  # let the task run (and fail)
+    with pytest.raises(RuntimeError) as exc_info:
+        await wait_for_servers_ready({"grok": 8001}, server_tasks=[task], timeout=5.0)
+    assert "crashed" in str(exc_info.value)
+
+
+def test_startup_timeout_env_override(monkeypatch):
+    monkeypatch.setenv("GENIUS_STARTUP_TIMEOUT", "12.5")
+    assert _startup_timeout() == 12.5
+    monkeypatch.setenv("GENIUS_STARTUP_TIMEOUT", "not-a-number")
+    assert _startup_timeout() == 30.0
+    monkeypatch.setenv("GENIUS_STARTUP_TIMEOUT", "-3")
+    assert _startup_timeout() == 30.0
+    monkeypatch.delenv("GENIUS_STARTUP_TIMEOUT", raising=False)
+    assert _startup_timeout() == 30.0
+
+
+# --- Service registry hygiene ----------------------------------------------
+
+
+def test_prune_registry_entry_removes_own_port(tmp_path):
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps({"grok": 9001, "claude": 8002}), encoding="utf-8"
+    )
+    _prune_registry_entry(str(registry_path), "grok", 9001)
+    remaining = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert remaining == {"claude": 8002}
+
+
+def test_prune_registry_entry_keeps_entry_of_newer_instance(tmp_path):
+    # A newer instance re-registered 'grok' on another port: do not prune it.
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps({"grok": 9002}), encoding="utf-8")
+    _prune_registry_entry(str(registry_path), "grok", 9001)
+    remaining = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert remaining == {"grok": 9002}
+
+
+def test_prune_registry_entry_missing_file_is_noop(tmp_path):
+    # Must not raise when the registry never got written.
+    _prune_registry_entry(str(tmp_path / "nope.json"), "grok", 9001)
+
+
+def test_load_config_reads_registry_with_blank_env(monkeypatch, tmp_path):
+    """Regression (F4): a blank GENIUS_SERVICE_REGISTRY (shipped in .env.example)
+    used to silently disable the registry override on the READ side, killing
+    dynamic-port discovery. Blank must fall back to the in-repo default path."""
+    from ag_core.config import load_config
+
+    default_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), ".agents", "service_registry.json"
+    )
+    os.makedirs(os.path.dirname(default_path), exist_ok=True)
+    original = None
+    if os.path.exists(default_path):
+        with open(default_path, "r", encoding="utf-8") as f:
+            original = f.read()
+    try:
+        with open(default_path, "w", encoding="utf-8") as f:
+            json.dump({"grok": 9166}, f)
+        monkeypatch.setenv("GENIUS_SERVICE_REGISTRY", "")
+        config = load_config()
+        # Under pytest, URLs get a /role suffix.
+        assert config.services.grok_researcher == "http://localhost:9166/grok"
+    finally:
+        if original is None:
+            os.remove(default_path)
+        else:
+            with open(default_path, "w", encoding="utf-8") as f:
+                f.write(original)
+
+
+def test_load_config_honours_explicit_registry_env(monkeypatch, tmp_path):
+    from ag_core.config import load_config
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps({"claude": 9177}), encoding="utf-8")
+    monkeypatch.setenv("GENIUS_SERVICE_REGISTRY", str(registry_path))
+    config = load_config()
+    assert config.services.claude_architect == "http://localhost:9177/claude"

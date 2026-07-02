@@ -80,6 +80,18 @@ class RunRequest(BaseModel):
     context: Optional[Any] = None
 
 
+# Cap for the per-app task/idempotency stores so a long-lived skill server
+# cannot grow them without bound. Dicts preserve insertion order, so evicting
+# the first key drops the oldest entry (a plain FIFO, dependency-free).
+MAX_TRACKED_TASKS = 500
+
+
+def evict_oldest(store: dict, cap: int = MAX_TRACKED_TASKS) -> None:
+    """Drop the oldest entries (by insertion order) until ``len(store) <= cap``."""
+    while len(store) > cap:
+        store.pop(next(iter(store)))
+
+
 def build_agent(role: str, stateless: bool = True):
     """Instantiate the agent + provider for ``role``.
 
@@ -123,12 +135,20 @@ def create_skill_app(role: str) -> FastAPI:
     # agents tolerate an empty prompt (they fall back to a sensible default).
     strict_prompt = role in ("security", "devops")
 
-    # In-memory task store: task_id -> {"status", "result"/"error"}
+    # In-memory task store: task_id -> {"status", "result"/"error"}.
+    # Both stores are FIFO-bounded (see evict_oldest) so they cannot grow
+    # without bound on a long-lived server.
     tasks: dict = {}
     # Idempotency map: X-Idempotency-Key -> task_id, so a retried /run (e.g.
     # after a transient network error where the server already accepted the
     # first POST) returns the same task instead of dispatching the agent twice.
     idempotency: dict = {}
+
+    @app.get("/health")
+    async def health_endpoint():
+        """Unauthenticated liveness probe used by serve.py's startup readiness
+        poll (and anything else that needs a cheap 'is this agent up?')."""
+        return {"status": "ok", "role": role}
 
     @app.post("/run")
     async def run_endpoint(
@@ -154,8 +174,10 @@ def create_skill_app(role: str) -> FastAPI:
 
         task_id = uuid.uuid4().hex
         tasks[task_id] = {"status": "processing", "result": None}
+        evict_oldest(tasks)
         if idempotency_key:
             idempotency[idempotency_key] = task_id
+            evict_oldest(idempotency)
 
         async def _execute():
             try:
