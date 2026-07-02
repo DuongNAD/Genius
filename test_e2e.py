@@ -153,6 +153,20 @@ def client_get(client, path, headers=None):
 
 
 @pytest.fixture(autouse=True)
+def isolate_pipeline_workspace(tmp_path, monkeypatch):
+    """Run every test from a per-test tmp dir.
+
+    Many tests here call run_pipeline() without a workspace argument, and the
+    pipeline defaults its workspace to os.getcwd(). When cwd is the repo root
+    that archives pre-existing root artifacts (research.md -> research.md.bak,
+    app.py -> app.py.bak, ...) and leaves temp_workspace_* dirs and projects/
+    output behind. Chdir'ing into tmp_path confines all of it to the per-test
+    temp dir. Tests that need repo files already use absolute paths.
+    """
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def mock_subprocess():
     """Automatically mock asyncio.create_subprocess_exec to prevent FileNotFoundError for CLI commands."""
     mock_process = AsyncMock()
@@ -748,22 +762,30 @@ def test_f6_orchestrator_invalid_workspace_raises_error():
 
 
 def test_f6_orchestrator_handles_permission_error():
-    """Logs warnings or raises error if workspace files are read-only."""
+    """Logs warnings or raises error if workspace files cannot be archived.
+
+    clean_output_files archives research.md -> research.md.bak via os.replace;
+    a read-only .bak destination makes that replace fail on Windows, which must
+    surface as a PipelineError instead of silently consuming stale artifacts.
+    """
     check_orchestrator_rewritten()
     from orchestrator import run_pipeline
 
     workspace_dir = "temp_workspace_f6_perm"
     os.makedirs(workspace_dir, exist_ok=True)
-    read_only_file = os.path.join(workspace_dir, "research.md")
-    with open(read_only_file, "w") as f:
-        f.write("immutable")
-    os.chmod(read_only_file, stat.S_IREAD)
+    stale_file = os.path.join(workspace_dir, "research.md")
+    with open(stale_file, "w") as f:
+        f.write("stale artifact")
+    locked_bak = stale_file + ".bak"
+    with open(locked_bak, "w") as f:
+        f.write("locked backup")
+    os.chmod(locked_bak, stat.S_IREAD)
 
     try:
         with pytest.raises(PipelineError):
             asyncio.run(run_pipeline(prompt="test", workspace=workspace_dir))
     finally:
-        os.chmod(read_only_file, stat.S_IWRITE)
+        os.chmod(locked_bak, stat.S_IWRITE)
         shutil.rmtree(workspace_dir, ignore_errors=True)
 
 
@@ -1057,7 +1079,10 @@ def test_f4_orchestrator_agent_disconnects_mid_polling():
 def test_f4_orchestrator_polling_timeout_exhaustion():
     """Orchestrator times out if task status remains 'processing' past maximum polling timeout."""
     check_orchestrator_rewritten()
-    with open("orchestrator.py", "r", encoding="utf-8") as f:
+    orchestrator_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "orchestrator.py"
+    )
+    with open(orchestrator_path, "r", encoding="utf-8") as f:
         content = f.read()
     if "timeout" not in content and "poll_timeout" not in content:
         pytest.fail("Orchestrator polling timeout exhaustion not yet implemented")
@@ -1206,22 +1231,25 @@ def test_f6_config_env_var_override(monkeypatch):
 
 
 def test_f6_orchestrator_read_only_output_files():
-    """Handles deletion failure for read-only outputs."""
+    """Handles archive failure for outputs whose .bak destination is locked."""
     check_orchestrator_rewritten()
     from orchestrator import run_pipeline
 
     workspace_dir = "temp_workspace_f6_readonly"
     os.makedirs(workspace_dir, exist_ok=True)
-    readonly_file = os.path.join(workspace_dir, "research.md")
-    with open(readonly_file, "w") as f:
+    old_file = os.path.join(workspace_dir, "research.md")
+    with open(old_file, "w") as f:
         f.write("old data")
-    os.chmod(readonly_file, stat.S_IREAD)
+    locked_bak = old_file + ".bak"
+    with open(locked_bak, "w") as f:
+        f.write("locked backup")
+    os.chmod(locked_bak, stat.S_IREAD)
 
     try:
         with pytest.raises(PipelineError):
             asyncio.run(run_pipeline(prompt="test", workspace=workspace_dir))
     finally:
-        os.chmod(readonly_file, stat.S_IWRITE)
+        os.chmod(locked_bak, stat.S_IWRITE)
         shutil.rmtree(workspace_dir, ignore_errors=True)
 
 

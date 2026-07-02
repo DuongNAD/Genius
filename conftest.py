@@ -4,6 +4,12 @@ import hashlib
 import json
 from typing import Any, Tuple
 
+# test_generated.py at the repo root is a PIPELINE OUTPUT artifact (the
+# sequential pipeline writes the tester agent's generated tests there), not a
+# test of this repo: its content is arbitrary LLM output and must never be
+# collected (mirrors pytest.ini's norecursedirs exclusion of projects/).
+collect_ignore = ["test_generated.py"]
+
 # Set up default test environment variables before any tests or modules are loaded
 os.environ["SKILL_API_KEY"] = "mock-skill-key"
 os.environ.setdefault("OPENAI_API_KEY", "mock-key")
@@ -44,12 +50,18 @@ original_verify_checksum = ag_core.utils.security.verify_checksum
 original_verify_raw_body_checksum = ag_core.utils.security.verify_raw_body_checksum
 
 
+def _strict_hmac_test() -> bool:
+    """Test files that must see the real HMAC-only behavior (no plain SHA-256
+    fallback): test_upgrades and the real-run HMAC loopback suite."""
+    current = os.getenv("PYTEST_CURRENT_TEST", "")
+    return "test_upgrades" in current or "test_realrun_hmac" in current
+
+
 def patched_verify_checksum(payload: Any, checksum: str, secret: str) -> bool:
     if original_verify_checksum(payload, checksum, secret):
         return True
 
-    is_upgrades_test = "test_upgrades" in os.getenv("PYTEST_CURRENT_TEST", "")
-    if not is_upgrades_test:
+    if not _strict_hmac_test():
         if isinstance(payload, (bytes, str)):
             data = payload if isinstance(payload, bytes) else payload.encode("utf-8")
             return hashlib.sha256(data).hexdigest() == checksum
@@ -80,8 +92,7 @@ def patched_verify_raw_body_checksum(
     if is_valid:
         return is_valid, is_plain
 
-    is_upgrades_test = "test_upgrades" in os.getenv("PYTEST_CURRENT_TEST", "")
-    if not is_upgrades_test:
+    if not _strict_hmac_test():
         try:
             computed_plain = hashlib.sha256(body).hexdigest()
             if computed_plain == checksum:
