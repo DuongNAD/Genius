@@ -186,9 +186,9 @@ def _codex_ok_process():
     return mock_process
 
 
-async def _codex_invocation_args(env_overrides=None, **send_kwargs):
+async def _codex_invocation_args(env_overrides=None, model_name="", **send_kwargs):
     """Run send_prompt with a mocked subprocess and return the CLI argv tuple."""
-    provider = OpenAIProvider()
+    provider = OpenAIProvider(model_name=model_name)
     # Pin GENIUS_CODEX_SANDBOX (empty = unset) so a value in the developer's
     # real environment can't leak into the default-behaviour assertions.
     env = {"LOCALAPPDATA": r"C:\fake_localappdata", "GENIUS_CODEX_SANDBOX": ""}
@@ -259,6 +259,18 @@ def test_openai_provider_no_workdir_means_no_cd():
     assert "--cd" not in args
 
 
+def test_openai_provider_passes_model_flag_when_configured():
+    args = asyncio.run(_codex_invocation_args(model_name="gpt-5.5"))
+    idx = args.index("-m")
+    assert args[idx + 1] == "gpt-5.5"
+
+
+def test_openai_provider_default_model_omits_flag():
+    # Empty model = the codex CLI's own default; never inject a -m flag.
+    args = asyncio.run(_codex_invocation_args())
+    assert "-m" not in args
+
+
 def test_openai_provider_invalid_json():
     # Unparseable output must raise (never a silent empty "success").
     async def run_test():
@@ -321,9 +333,9 @@ def test_anthropic_provider_success():
             assert args[0] == "/usr/local/bin/claude"
             # The prompt never appears in argv (cmd.exe metacharacter safety);
             # it is piped via stdin. `--tools` gets a real empty string.
+            # No --bare: it skips stored OAuth credentials ("Not logged in").
             assert args[1:] == (
                 "-p",
-                "--bare",
                 "--tools",
                 "",
                 "--output-format",
@@ -331,6 +343,33 @@ def test_anthropic_provider_success():
             )
             assert kwargs["stdin"] == asyncio.subprocess.PIPE
             mock_process.communicate.assert_called_once_with(input=b"Test prompt")
+
+    asyncio.run(run_test())
+
+
+def test_anthropic_provider_passes_model_flag_when_configured():
+    async def run_test():
+        provider = AnthropicProvider(model_name="claude-sonnet-5")
+
+        mock_process = AsyncMock()
+        mock_process.communicate.return_value = (
+            json.dumps({"result": "ok", "usage": {}}).encode("utf-8"),
+            b"",
+        )
+
+        with (
+            patch("shutil.which", return_value="/usr/local/bin/claude"),
+            patch(
+                "asyncio.create_subprocess_exec", new_callable=AsyncMock
+            ) as mock_exec,
+        ):
+            mock_exec.return_value = mock_process
+            await provider.send_prompt("Test prompt")
+
+            args, _kwargs = mock_exec.call_args
+            arg_list = list(args)
+            assert "--model" in arg_list
+            assert arg_list[arg_list.index("--model") + 1] == "claude-sonnet-5"
 
     asyncio.run(run_test())
 

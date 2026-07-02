@@ -93,11 +93,14 @@ class OpenAIProvider(BaseProvider):
 
     def __init__(
         self,
-        model_name: str = "gpt-4o",
+        model_name: str = "",
         api_key: str | None = None,
         base_url: str | None = None,
         **kwargs: Any,
     ) -> None:
+        # An empty model_name means "use the codex CLI's configured default
+        # model"; a value is passed through as `-m/--model`. Never default to
+        # a chat-API name like gpt-4o here — codex would reject it.
         api_key = api_key or os.getenv("OPENAI_API_KEY")
         base_url = (
             base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
@@ -159,6 +162,8 @@ class OpenAIProvider(BaseProvider):
                 sandbox_flags = ["--sandbox", "read-only", "--skip-git-repo-check"]
 
             cmd = [cli_path, "exec", "-", *sandbox_flags]
+            if self.model_name:
+                cmd += ["-m", self.model_name]
             if workdir:
                 # Point Codex's working root at a caller-provided directory so
                 # even a writable sandbox can only touch that tree.

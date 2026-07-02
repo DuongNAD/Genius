@@ -56,11 +56,13 @@ class AnthropicProvider(BaseProvider):
 
     def __init__(
         self,
-        model_name: str = "claude-3-5-sonnet-20241022",
+        model_name: str = "",
         api_key: str | None = None,
         base_url: str | None = None,
         **kwargs: Any,
     ) -> None:
+        # An empty model_name means "use the CLI's configured default model";
+        # a value is passed through as `--model` (alias or full id).
         api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         base_url = (
             base_url
@@ -90,18 +92,30 @@ class AnthropicProvider(BaseProvider):
             # `&|<>^%` and newlines in LLM-generated prompt text.
             # `--tools` gets a real empty string (not the two-char literal
             # '""') which the CLI documents as "disable all tools".
+            # No `--bare`: on Claude Code 2.1.x its minimal mode also skips
+            # the stored OAuth credentials, so every call fails with "Not
+            # logged in" even on a logged-in machine.
             cmd = [
                 cli_path,
                 "-p",
-                "--bare",
                 "--tools",
                 "",
                 "--output-format",
                 "json",
             ]
 
+            if self.model_name:
+                cmd.extend(["--model", self.model_name])
+
             if sys_prompt:
-                cmd.extend(["--system-prompt", sys_prompt])
+                # Never pass the system prompt as an argv element: the
+                # cmd.exe /c wrapper mangles multi-line arguments (everything
+                # after the first newline is silently lost), so a
+                # --system-prompt argument delivered only its first line — a
+                # real run dropped the architect's entire JSON output
+                # contract. Prepend it to the stdin payload instead (same
+                # pattern as the agy and codex providers).
+                prompt = f"{sys_prompt}\n\n{prompt}"
 
             # Wrap .cmd/.bat shims with cmd.exe /c, decided from the resolved
             # path itself - never via a raw shutil.which on a bare name, which
@@ -111,12 +125,23 @@ class AnthropicProvider(BaseProvider):
             if sys.platform == "win32" and cli_path.lower().endswith((".cmd", ".bat")):
                 actual_cmd = ["cmd.exe", "/c"] + cmd
 
+            # Neutral cwd: without --bare (removed — it breaks OAuth) the CLI
+            # loads CLAUDE.md/AGENTS.md from its working directory. Run from
+            # the system temp dir so this host repo's project context cannot
+            # leak into role-contracted responses (a real run produced a
+            # markdown design "consistent with existing flat modules" instead
+            # of the required JSON plan because it read Genius's own CLAUDE.md).
+            import tempfile
+
+            neutral_cwd = tempfile.gettempdir()
+
             try:
                 process = await asyncio.create_subprocess_exec(
                     *actual_cmd,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    cwd=neutral_cwd,
                 )
             except OSError:
                 if sys.platform == "win32" and actual_cmd == cmd:
@@ -126,6 +151,7 @@ class AnthropicProvider(BaseProvider):
                         stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
+                        cwd=neutral_cwd,
                     )
                 else:
                     raise
