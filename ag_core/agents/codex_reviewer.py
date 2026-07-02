@@ -171,7 +171,9 @@ class CodexReviewerAgent(BaseAgent):
                 retry_prompt = (
                     f"The test suite failed with exit code {pytest_exit_code}.\n"
                     f"Test logs:\n{pytest_logs}\n\n"
-                    f"Please fix the bugs in the code. Original prompt: {user_prompt}"
+                    f"Please fix the bugs in the code. Original prompt: {user_prompt}\n\n"
+                    "Do NOT run tests, commands, or tools. Output ONLY the "
+                    "complete file content in a single ```python fenced block."
                 )
                 response = await self.provider.send_prompt(
                     retry_prompt, system=CODER_PROMPT

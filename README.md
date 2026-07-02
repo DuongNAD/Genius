@@ -119,10 +119,34 @@ Thêm Genius vào file cấu hình MCP của Antigravity tại `~/.gemini/antigr
 - **Không cần khối `env` chứa API key**: các CLI tự xác thực (`agy` dùng chung phiên đăng nhập Antigravity IDE, app desktop của Codex/Claude), còn `skill_api_key` được đọc nhất quán từ `config.yaml` ở cả hai phía.
 - Sau khi sửa file, **khởi động lại Antigravity** để nó nạp MCP server `genius`.
 
-### Quy trình dùng từ Antigravity
-1. `python serve.py` — bật các Skill Server (8001–8006).
-2. Trong Antigravity, gọi tool `orchestrate` với `prompt` (mô tả việc cần build) → nhận `job_id`.
-3. Gọi `orchestrate_status` với `job_id` để theo dõi, đến khi `status = completed` thì nhận artifacts (research/design/code/review/tests/security/deploy).
+### Quy trình dùng từ Antigravity (đã kiểm chứng chạy thật)
+
+**Bước 0 — Bật Skill Server (một lần, giữ chạy nền):**
+```bash
+py serve.py --roles grok,claude,codex,tester,security,devops
+```
+Chờ tới khi cả 6 server báo sẵn sàng (có thể tự kiểm tra: `GET http://localhost:8001/health` … `8006/health`). Tool đơn lẻ (`research`, `design`, `debate`, `review`, `doctor`) chạy **in-process**, không cần bước này — chỉ `orchestrate` mới cần.
+
+**Bước 1 — Kiểm tra sẵn sàng:** gọi tool `doctor` (không side effect). Kết quả phải là `READY`, kèm bảng chuỗi provider từng role. Nếu `NOT READY`, thông báo sẽ chỉ rõ CLI nào thiếu.
+
+**Bước 2 — Phóng pipeline:** gọi `orchestrate` với `prompt` (mô tả việc cần build) và tuỳ chọn `workspace` (thư mục tuyệt đối để ghi artifact — nên đặt riêng cho mỗi dự án). Nhận `job_id` ngay lập tức, không bị treo chờ.
+
+**Bước 3 — Theo dõi tiến độ:** poll `orchestrate_status` với `job_id` (mỗi 10–15s). Response cho biết:
+- `status`: `running` / `completed` / `failed` (kèm `error` chi tiết nếu fail)
+- `elapsed_seconds` + `stages`: từng giai đoạn `research → design → code → security_audit → deploy` ở trạng thái `done`/`pending`
+- `artifacts_ready`: các URI `genius://artifacts/*` đã đọc được ngay (không cần đợi pipeline xong)
+
+**Bước 4 — Đọc kết quả:** khi `completed`, artifacts nằm trong response; hoặc bất cứ lúc nào cũng đọc trực tiếp qua MCP resources: `resources/read` với `genius://artifacts/design.md`, `genius://artifacts/review.md`… Code sinh ra nằm trong `workspace`.
+
+**Các tool đơn lẻ (không cần Skill Server):**
+- `research` / `design` / `code` / `unit_test` / `security_audit` / `deploy` — gọi một tác tử duy nhất.
+- `debate` — đưa bản thiết kế vào để phản biện (critic role Researcher ↔ refiner Claude, tối đa 3 vòng, dừng sớm khi `[APPROVED]`).
+- `review` — dán code vào để review nhanh, không ghi file.
+
+**Xử lý sự cố nhanh:**
+- Grok/backr nào đó chết giữa chừng → tự fall-through theo chuỗi mặc định (`agy → claude → codex` cho Researcher), xem cảnh báo `[provider-fallback]` trên stderr của server.
+- Agent chạy lâu (codex "suy nghĩ" nhiều phút) là bình thường — poll timeout đã tự nới theo `GENIUS_CLI_TIMEOUT` (mặc định 600s).
+- Pipeline fail giữa chừng: artifact các giai đoạn đã xong vẫn còn trên đĩa (bản cũ được lưu `.bak` khi chạy lại).
 
 ---
 

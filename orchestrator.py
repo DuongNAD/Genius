@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import ast
 import sys
 import os
 import asyncio
@@ -72,6 +73,32 @@ def truncate_log(text: str, limit: int = MAX_EMBEDDED_LOG_CHARS) -> str:
     if text and len(text) > limit:
         return "(truncated)\n" + text[-limit:]
     return text
+
+
+def invalid_python_feedback(
+    code: str, dest_path: str, source: str = "Codex"
+) -> str | None:
+    """Validate code destined for a ``.py`` file; return steering feedback when
+    it is not valid Python, else None.
+
+    Agentic CLIs sometimes answer with a pytest log or prose instead of source
+    (a real run once wrote a full test-session log into ``calculator.py``).
+    Writing that garbage poisons every later stage, so the self-healing loops
+    call this BEFORE writing: on a SyntaxError the attempt is treated as failed
+    and the returned feedback steers the next attempt's prompt. Non-``.py``
+    destinations are never validated.
+    """
+    if not dest_path.endswith(".py"):
+        return None
+    try:
+        ast.parse(code)
+    except SyntaxError as e:
+        return (
+            f"{source} response was not valid Python (SyntaxError: {e}); "
+            "respond ONLY with the complete file content in a single "
+            "```python fenced block."
+        )
+    return None
 
 
 def degraded_mode() -> bool:
@@ -1107,6 +1134,10 @@ async def process_single_file(
             codex_req_prompt = f"/code Implement the file '{file_path}' according to this specification:\n{specification}"
             if attempt > 1:
                 codex_req_prompt += f"\n\nPrevious implementation attempt failed check.\nTest Failures/Logs:\n{truncate_log(test_failures_logs)}\n\nSecurity Report:\n{truncate_log(security_report)}"
+                codex_req_prompt += (
+                    "\n\nDo NOT run tests, commands, or tools. Output ONLY the "
+                    "complete file content in a single ```python fenced block."
+                )
 
             try:
                 proj_scanner = ProjectScanner(
@@ -1138,6 +1169,19 @@ async def process_single_file(
                 security_report = ""
                 continue
             code_to_write = extract_code(codex_code_raw)
+
+            # Never write non-Python garbage (pytest logs, prose) into a .py
+            # file: fail the attempt and steer the next prompt instead. Not
+            # writing also preserves the previous attempt's good file version.
+            feedback = invalid_python_feedback(code_to_write, target_file_path)
+            if feedback:
+                logger.warning(
+                    f"Codex output for {file_path} on attempt "
+                    f"{attempt}/{max_retries} is not valid Python; skipping write."
+                )
+                test_failures_logs = feedback
+                security_report = ""
+                continue
 
             # Publish Codex implementation to MessageBus
             codex_art = Artifact(
@@ -1209,6 +1253,18 @@ async def process_single_file(
                 continue
 
             test_code_to_write = extract_code(tester_tests_raw)
+
+            # Same hygiene for the generated pytest module.
+            feedback = invalid_python_feedback(
+                test_code_to_write, test_file_path, source="Tester"
+            )
+            if feedback:
+                logger.warning(
+                    f"Tester output for {file_path} on attempt "
+                    f"{attempt}/{max_retries} is not valid Python; skipping write."
+                )
+                test_failures_logs = feedback
+                continue
 
             # Publish Tester and Security artifacts to MessageBus
             tester_art = Artifact(
@@ -2399,6 +2455,11 @@ async def run_e2e_pipeline(
                     codex_prompt = f"/code Implement the file '{file_path}' according to this specification:\n{specification}"
                     if attempt > 1:
                         codex_prompt += f"\n\nPrevious implementation attempt failed verification.\nErrors/Logs:\n{truncate_log(codex_error_log)}"
+                        codex_prompt += (
+                            "\n\nDo NOT run tests, commands, or tools. Output "
+                            "ONLY the complete file content in a single "
+                            "```python fenced block."
+                        )
 
                     try:
                         proj_scanner = ProjectScanner(
@@ -2428,6 +2489,19 @@ async def run_e2e_pipeline(
                         codex_error_log = f"Codex agent call failed: {e}"
                         continue
                     code_content = extract_code(codex_raw)
+
+                    # Never write non-Python garbage (pytest logs, prose) into
+                    # a .py file: fail the attempt and steer the next prompt,
+                    # keeping the previous good file version intact.
+                    feedback = invalid_python_feedback(code_content, target_file_path)
+                    if feedback:
+                        logger.warning(
+                            f"Codex output for {file_path} on attempt "
+                            f"{attempt}/{max_retries} is not valid Python; "
+                            "skipping write."
+                        )
+                        codex_error_log = feedback
+                        continue
 
                     try:
                         with open(target_file_path, "w", encoding="utf-8") as f:
@@ -2543,6 +2617,19 @@ async def run_e2e_pipeline(
                         tester_error_log = f"Tester agent call failed: {e}"
                         continue
                     test_code_content = extract_code(tester_raw)
+
+                    # Same hygiene for the generated pytest module.
+                    feedback = invalid_python_feedback(
+                        test_code_content, test_file_path, source="Tester"
+                    )
+                    if feedback:
+                        logger.warning(
+                            f"Tester output for {file_path} on attempt "
+                            f"{attempt}/{max_retries} is not valid Python; "
+                            "skipping write."
+                        )
+                        tester_error_log = feedback
+                        continue
 
                     try:
                         with open(test_file_path, "w", encoding="utf-8") as f:

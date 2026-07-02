@@ -8,6 +8,9 @@
 - F12: previous artifacts are archived to .bak instead of deleted
 - F13: HTTP error bodies surface in PipelineError messages
 - F14: poll-timeout errors name the agent URL and task id
+- F15: code-output hygiene — non-Python garbage (e.g. a pytest log echoed by an
+       agentic CLI) is never written into a .py file; the attempt fails with
+       steering feedback and the previous good file version is preserved
 """
 
 import json
@@ -24,6 +27,7 @@ from orchestrator import (
     PipelineError,
     clean_output_files,
     effective_poll_timeout,
+    invalid_python_feedback,
     run_e2e_pipeline,
     run_pipeline,
     truncate_log,
@@ -487,3 +491,246 @@ async def test_e2e_self_heal_continues_past_agent_call_failures(
     assert "successfully" in result
     assert state["codex"] == 2
     assert state["tester"] == 2
+
+
+# --- F15: never write non-Python garbage into .py files ------------------------
+
+# What the codex CLI actually returned in the real failed run: it ran the
+# repo's test suite and echoed the pytest session log as its "implementation".
+_PYTEST_LOG_GARBAGE = (
+    "============================= test session starts "
+    "=============================\n"
+    "platform win32 -- Python 3.11.9, pytest-8.3.2, pluggy-1.5.0\n"
+    "collected 695 items\n"
+    "\n"
+    "test_orchestrator.py ........................                        [ 10%]\n"
+    "\n"
+    "===================== 693 passed, 2 skipped in 612.34s "
+    "====================\n"
+)
+
+
+def test_invalid_python_feedback_valid_code_is_none():
+    code = "def add(a, b):\n    return a + b\n"
+    assert invalid_python_feedback(code, "calculator.py") is None
+
+
+def test_invalid_python_feedback_rejects_pytest_log():
+    fb = invalid_python_feedback(_PYTEST_LOG_GARBAGE, "calculator.py")
+    assert fb is not None
+    assert "Codex response was not valid Python" in fb
+    assert "SyntaxError" in fb
+    assert "```python fenced block" in fb
+
+
+def test_invalid_python_feedback_names_the_source():
+    fb = invalid_python_feedback(_PYTEST_LOG_GARBAGE, "test_x.py", source="Tester")
+    assert fb.startswith("Tester response was not valid Python")
+
+
+def test_invalid_python_feedback_skips_non_python_files():
+    assert invalid_python_feedback(_PYTEST_LOG_GARBAGE, "deploy.md") is None
+    assert invalid_python_feedback("not python at all", "src/index.js") is None
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_self_heal_rejects_pytest_log_garbage_then_recovers(
+    mock_exec, mock_call_api, temp_workspace
+):
+    calls = []
+    state = {"codex": 0}
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        calls.append((url, prompt))
+        if "8001" in url:
+            return "research"
+        if "8002" in url:
+            return _DESIGN_WITH_FILE
+        if "8003" in url:
+            state["codex"] += 1
+            if state["codex"] == 1:
+                return _PYTEST_LOG_GARBAGE
+            return "def run(): return 1"
+        if "8004" in url:
+            return "def test_run(): pass"
+        if "8005" in url:
+            return "No vulnerabilities detected."
+        if "8006" in url:
+            return "deploy ok"
+        raise AssertionError(f"unexpected URL {url}")
+
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _exec_ok
+
+    await run_pipeline(
+        prompt="Build a self healer", workspace=str(temp_workspace), max_retries=3
+    )
+
+    assert state["codex"] == 2
+    target = temp_workspace / "projects" / "build_a_self_healer" / "src" / "app.py"
+    # The pytest log never reached the file; only the valid retry did.
+    assert target.read_text(encoding="utf-8") == "def run(): return 1"
+    # The retry prompt steered Codex away from echoing logs.
+    codex_prompts = [p for (u, p) in calls if "8003" in u]
+    assert "Codex response was not valid Python" in codex_prompts[1]
+    assert "```python fenced block" in codex_prompts[1]
+    assert "Do NOT run tests, commands, or tools." in codex_prompts[1]
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_self_heal_final_garbage_keeps_previous_good_file(
+    mock_exec, mock_call_api, temp_workspace, monkeypatch
+):
+    monkeypatch.delenv("GENIUS_DEGRADED_MODE", raising=False)
+    state = {"codex": 0}
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        if "8001" in url:
+            return "research"
+        if "8002" in url:
+            return _DESIGN_WITH_FILE
+        if "8003" in url:
+            state["codex"] += 1
+            if state["codex"] == 1:
+                return "def run(): return 1"
+            return _PYTEST_LOG_GARBAGE
+        if "8004" in url:
+            return "def test_run(): assert run() == 2"
+        if "8005" in url:
+            return "No vulnerabilities detected."
+        raise AssertionError(f"unexpected URL {url}")
+
+    mock_call_api.side_effect = impl
+
+    async def exec_pytest_fails(*args, **kwargs):
+        return _proc_mock(returncode=1, stdout=b"1 failed")
+
+    mock_exec.side_effect = exec_pytest_fails
+
+    with pytest.raises(PipelineError, match="Self-healing loop failed"):
+        await run_pipeline(
+            prompt="Build a self healer",
+            workspace=str(temp_workspace),
+            max_retries=3,
+        )
+
+    assert state["codex"] == 3
+    target = temp_workspace / "projects" / "build_a_self_healer" / "src" / "app.py"
+    # Attempt 1's valid (if failing) code survives: the garbage from the final
+    # attempts never overwrote it.
+    assert target.read_text(encoding="utf-8") == "def run(): return 1"
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_self_heal_rejects_garbage_tester_output(
+    mock_exec, mock_call_api, temp_workspace
+):
+    calls = []
+    state = {"tester": 0}
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        calls.append((url, prompt))
+        if "8001" in url:
+            return "research"
+        if "8002" in url:
+            return _DESIGN_WITH_FILE
+        if "8003" in url:
+            return "def run(): return 1"
+        if "8004" in url:
+            state["tester"] += 1
+            if state["tester"] == 1:
+                return _PYTEST_LOG_GARBAGE
+            return "def test_run(): pass"
+        if "8005" in url:
+            return "No vulnerabilities detected."
+        if "8006" in url:
+            return "deploy ok"
+        raise AssertionError(f"unexpected URL {url}")
+
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _exec_ok
+
+    await run_pipeline(
+        prompt="Build a self healer", workspace=str(temp_workspace), max_retries=3
+    )
+
+    assert state["tester"] == 2
+    test_file = (
+        temp_workspace
+        / "projects"
+        / "build_a_self_healer"
+        / "tests"
+        / "test_src_app.py"
+    )
+    assert test_file.read_text(encoding="utf-8") == "def test_run(): pass"
+    codex_prompts = [p for (u, p) in calls if "8003" in u]
+    assert "Tester response was not valid Python" in codex_prompts[1]
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+async def test_e2e_rejects_pytest_log_garbage_then_recovers(
+    mock_call_api, temp_workspace
+):
+    calls = []
+    state = {"codex": 0}
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        calls.append((url, prompt))
+        if "8002" in url:
+            return _DESIGN_WITH_FILE
+        if "8003" in url:
+            state["codex"] += 1
+            if state["codex"] == 1:
+                return _PYTEST_LOG_GARBAGE
+            return "def run(): return 1"
+        if "8004" in url:
+            return "def test_run(): pass"
+        raise AssertionError(f"unexpected URL {url}")
+
+    mock_call_api.side_effect = impl
+
+    with patch("orchestrator.run_subprocess", new=AsyncMock(return_value=(0, ""))):
+        result = await run_e2e_pipeline(
+            prompt="Build a self healer",
+            workspace=str(temp_workspace),
+            max_retries=3,
+        )
+
+    assert "successfully" in result
+    assert state["codex"] == 2
+    target = temp_workspace / "projects" / "build_a_self_healer" / "src" / "app.py"
+    assert target.read_text(encoding="utf-8") == "def run(): return 1"
+    codex_prompts = [p for (u, p) in calls if "8003" in u]
+    assert "Codex response was not valid Python" in codex_prompts[1]
+    assert "Do NOT run tests, commands, or tools." in codex_prompts[1]
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+async def test_e2e_final_garbage_never_writes_file(mock_call_api, temp_workspace):
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        if "8002" in url:
+            return _DESIGN_WITH_FILE
+        if "8003" in url:
+            return _PYTEST_LOG_GARBAGE
+        raise AssertionError(f"unexpected URL {url}")
+
+    mock_call_api.side_effect = impl
+
+    with patch("orchestrator.run_subprocess", new=AsyncMock(return_value=(0, ""))):
+        with pytest.raises(PipelineError, match="Codex self-healing failed"):
+            await run_e2e_pipeline(
+                prompt="Build a self healer",
+                workspace=str(temp_workspace),
+                max_retries=2,
+            )
+
+    target = temp_workspace / "projects" / "build_a_self_healer" / "src" / "app.py"
+    assert not target.exists()

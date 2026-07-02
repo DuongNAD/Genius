@@ -107,7 +107,11 @@ class OpenAIProvider(BaseProvider):
         )
 
     async def send_prompt(
-        self, prompt: str, system: str | None = None, **kwargs: Any
+        self,
+        prompt: str,
+        system: str | None = None,
+        workdir: str | None = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         async with self.semaphore:
             await self.rate_limiter.acquire()
@@ -115,6 +119,7 @@ class OpenAIProvider(BaseProvider):
             extra = self.extra_params.copy()
             extra.update(kwargs)
             sys_prompt = extra.pop("system", None) or system
+            workdir = extra.pop("workdir", None) or workdir
 
             # Locate codex prioritized in PATH, then Codex desktop install dirs
             cli_path = resolve_codex_cli()
@@ -131,19 +136,34 @@ class OpenAIProvider(BaseProvider):
             # reads the prompt from stdin; this also sidesteps the Windows
             # command-line length limit the temp file was trying to avoid.
             #
-            # Sandbox/approvals are bypassed by default: this project drives the
-            # Codex CLI non-interactively without a sandbox. Set
-            # GENIUS_CODEX_SANDBOX=1 (true/yes) to keep the Codex sandbox and
-            # approval prompts enabled instead.
-            sandbox_on = os.getenv("GENIUS_CODEX_SANDBOX", "").lower() in (
-                "1",
-                "true",
-                "yes",
-            )
-            bypass_flags = (
-                [] if sandbox_on else ["--dangerously-bypass-approvals-and-sandbox"]
-            )
-            cmd = [cli_path, "exec", "-", *bypass_flags, "--json"]
+            # Sandbox policy: Codex is an AGENTIC CLI that will happily run
+            # shell commands from its cwd. With the old
+            # --dangerously-bypass-approvals-and-sandbox default it once ran
+            # this repo's entire test suite and returned the pytest log as its
+            # "implementation". Default to a read-only sandbox so Codex can
+            # think but not execute; --skip-git-repo-check keeps exec mode
+            # working outside a git repo. GENIUS_CODEX_SANDBOX overrides:
+            #   read-only (default) | workspace-write | danger (old bypass).
+            # Legacy values 1/true/yes ("keep the sandbox on") map to the
+            # read-only default; unknown values fail safe to read-only.
+            sandbox_mode = os.getenv("GENIUS_CODEX_SANDBOX", "").strip().lower()
+            if sandbox_mode == "danger":
+                sandbox_flags = ["--dangerously-bypass-approvals-and-sandbox"]
+            elif sandbox_mode == "workspace-write":
+                sandbox_flags = [
+                    "--sandbox",
+                    "workspace-write",
+                    "--skip-git-repo-check",
+                ]
+            else:
+                sandbox_flags = ["--sandbox", "read-only", "--skip-git-repo-check"]
+
+            cmd = [cli_path, "exec", "-", *sandbox_flags]
+            if workdir:
+                # Point Codex's working root at a caller-provided directory so
+                # even a writable sandbox can only touch that tree.
+                cmd += ["--cd", str(workdir)]
+            cmd.append("--json")
 
             # Wrap .cmd/.bat shims with cmd.exe /c, decided from the resolved
             # path itself - never via a raw shutil.which on a bare name, which

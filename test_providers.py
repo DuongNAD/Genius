@@ -73,7 +73,9 @@ def test_openai_provider_success():
             assert args[1:] == (
                 "exec",
                 "-",
-                "--dangerously-bypass-approvals-and-sandbox",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
                 "--json",
             )
             # Prompt is piped via stdin (the "-" arg), not passed positionally.
@@ -161,13 +163,100 @@ def test_openai_provider_fallback_path():
             assert args[1:] == (
                 "exec",
                 "-",
-                "--dangerously-bypass-approvals-and-sandbox",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
                 "--json",
             )
             assert kwargs["stdin"] == asyncio.subprocess.PIPE
             mock_process.communicate.assert_called_once_with(input=b"Test prompt")
 
     asyncio.run(run_test())
+
+
+def _codex_ok_process():
+    """AsyncMock process whose stdout is a minimal successful codex JSONL run."""
+    mock_process = AsyncMock()
+    jsonl_output = (
+        '{"event": "agent_message", "item": {"text": "OK"}}\n'
+        '{"event": "turn.completed", "turn.completed": {"usage": '
+        '{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}}\n'
+    )
+    mock_process.communicate.return_value = (jsonl_output.encode("utf-8"), b"")
+    return mock_process
+
+
+async def _codex_invocation_args(env_overrides=None, **send_kwargs):
+    """Run send_prompt with a mocked subprocess and return the CLI argv tuple."""
+    provider = OpenAIProvider()
+    # Pin GENIUS_CODEX_SANDBOX (empty = unset) so a value in the developer's
+    # real environment can't leak into the default-behaviour assertions.
+    env = {"LOCALAPPDATA": r"C:\fake_localappdata", "GENIUS_CODEX_SANDBOX": ""}
+    env.update(env_overrides or {})
+    fake_path = r"C:\fake_localappdata\OpenAI\Codex\bin\v1.0.0\codex.exe"
+    with (
+        patch.dict("os.environ", env),
+        patch("glob.glob", return_value=[fake_path]),
+        patch("shutil.which", return_value=None),
+        patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+    ):
+        mock_exec.return_value = _codex_ok_process()
+        await provider.send_prompt("Test prompt", **send_kwargs)
+        args, _kwargs = mock_exec.call_args
+        return args
+
+
+def test_openai_provider_default_sandbox_is_read_only():
+    # The dangerous bypass must NOT be the default: codex gets a read-only
+    # sandbox so it can think but never execute commands or write files.
+    args = asyncio.run(_codex_invocation_args())
+    assert "--sandbox" in args and "read-only" in args
+    assert "--skip-git-repo-check" in args
+    assert "--dangerously-bypass-approvals-and-sandbox" not in args
+
+
+def test_openai_provider_sandbox_danger_env_restores_bypass():
+    args = asyncio.run(
+        _codex_invocation_args(env_overrides={"GENIUS_CODEX_SANDBOX": "danger"})
+    )
+    assert "--dangerously-bypass-approvals-and-sandbox" in args
+    assert "--sandbox" not in args
+
+
+def test_openai_provider_sandbox_workspace_write_env():
+    args = asyncio.run(
+        _codex_invocation_args(
+            env_overrides={"GENIUS_CODEX_SANDBOX": "workspace-write"}
+        )
+    )
+    idx = args.index("--sandbox")
+    assert args[idx + 1] == "workspace-write"
+    assert "--skip-git-repo-check" in args
+    assert "--dangerously-bypass-approvals-and-sandbox" not in args
+
+
+def test_openai_provider_legacy_sandbox_values_map_to_read_only():
+    # Old semantics ("1" = keep sandbox on) fail safe to the read-only default.
+    for legacy in ("1", "true", "yes", "bogus-value"):
+        args = asyncio.run(
+            _codex_invocation_args(env_overrides={"GENIUS_CODEX_SANDBOX": legacy})
+        )
+        idx = args.index("--sandbox")
+        assert args[idx + 1] == "read-only", legacy
+        assert "--dangerously-bypass-approvals-and-sandbox" not in args
+
+
+def test_openai_provider_workdir_kwarg_adds_cd():
+    args = asyncio.run(_codex_invocation_args(workdir=r"C:\tmp\job1"))
+    idx = args.index("--cd")
+    assert args[idx + 1] == r"C:\tmp\job1"
+    # --json stays last, after the --cd pair.
+    assert args[-1] == "--json"
+
+
+def test_openai_provider_no_workdir_means_no_cd():
+    args = asyncio.run(_codex_invocation_args())
+    assert "--cd" not in args
 
 
 def test_openai_provider_invalid_json():
