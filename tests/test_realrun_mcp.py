@@ -1,11 +1,13 @@
 """MCP stdio transport smoke test: a REAL `mcp_server.py stdio` subprocess.
 
 Drives the JSON-RPC handshake over real OS pipes (initialize ->
-notifications/initialized -> tools/list -> BOM-prefixed ping) and asserts the
-stdout stream is pure JSON-RPC: exactly one parseable response line per
-request, correct ids, all 8 documented tools, and no log noise corrupting the
-stream. PYTEST_CURRENT_TEST is scrubbed from the child env so it runs the
-production code paths.
+notifications/initialized -> tools/list -> BOM-prefixed ping ->
+resources/list -> resources/read) and asserts the stdout stream is pure
+JSON-RPC: exactly one parseable response line per request, correct ids, all
+11 documented tools, artifact resources served from the server cwd, and no
+log noise corrupting the stream. PYTEST_CURRENT_TEST is scrubbed from the
+child env so it runs the production code paths. The server runs in a tmp
+workspace dir so the artifact resource list is deterministic.
 """
 
 import json
@@ -28,6 +30,9 @@ EXPECTED_TOOLS = {
     "deploy",
     "orchestrate",
     "orchestrate_status",
+    "doctor",
+    "debate",
+    "review",
 }
 
 READ_TIMEOUT = 30.0
@@ -41,9 +46,13 @@ class McpStdioClient:
         env.pop("PYTEST_CURRENT_TEST", None)
         self.stderr_log = tmp_path / "mcp_stderr.log"
         self._stderr_file = open(self.stderr_log, "wb")
+        # The server runs in an isolated tmp workspace (not the repo root) so
+        # resources/list only sees the artifacts this test creates.
+        self.workspace = tmp_path / "workspace"
+        self.workspace.mkdir()
         self.proc = subprocess.Popen(
-            [sys.executable, "mcp_server.py", "stdio"],
-            cwd=REPO_ROOT,
+            [sys.executable, os.path.join(REPO_ROOT, "mcp_server.py"), "stdio"],
+            cwd=str(self.workspace),
             env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -121,6 +130,10 @@ def mcp(tmp_path):
 
 
 def test_mcp_stdio_handshake_tools_list_and_stream_purity(mcp):
+    # A pipeline artifact pre-created in the server's workspace cwd: the
+    # resource endpoints must see exactly this file and nothing else.
+    (mcp.workspace / "research.md").write_text("# Findings", encoding="utf-8")
+
     # --- initialize -> exactly one response with the matching id ---
     mcp.send(
         {
@@ -139,12 +152,13 @@ def test_mcp_stdio_handshake_tools_list_and_stream_purity(mcp):
     assert init["id"] == 1
     assert init["result"]["serverInfo"]["name"] == "genius"
     assert "tools" in init["result"]["capabilities"]
+    assert init["result"]["capabilities"]["resources"] == {"listChanged": False}
 
     # --- notifications/initialized must NOT be answered ---
     mcp.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
     mcp.assert_stream_quiet()
 
-    # --- tools/list -> the 8 documented tools ---
+    # --- tools/list -> the 11 documented tools ---
     mcp.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     tools_resp = mcp.read_response()
     assert tools_resp["id"] == 2
@@ -160,10 +174,38 @@ def test_mcp_stdio_handshake_tools_list_and_stream_purity(mcp):
     pong = mcp.read_response()
     assert pong == {"jsonrpc": "2.0", "id": 3, "result": {}}
 
-    # --- stream purity: nothing but the three responses, all pure JSON ---
+    # --- resources/list -> exactly the pre-created artifact ---
+    mcp.send({"jsonrpc": "2.0", "id": 4, "method": "resources/list"})
+    res_list = mcp.read_response()
+    assert res_list["id"] == 4
+    resources = res_list["result"]["resources"]
+    assert [r["uri"] for r in resources] == ["genius://artifacts/research.md"]
+    assert resources[0]["mimeType"] == "text/markdown"
+
+    # --- resources/read -> the artifact contents round-trip ---
+    mcp.send(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "resources/read",
+            "params": {"uri": "genius://artifacts/research.md"},
+        }
+    )
+    res_read = mcp.read_response()
+    assert res_read["id"] == 5
+    contents = res_read["result"]["contents"]
+    assert contents == [
+        {
+            "uri": "genius://artifacts/research.md",
+            "mimeType": "text/markdown",
+            "text": "# Findings",
+        }
+    ]
+
+    # --- stream purity: nothing but the five responses, all pure JSON ---
     mcp.assert_stream_quiet()
-    assert len(mcp.raw_stdout_lines) == 3, (
-        f"expected exactly 3 stdout lines (one per request), got "
+    assert len(mcp.raw_stdout_lines) == 5, (
+        f"expected exactly 5 stdout lines (one per request), got "
         f"{len(mcp.raw_stdout_lines)}: {mcp.raw_stdout_lines!r}"
     )
     for raw in mcp.raw_stdout_lines:

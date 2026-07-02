@@ -1,9 +1,10 @@
 import os
 import sys
 import json
+import time
 import uuid
 import asyncio
-from typing import Any, Dict
+from typing import Any, Dict, List
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -66,6 +67,102 @@ async def execute_agent(
         prompt = f"/code {prompt}"
 
     return await agent.run(prompt=prompt, context_data=context)
+
+
+async def _run_doctor_report() -> str:
+    """Render the preflight doctor report as text (no printing, no side
+    effects). Mirrors ``serve.py --doctor`` / diagnostics.run_doctor_report_async."""
+    # Imported lazily so the MCP server boots fast (the module probes are
+    # cheap, but keep initialize/tools-list on the fast path).
+    from ag_core import diagnostics
+
+    results = await diagnostics.run_doctor_async()
+    lines, _code = diagnostics.report_lines(
+        results, skill_key_ok=bool(os.getenv("SKILL_API_KEY"))
+    )
+    return "\n".join(lines)
+
+
+# Same convention as the orchestrator's Grok<->Claude debate loop: the critic
+# signals "no further changes needed" by including this marker verbatim.
+DEBATE_APPROVAL_MARKER = "[APPROVED]"
+MAX_DEBATE_ROUNDS = 3
+
+
+async def _run_debate(design: str, prompt: str, rounds: int) -> str:
+    """In-process Grok-critiques / Claude-refines exchange over a draft design.
+
+    Both agents are built through execute_agent (make_provider role wiring, so
+    per-role fallback chains apply): the critic uses the grok role, the refiner
+    the claude role. Early-exits when the critic answers with
+    :data:`DEBATE_APPROVAL_MARKER`. Returns a JSON payload with the refined
+    design and a per-round summary.
+    """
+    current = design
+    approved = False
+    rounds_summary: List[Dict[str, Any]] = []
+    for round_idx in range(1, rounds + 1):
+        critic_prompt = (
+            "You are GrokReviewer, a critic agent. Analyze the following draft "
+            "design proposed by Claude.\n"
+            "Identify potential architectural flaws, security risks, missing "
+            "requirements, or execution challenges.\n"
+            "Provide constructive criticism and suggest concrete improvements. "
+            "If the draft design is correct, complete, and needs no further "
+            f"improvements, include `{DEBATE_APPROVAL_MARKER}` in your "
+            "response.\n\n"
+            f"Draft Design:\n{current}\n\n"
+            f"Original Prompt:\n{prompt}"
+        )
+        # Empty context dict: the design under debate is already in the
+        # prompt; do not re-scan the whole workspace on every round.
+        critique = await execute_agent("research", critic_prompt, {})
+        if DEBATE_APPROVAL_MARKER in critique:
+            approved = True
+            rounds_summary.append(
+                {"round": round_idx, "approved": True, "critique": critique}
+            )
+            break
+        refine_prompt = (
+            "You are Claude, the architect agent. Refine your draft design "
+            "based on the constructive criticism from GrokReviewer.\n"
+            "Address the identified issues and incorporate the suggested "
+            "improvements, producing a final refined design.\n\n"
+            f"Previous Draft Design:\n{current}\n\n"
+            f"GrokReviewer's Criticism:\n{critique}\n\n"
+            f"Original Prompt:\n{prompt}"
+        )
+        current = await execute_agent("design", refine_prompt, {})
+        rounds_summary.append(
+            {"round": round_idx, "approved": False, "critique": critique}
+        )
+    return json.dumps(
+        {"design": current, "approved": approved, "rounds": rounds_summary}
+    )
+
+
+async def _run_review(code: str, instructions: str) -> str:
+    """Review the given code with a codex-role agent; returns the review text.
+
+    Built like execute_agent (same provider-factory wiring + patchable class
+    lookup) but without the ``/code`` generation prefix that tool applies, and
+    with the submitted code as the only context (no workspace scan, no file
+    writes thanks to output_file="None").
+    """
+    role, agent_cls_name, legacy_backend = TOOL_AGENTS["code"]
+    config = load_config()
+    provider = make_provider(role, config, legacy_backend=legacy_backend)
+    agent_class = globals()[agent_cls_name]
+    agent = agent_class(provider=provider, config=config, output_file="None")
+
+    prompt = (
+        "Perform a thorough code review of the following code. Identify bugs, "
+        "security vulnerabilities, style issues, and concrete improvements."
+    )
+    if instructions:
+        prompt += f"\nReviewer instructions: {instructions}"
+    prompt += f"\n\nCode to review:\n```\n{code}\n```"
+    return await agent.run(prompt=prompt, context_data={"<submitted code>": code})
 
 
 TOOLS = [
@@ -207,7 +304,143 @@ TOOLS = [
             "required": ["job_id"],
         },
     },
+    {
+        "name": "doctor",
+        "description": (
+            "Preflight readiness check for Genius. Verifies the local vendor "
+            "CLIs (grok/claude/codex), SKILL_API_KEY, and the per-role "
+            "provider fallback chains, and returns a text report ending in "
+            "READY or NOT READY. Call this FIRST to check whether Genius is "
+            "ready before calling orchestrate. Read-only, no side effects."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "debate",
+        "description": (
+            "Adversarially refine a draft design: a Grok critic reviews it "
+            "and a Claude architect refines it, for up to 'rounds' exchanges "
+            "(early exit when the critic replies [APPROVED]). Runs in-process "
+            "(no skill servers needed). Returns JSON with the refined design, "
+            "an 'approved' flag, and a per-round summary."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "design": {
+                    "type": "string",
+                    "description": "The draft design/plan to critique and refine",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Optional original requirements for context",
+                },
+                "rounds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3,
+                    "description": "Max critique/refine rounds (default 1, max 3)",
+                },
+            },
+            "required": ["design"],
+        },
+    },
+    {
+        "name": "review",
+        "description": (
+            "Code review of the given code by the Codex reviewer agent, "
+            "in-process. Returns the review text; never writes files."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "The code to review"},
+                "instructions": {
+                    "type": "string",
+                    "description": "Optional focus areas or review instructions",
+                },
+            },
+            "required": ["code"],
+        },
+    },
 ]
+
+# --- MCP resources: pipeline artifacts as genius:// URIs -------------------
+# Whitelist of root-level markdown artifacts the pipeline produces, keyed by
+# file name. Only these names (plus their .bak archives) are ever listed or
+# served - never glob arbitrary workspace files, so user files cannot leak.
+RESOURCE_URI_PREFIX = "genius://artifacts/"
+
+_RESOURCE_ARTIFACTS = {
+    "research.md": "Requirements research produced by the research stage (Grok).",
+    "design.md": "Architecture design produced by the design stage (Claude).",
+    "review.md": "Code review + lint/test logs produced by the code stage (Codex).",
+    "audit.md": "Security audit produced by the security stage.",
+    "deploy.md": "Deployment plan produced by the deploy stage (DevOps).",
+    "plan.md": "End-to-end plan produced by the e2e pipeline (Claude).",
+}
+
+
+class ResourceNotFoundError(Exception):
+    """Maps to JSON-RPC error -32002 (MCP: resource not found)."""
+
+
+def _resource_catalog() -> Dict[str, str]:
+    """name -> description for every servable artifact (incl. .bak archives)."""
+    catalog: Dict[str, str] = {}
+    for name, desc in _RESOURCE_ARTIFACTS.items():
+        catalog[name] = desc
+        catalog[name + ".bak"] = (
+            f"Archived previous-run copy of {name} (renamed on pipeline start)."
+        )
+    return catalog
+
+
+def _list_resources(workspace: str = None) -> List[Dict[str, str]]:
+    """Enumerate the whitelisted artifacts that exist in the workspace."""
+    root = workspace or os.getcwd()
+    resources = []
+    for name, desc in _resource_catalog().items():
+        if os.path.isfile(os.path.join(root, name)):
+            resources.append(
+                {
+                    "uri": RESOURCE_URI_PREFIX + name,
+                    "name": name,
+                    "description": desc,
+                    "mimeType": "text/markdown",
+                }
+            )
+    return resources
+
+
+def _read_resource(uri: str, workspace: str = None) -> List[Dict[str, str]]:
+    """Return the MCP `contents` blocks for a genius://artifacts/ URI.
+
+    The artifact name must match the whitelist exactly - same traversal
+    posture as orchestrator.safe_join: no separators, no '..', no absolute
+    paths can ever reach the filesystem join below.
+    """
+    catalog = _resource_catalog()
+    name = None
+    if isinstance(uri, str) and uri.startswith(RESOURCE_URI_PREFIX):
+        name = uri[len(RESOURCE_URI_PREFIX) :]
+    if not name or name not in catalog:
+        raise ResourceNotFoundError(
+            f"Unknown resource URI: {uri!r}. Valid URIs are "
+            f"{RESOURCE_URI_PREFIX}<name> where <name> is one of the pipeline "
+            "artifacts reported by resources/list."
+        )
+    path = os.path.join(workspace or os.getcwd(), name)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        raise ResourceNotFoundError(
+            f"Artifact '{name}' does not exist yet - the pipeline stage that "
+            "produces it has not completed. Poll orchestrate_status."
+        )
+    return [{"uri": uri, "mimeType": "text/markdown", "text": text}]
+
 
 # --- Full-pipeline orchestration (the "điều phối viên" entrypoint) ---------
 # The pipeline is long-running, so orchestrate launches it as a background job
@@ -224,6 +457,59 @@ _ARTIFACT_FILES = {
     "security": "audit.md",
     "deploy": "deploy.md",
 }
+
+
+# Ordered (stage, artifact file) checkpoints per pipeline variant. The
+# orchestrator does not expose progress callbacks, so orchestrate_status infers
+# stage completion from these artifacts appearing on disk (fresh: mtime after
+# the job started - stale pre-run copies are .bak-archived by the pipeline).
+_PIPELINE_STAGES = {
+    "sequential": [
+        ("research", "research.md"),
+        ("design", "design.md"),
+        ("code", "review.md"),
+        ("security_audit", "audit.md"),
+        ("deploy", "deploy.md"),
+    ],
+    "e2e": [("plan", "plan.md")],
+}
+
+# Tolerance for coarse filesystem mtime granularity when comparing an
+# artifact's mtime against the job start timestamp.
+_MTIME_SLACK_SECONDS = 1.0
+
+
+def _stage_progress(job: Dict[str, Any]):
+    """Derive per-stage progress for a job from artifacts on disk.
+
+    Returns (stages, artifacts_ready): the ordered stage states and the
+    genius:// URIs that are already readable via resources/read.
+    """
+    workspace = job.get("workspace") or os.getcwd()
+    started = job.get("started_at")
+    stages = []
+    ready = []
+    checkpoints = _PIPELINE_STAGES.get(
+        job.get("pipeline"), _PIPELINE_STAGES["sequential"]
+    )
+    for stage, fname in checkpoints:
+        path = os.path.join(workspace, fname)
+        done = os.path.isfile(path)
+        if done and started is not None:
+            try:
+                done = os.path.getmtime(path) >= started - _MTIME_SLACK_SECONDS
+            except OSError:
+                done = False
+        stages.append(
+            {
+                "stage": stage,
+                "artifact": fname,
+                "state": "done" if done else "pending",
+            }
+        )
+        if done and fname in _RESOURCE_ARTIFACTS:
+            ready.append(RESOURCE_URI_PREFIX + fname)
+    return stages, ready
 
 
 def _collect_artifacts(workspace: str) -> Dict[str, str]:
@@ -258,6 +544,8 @@ async def _run_orchestration(
     except Exception as e:  # noqa: BLE001 - surface any pipeline failure to the client
         job["status"] = "failed"
         job["error"] = str(e)
+    finally:
+        job["finished_at"] = time.time()
 
 
 async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
@@ -281,6 +569,9 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             "prompt": prompt,
             "error": None,
             "artifacts": None,
+            "workspace": workspace,
+            "started_at": time.time(),
+            "finished_at": None,
         }
         asyncio.create_task(_run_orchestration(job_id, prompt, pipeline, workspace))
         return json.dumps(
@@ -297,9 +588,36 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         if job is None:
             raise ValueError(f"Unknown job_id: {job_id}")
         view = {k: job[k] for k in ("job_id", "status", "pipeline", "error")}
+        started = job.get("started_at")
+        if started is not None:
+            end = job.get("finished_at") or time.time()
+            view["elapsed_seconds"] = round(end - started, 1)
+        stages, ready = _stage_progress(job)
+        view["stages"] = stages
+        view["artifacts_ready"] = ready
         if job["status"] == "completed":
             view["artifacts"] = job["artifacts"]
         return json.dumps(view)
+
+    if name == "doctor":
+        return await _run_doctor_report()
+
+    if name == "debate":
+        design = (arguments.get("design") or "").strip()
+        if not design:
+            raise ValueError("debate requires a non-empty 'design'.")
+        try:
+            rounds = int(arguments.get("rounds") or 1)
+        except (TypeError, ValueError):
+            raise ValueError("rounds must be an integer between 1 and 3.")
+        rounds = max(1, min(rounds, MAX_DEBATE_ROUNDS))
+        return await _run_debate(design, arguments.get("prompt") or "", rounds)
+
+    if name == "review":
+        code = arguments.get("code") or ""
+        if not code.strip():
+            raise ValueError("review requires non-empty 'code'.")
+        return await _run_review(code, arguments.get("instructions") or "")
 
     prompt = arguments.get("prompt", "")
     context = arguments.get("context")
@@ -343,7 +661,10 @@ async def handle_request(req: Dict[str, Any]):
             "id": req_id,
             "result": {
                 "protocolVersion": params.get("protocolVersion", PROTOCOL_VERSION),
-                "capabilities": {"tools": {}},
+                "capabilities": {
+                    "tools": {},
+                    "resources": {"listChanged": False},
+                },
                 "serverInfo": SERVER_INFO,
             },
         }
@@ -353,6 +674,27 @@ async def handle_request(req: Dict[str, Any]):
         return {"jsonrpc": "2.0", "id": req_id, "result": {}}
     if method == "tools/list":
         return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+    if method == "resources/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"resources": _list_resources()},
+        }
+    if method == "resources/read":
+        uri = params.get("uri") or ""
+        try:
+            contents = _read_resource(uri)
+        except ResourceNotFoundError as e:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32002, "message": str(e)},
+            }
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"contents": contents},
+        }
     if method == "tools/call":
         name = params.get("name")
         arguments = params.get("arguments", {}) or {}

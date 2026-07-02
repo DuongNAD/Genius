@@ -1,11 +1,14 @@
 """Tests for the MCP initialize handshake and the orchestrate/orchestrate_status
-tools (Phase 3 — Antigravity coordinator integration)."""
+tools (Phase 3 — Antigravity coordinator integration), plus the artifact
+resources, stage-progress derivation, and the doctor/debate/review tools."""
 
 import asyncio
 import json
+import os
+import time
 
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 
 import mcp_server
 
@@ -27,6 +30,14 @@ async def test_initialize_handshake():
     assert res["result"]["serverInfo"]["name"] == "genius"
     assert "tools" in res["result"]["capabilities"]
     assert res["result"]["protocolVersion"] == "2024-11-05"
+
+
+@pytest.mark.asyncio
+async def test_initialize_advertises_resources_capability():
+    res = await mcp_server.handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    )
+    assert res["result"]["capabilities"]["resources"] == {"listChanged": False}
 
 
 @pytest.mark.asyncio
@@ -71,6 +82,9 @@ async def test_tools_list_includes_orchestrate_and_agents():
         "unit_test",
         "security_audit",
         "deploy",
+        "doctor",
+        "debate",
+        "review",
     } <= names
 
 
@@ -195,3 +209,303 @@ async def test_orchestrate_status_running_hides_artifacts_key():
     data = json.loads(out)
     assert data["status"] == "running"
     assert "artifacts" not in data
+
+
+# --- MCP resources (genius://artifacts/...) ---------------------------------
+
+
+async def _rpc(method, params=None, req_id=1):
+    return await mcp_server.handle_request(
+        {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params or {}}
+    )
+
+
+@pytest.mark.asyncio
+async def test_resources_list_empty_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    res = await _rpc("resources/list")
+    assert res["result"]["resources"] == []
+
+
+@pytest.mark.asyncio
+async def test_resources_list_only_whitelisted_artifacts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "research.md").write_text("R", encoding="utf-8")
+    (tmp_path / "design.md.bak").write_text("old D", encoding="utf-8")
+    # Non-whitelisted files must never leak into the resource list.
+    (tmp_path / "secrets.txt").write_text("s3cret", encoding="utf-8")
+    (tmp_path / "notes.md").write_text("private", encoding="utf-8")
+
+    res = await _rpc("resources/list")
+    resources = res["result"]["resources"]
+    by_name = {r["name"]: r for r in resources}
+    assert set(by_name) == {"research.md", "design.md.bak"}
+    r = by_name["research.md"]
+    assert r["uri"] == "genius://artifacts/research.md"
+    assert r["mimeType"] == "text/markdown"
+    assert r["description"]
+    assert "research" in r["description"].lower()
+
+
+@pytest.mark.asyncio
+async def test_resources_read_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "design.md").write_text("# Thiết kế", encoding="utf-8")
+    res = await _rpc(
+        "resources/read", {"uri": "genius://artifacts/design.md"}, req_id=9
+    )
+    assert res["id"] == 9
+    contents = res["result"]["contents"]
+    assert contents == [
+        {
+            "uri": "genius://artifacts/design.md",
+            "mimeType": "text/markdown",
+            "text": "# Thiết kế",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "genius://artifacts/../conftest.py",
+        "genius://artifacts/..\\conftest.py",
+        "genius://artifacts/sub/research.md",
+        "genius://artifacts/",
+        "file:///etc/passwd",
+        "genius://artifacts/secrets.txt",
+    ],
+)
+async def test_resources_read_rejects_traversal_and_unknown_names(
+    tmp_path, monkeypatch, uri
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "secrets.txt").write_text("s3cret", encoding="utf-8")
+    res = await _rpc("resources/read", {"uri": uri})
+    assert "result" not in res
+    assert res["error"]["code"] == -32002
+
+
+@pytest.mark.asyncio
+async def test_resources_read_missing_artifact_is_not_found(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    res = await _rpc("resources/read", {"uri": "genius://artifacts/audit.md"})
+    assert res["error"]["code"] == -32002
+    assert "audit.md" in res["error"]["message"]
+
+
+# --- orchestrate_status stage derivation ------------------------------------
+
+
+def _register_progress_job(job_id, tmp_path, pipeline="sequential", started_ago=100.0):
+    mcp_server.ORCHESTRATION_JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "running",
+        "pipeline": pipeline,
+        "prompt": "p",
+        "error": None,
+        "artifacts": None,
+        "workspace": str(tmp_path),
+        "started_at": time.time() - started_ago,
+        "finished_at": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_status_derives_stages_from_artifacts(tmp_path):
+    _register_progress_job("j-stages", tmp_path)
+    (tmp_path / "research.md").write_text("R", encoding="utf-8")
+    (tmp_path / "design.md").write_text("D", encoding="utf-8")
+
+    out = await mcp_server.dispatch_tool("orchestrate_status", {"job_id": "j-stages"})
+    data = json.loads(out)
+
+    assert data["elapsed_seconds"] >= 99
+    assert [s["stage"] for s in data["stages"]] == [
+        "research",
+        "design",
+        "code",
+        "security_audit",
+        "deploy",
+    ]
+    states = {s["stage"]: s["state"] for s in data["stages"]}
+    assert states["research"] == "done"
+    assert states["design"] == "done"
+    assert states["code"] == "pending"
+    assert states["deploy"] == "pending"
+    assert data["artifacts_ready"] == [
+        "genius://artifacts/research.md",
+        "genius://artifacts/design.md",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_status_ignores_stale_pre_run_artifacts(tmp_path):
+    _register_progress_job("j-stale", tmp_path, started_ago=0.0)
+    stale = tmp_path / "research.md"
+    stale.write_text("old", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(stale, (old, old))  # written long before the job started
+
+    out = await mcp_server.dispatch_tool("orchestrate_status", {"job_id": "j-stale"})
+    data = json.loads(out)
+    assert data["stages"][0] == {
+        "stage": "research",
+        "artifact": "research.md",
+        "state": "pending",
+    }
+    assert data["artifacts_ready"] == []
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_status_e2e_tracks_plan_artifact(tmp_path):
+    _register_progress_job("j-e2e-stage", tmp_path, pipeline="e2e")
+    (tmp_path / "plan.md").write_text("P", encoding="utf-8")
+    out = await mcp_server.dispatch_tool(
+        "orchestrate_status", {"job_id": "j-e2e-stage"}
+    )
+    data = json.loads(out)
+    assert data["stages"] == [{"stage": "plan", "artifact": "plan.md", "state": "done"}]
+    assert data["artifacts_ready"] == ["genius://artifacts/plan.md"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_job_records_start_metadata(tmp_path):
+    with patch("mcp_server._run_orchestration", new=AsyncMock()):
+        out = await mcp_server.dispatch_tool(
+            "orchestrate", {"prompt": "x", "workspace": str(tmp_path)}
+        )
+        await asyncio.sleep(0)
+    job = mcp_server.ORCHESTRATION_JOBS[json.loads(out)["job_id"]]
+    assert job["workspace"] == str(tmp_path)
+    assert job["started_at"] <= time.time()
+    assert job["finished_at"] is None
+
+
+# --- doctor tool -------------------------------------------------------------
+
+
+def _doctor_result(cli, status):
+    return {
+        "cli": cli,
+        "dependents": ["X"],
+        "path": f"/bin/{cli}",
+        "status": status,
+        "detail": f"{cli} detail",
+    }
+
+
+@pytest.mark.asyncio
+async def test_doctor_tool_returns_report_text(monkeypatch):
+    monkeypatch.setenv("SKILL_API_KEY", "k")
+    fake = [_doctor_result(c, "OK") for c in ("grok", "claude", "codex")]
+    # The CLI probes are mocked out: the doctor tool must not spawn real CLIs.
+    with patch(
+        "ag_core.diagnostics.run_doctor_async", new=AsyncMock(return_value=fake)
+    ) as probes:
+        out = await mcp_server.dispatch_tool("doctor", {})
+    probes.assert_awaited_once()
+    assert "Genius preflight doctor" in out
+    assert "READY" in out
+    assert "grok" in out and "codex" in out
+
+
+@pytest.mark.asyncio
+async def test_doctor_tool_reports_not_ready_on_missing_cli(monkeypatch):
+    monkeypatch.setenv("SKILL_API_KEY", "k")
+    fake = [_doctor_result("grok", "MISSING")]
+    with patch(
+        "ag_core.diagnostics.run_doctor_async", new=AsyncMock(return_value=fake)
+    ):
+        out = await mcp_server.dispatch_tool("doctor", {})
+    assert "NOT READY" in out
+
+
+# --- debate tool -------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_debate_runs_critique_refine_rounds():
+    calls = []
+
+    async def fake_execute(agent_name, prompt, context=None):
+        calls.append((agent_name, prompt))
+        if agent_name == "research":
+            return f"critique {len(calls)}"
+        return f"refined {len(calls)}"
+
+    with patch("mcp_server.execute_agent", new=AsyncMock(side_effect=fake_execute)):
+        out = await mcp_server.dispatch_tool(
+            "debate", {"design": "draft v0", "prompt": "build X", "rounds": 2}
+        )
+    data = json.loads(out)
+    # 2 rounds x (critic + refiner), no approval
+    assert [name for name, _ in calls] == ["research", "design"] * 2
+    assert data["approved"] is False
+    assert len(data["rounds"]) == 2
+    assert data["design"] == "refined 4"
+    # the critic sees the current draft; the refiner sees the critique
+    assert "draft v0" in calls[0][1]
+    assert "critique 1" in calls[1][1]
+
+
+@pytest.mark.asyncio
+async def test_debate_early_exits_on_approved_marker():
+    runner = AsyncMock(return_value="Looks great. [APPROVED]")
+    with patch("mcp_server.execute_agent", new=runner):
+        out = await mcp_server.dispatch_tool(
+            "debate", {"design": "draft v0", "rounds": 3}
+        )
+    data = json.loads(out)
+    runner.assert_awaited_once()  # only the critic ran, refiner skipped
+    assert data["approved"] is True
+    assert data["design"] == "draft v0"  # unchanged
+    assert data["rounds"] == [
+        {"round": 1, "approved": True, "critique": "Looks great. [APPROVED]"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_debate_clamps_rounds_to_max():
+    runner = AsyncMock(return_value="never approves")
+    with patch("mcp_server.execute_agent", new=runner):
+        out = await mcp_server.dispatch_tool("debate", {"design": "d", "rounds": 99})
+    data = json.loads(out)
+    assert len(data["rounds"]) == mcp_server.MAX_DEBATE_ROUNDS
+    assert runner.await_count == mcp_server.MAX_DEBATE_ROUNDS * 2
+
+
+@pytest.mark.asyncio
+async def test_debate_rejects_empty_design():
+    with pytest.raises(ValueError):
+        await mcp_server.dispatch_tool("debate", {"design": "  "})
+
+
+# --- review tool -------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_review_tool_runs_codex_agent_without_writing_files():
+    with patch("mcp_server.CodexReviewerAgent") as agent_cls:
+        instance = MagicMock()
+        instance.run = AsyncMock(return_value="review: LGTM")
+        agent_cls.return_value = instance
+
+        out = await mcp_server.dispatch_tool(
+            "review", {"code": "print(1)", "instructions": "focus on security"}
+        )
+
+    assert out == "review: LGTM"
+    _, ctor_kwargs = agent_cls.call_args
+    assert ctor_kwargs["output_file"] == "None"  # no file writes
+    _, run_kwargs = instance.run.call_args
+    assert "print(1)" in run_kwargs["prompt"]
+    assert "focus on security" in run_kwargs["prompt"]
+    assert not run_kwargs["prompt"].startswith("/code")
+
+
+@pytest.mark.asyncio
+async def test_review_rejects_empty_code():
+    with pytest.raises(ValueError):
+        await mcp_server.dispatch_tool("review", {"code": ""})

@@ -86,13 +86,18 @@ python mcp_server.py stdio      # chế độ MCP stdio cho Antigravity
 python mcp_server.py            # (tuỳ chọn) chế độ HTTP, cổng 8000
 ```
 
-Server hỗ trợ đầy đủ handshake MCP (`initialize` / `notifications/initialized` / `ping`) và expose **8 tool**:
+Server hỗ trợ đầy đủ handshake MCP (`initialize` / `notifications/initialized` / `ping`) và expose **11 tool** cùng **MCP resources**:
 
 | Tool | Chức năng |
 |------|-----------|
 | `research`, `design`, `code`, `unit_test`, `security_audit`, `deploy` | Gọi từng tác tử đơn lẻ (in-process) |
 | `orchestrate` | **Chạy TOÀN BỘ pipeline** (research → design → code → test + security + deploy). Trả về `job_id` ngay lập tức |
-| `orchestrate_status` | Poll trạng thái job (`running` / `completed` / `failed`) và lấy artifacts khi xong |
+| `orchestrate_status` | Poll trạng thái job (`running` / `completed` / `failed`), kèm `elapsed_seconds`, tiến độ từng giai đoạn (`stages`: done/pending suy ra từ artifact trên đĩa) và `artifacts_ready` (các URI đọc được ngay) |
+| `doctor` | Kiểm tra sẵn sàng (preflight): CLI grok/claude/codex/agy, `SKILL_API_KEY`, chuỗi fallback provider. **Nên gọi trước `orchestrate`** — trả về báo cáo READY / NOT READY, không có side effect |
+| `debate` | Tinh chỉnh bản thiết kế theo kiểu phản biện: Grok phê bình ↔ Claude chỉnh sửa (tối đa 3 vòng, dừng sớm khi critic trả lời `[APPROVED]`). Chạy in-process, không cần Skill Server |
+| `review` | Review một đoạn code bất kỳ bằng tác tử Codex (in-process, **không ghi file**) |
+
+Ngoài tool, server còn expose **MCP resources**: các artifact của pipeline (`research.md`, `design.md`, `review.md`, `audit.md`, `deploy.md`, `plan.md` và bản lưu `.bak` của chúng) dưới dạng URI `genius://artifacts/<tên-file>` (mimeType `text/markdown`). Antigravity có thể `resources/list` / `resources/read` để đọc trực tiếp kết quả từng giai đoạn — chỉ đúng danh sách artifact trên (whitelist cứng, không bao giờ lộ file khác của workspace); URI sai hoặc file chưa tồn tại trả về lỗi `-32002`.
 
 > `orchestrate` chạy pipeline dưới dạng tác vụ nền (async background job) nên không làm Antigravity bị treo chờ. Vì nó định tuyến qua các Skill Server FastAPI, **cần chạy `python serve.py` trước** (các cổng 8001–8006).
 
@@ -121,21 +126,22 @@ Thêm Genius vào file cấu hình MCP của Antigravity tại `~/.gemini/antigr
 
 ---
 
-## 🛟 Chạy không cần Grok (chỉ Claude CLI + Codex)
+## 🛟 Chạy không cần Grok (Claude CLI + Codex + Antigravity)
 
-Nếu Grok CLI hết credits (lỗi `403 spending-limit`) hoặc chưa cài, Genius vẫn chạy đầy đủ pipeline chỉ với Claude CLI + Codex nhờ cơ chế **provider fallback**:
+Nếu Grok CLI hết credits (lỗi `403 spending-limit`) hoặc chưa cài, Genius vẫn chạy đầy đủ pipeline với các backend còn lại nhờ cơ chế **provider fallback**:
 
 ```bash
 # Cách 1 (khuyên dùng): bật fallback tự động — role nào lỗi runtime sẽ tự chuyển backend kế tiếp
 set GENIUS_PROVIDER_FALLBACK=1
 
 # Cách 2: chỉ định tường minh chuỗi backend cho role research (bỏ hẳn grok)
-set GENIUS_PROVIDER_GROK=claude,codex
+set GENIUS_PROVIDER_GROK=agy,claude
 ```
 
-- Chuỗi mặc định khi bật fallback: `grok → claude → codex` (research), `claude ↔ codex` (các role còn lại). Backend lỗi giữa chừng (403, timeout, CLI chết) sẽ tự động fall-through, và backend thành công được "ghi nhớ" cho các lần gọi sau trong cùng tiến trình.
+- **Backend `agy` mới**: Antigravity 2.0 (CLI `agy`, chính là agent Gemini của Antigravity IDE) làm backend Gemini thứ 4 bên cạnh `grok`/`claude`/`codex`. Không cần API key — `agy` dùng chung phiên đăng nhập với Antigravity IDE. Mặc định tìm trong PATH rồi tới `%LOCALAPPDATA%\agy\bin\agy.exe`; ghi đè bằng biến `GENIUS_AGY_PATH`. `agy` chạy với `--sandbox` (hạn chế terminal) mặc định; tắt bằng `GENIUS_AGY_SANDBOX=0`.
+- Chuỗi mặc định khi bật fallback: `grok → agy → claude → codex` (research), `claude → agy → codex` (architect), `codex → claude → agy` (các role còn lại). Backend lỗi giữa chừng (403, timeout, CLI chết) sẽ tự động fall-through, và backend thành công được "ghi nhớ" cho các lần gọi sau trong cùng tiến trình. Chú ý: khi **không** bật fallback (chạy legacy), `agy` chỉ tham gia khi được nêu tường minh trong `GENIUS_PROVIDER_<ROLE>`.
 - Hai biến này áp dụng cho **cả ba đường gọi**: Skill Server (`serve.py`), **MCP/Antigravity** (`mcp_server.py`) và distributed worker — chỉ cần set trong `.env` hoặc trong khối `env` của `mcp_config.json`.
-- Kiểm tra chuỗi hiệu lực của từng role: `python serve.py --doctor`.
+- Kiểm tra chuỗi hiệu lực của từng role (và đường dẫn `agy` được resolve): `python serve.py --doctor`.
 
 ---
 > **Lưu ý V2**: Hệ thống có khả năng fallback thông minh. Nếu thiếu API Key, GrokProvider sẽ tự động mở login prompt; nếu mã sinh ra bị độc hại, vòng lặp `Self-Healing` sẽ tự động vá lỗi thông qua phản hồi từ `pytest` và `flake8`.
