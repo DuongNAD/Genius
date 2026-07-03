@@ -538,6 +538,7 @@ def format_cmd_args(
 
 from ag_core.config import load_config
 from ag_core.scanner.project_scanner import ProjectScanner
+from ag_core.scanner.repo_graph import build_budgeted_context
 from ag_core.utils.db import log_conversation_async
 from ag_core.utils.security import verify_checksum
 
@@ -1349,6 +1350,12 @@ async def process_single_file(
                     root_dir=project_dir, extra_ignores=config.scanner.exclude_patterns
                 )
                 current_context = await asyncio.to_thread(proj_scanner.scan)
+                # Budget by graph relevance, seeded by the file being
+                # implemented and any paths its specification names; the
+                # design.md / current-file overlays below stay full.
+                current_context = await asyncio.to_thread(
+                    build_budgeted_context, current_context, [file_path], specification
+                )
             except Exception:
                 current_context = {}
             current_context["design.md"] = design_plan_content
@@ -1758,6 +1765,13 @@ async def run_pipeline(
             root_dir=project_dir, extra_ignores=config.scanner.exclude_patterns
         )
         scanned_files = await asyncio.to_thread(scanner.scan)
+        # Graph-aware budgeting (aider-repo-map style): rank files by the
+        # intra-repo import/reference graph, seeded by paths the prompt
+        # mentions, and trim to GENIUS_CONTEXT_TOKEN_BUDGET. Under the
+        # budget this is an identity passthrough.
+        scanned_files = await asyncio.to_thread(
+            build_budgeted_context, scanned_files, None, prompt
+        )
     except Exception as e:
         logger.warning(f"Failed to scan workspace: {e}")
         scanned_files = {}
@@ -2609,6 +2623,13 @@ async def run_e2e_pipeline(
             root_dir=project_dir, extra_ignores=config.scanner.exclude_patterns
         )
         scanned_files = await asyncio.to_thread(scanner.scan)
+        # Graph-aware budgeting (aider-repo-map style): rank files by the
+        # intra-repo import/reference graph, seeded by paths the prompt
+        # mentions, and trim to GENIUS_CONTEXT_TOKEN_BUDGET. Under the
+        # budget this is an identity passthrough.
+        scanned_files = await asyncio.to_thread(
+            build_budgeted_context, scanned_files, None, prompt
+        )
     except Exception as e:
         logger.warning(f"Failed to scan workspace: {e}")
         scanned_files = {}
@@ -2796,6 +2817,12 @@ async def run_e2e_pipeline(
                         extra_ignores=config.scanner.exclude_patterns,
                     )
                     current_context = await asyncio.to_thread(proj_scanner.scan)
+                    current_context = await asyncio.to_thread(
+                        build_budgeted_context,
+                        current_context,
+                        [file_path],
+                        specification,
+                    )
                 except Exception:
                     current_context = {}
 
@@ -2929,6 +2956,9 @@ async def run_e2e_pipeline(
                         extra_ignores=config.scanner.exclude_patterns,
                     )
                     current_context = await asyncio.to_thread(proj_scanner.scan)
+                    current_context = await asyncio.to_thread(
+                        build_budgeted_context, current_context, [file_path], ""
+                    )
                 except Exception:
                     current_context = {}
 
