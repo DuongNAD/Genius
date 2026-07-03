@@ -425,7 +425,21 @@ async def start_hub_server(port: int):
         app, host=hub_host, port=port, log_level="info", ws="auto"
     )
     server = uvicorn.Server(config)
-    await server.serve()
+    # Drive the lifecycle manually (startup -> main_loop -> shutdown) instead of
+    # server.serve(): serve() installs uvicorn's own SIGINT/SIGTERM handlers,
+    # which swallow the FIRST Ctrl+C to gracefully stop only the hub while the
+    # manually-driven agent servers (start_server) keep running until a second
+    # Ctrl+C. Without those handlers, SIGINT propagates to asyncio.run and
+    # main_async's finally cancels every server task at once. Mirrors
+    # start_server's manual lifecycle.
+    if not config.loaded:
+        config.load()
+    server.lifespan = config.lifespan_class(config)
+    await server.startup()
+    try:
+        await server.main_loop()
+    finally:
+        await server.shutdown()
 
 
 ROUTING_TABLE = {

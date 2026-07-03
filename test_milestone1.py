@@ -59,8 +59,8 @@ def test_jwt_encode_decode():
     with pytest.raises(ValueError, match="Invalid signature"):
         decode_jwt(token, "wrong-secret")
 
-    # Test expired token
-    expired_payload = {"sub": "user123", "exp": time.time() - 10}
+    # Test expired token (well past the default clock-skew leeway)
+    expired_payload = {"sub": "user123", "exp": time.time() - 120}
     expired_token = encode_jwt(expired_payload, secret)
     with pytest.raises(ValueError, match="Token has expired"):
         decode_jwt(expired_token, secret)
