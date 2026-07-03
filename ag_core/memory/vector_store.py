@@ -226,12 +226,30 @@ class VectorMemory:
             embedding = self.get_embeddings([text])[0]
             from ag_core.utils.db import enqueue_db_write
 
+            # Bound the fallback store: without a cap `add` never prunes, so a
+            # long-lived MCP server / worker grows it forever AND the O(N)
+            # pure-Python cosine scan in `query` gets slower every call. Keep
+            # only the newest N rows per collection (by rowid = insertion order).
+            try:
+                cap = int(os.environ.get("GENIUS_MEMORY_MAX_ROWS") or 2000)
+                if cap <= 0:
+                    cap = 2000
+            except (TypeError, ValueError):
+                cap = 2000
+
             def _add_vector_impl(
                 conn, doc_id, collection_name, text, metadata_json, embedding_json
             ):
                 conn.execute(
                     "INSERT OR REPLACE INTO agent_vector_memory_fallback (id, collection_name, text, metadata, embedding) VALUES (?, ?, ?, ?, ?)",
                     (doc_id, collection_name, text, metadata_json, embedding_json),
+                )
+                conn.execute(
+                    "DELETE FROM agent_vector_memory_fallback "
+                    "WHERE collection_name = ? AND id NOT IN ("
+                    "SELECT id FROM agent_vector_memory_fallback "
+                    "WHERE collection_name = ? ORDER BY rowid DESC LIMIT ?)",
+                    (collection_name, collection_name, cap),
                 )
                 conn.commit()
 
