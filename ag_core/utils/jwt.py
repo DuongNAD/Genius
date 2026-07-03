@@ -19,6 +19,20 @@ def jwt_max_lifetime() -> float:
         return 3600.0
 
 
+def jwt_leeway() -> float:
+    """Clock-skew tolerance (seconds) applied to the ``exp`` and ``nbf`` checks.
+
+    Distributed workers and the hub don't share a clock; without a little
+    leeway a worker whose clock is a few seconds off has its freshly-minted
+    tokens rejected as already-expired (or not-yet-valid). Tunable via
+    GENIUS_JWT_LEEWAY; blank/junk -> 60s.
+    """
+    try:
+        return max(0.0, float(os.environ.get("GENIUS_JWT_LEEWAY") or 60.0))
+    except (TypeError, ValueError):
+        return 60.0
+
+
 def base64url_encode(data: bytes) -> str:
     """Encode bytes to base64url format string."""
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("utf-8")
@@ -74,6 +88,7 @@ def decode_jwt(
     *,
     require_exp: bool = False,
     max_lifetime: float = None,
+    leeway: float = None,
 ) -> dict:
     """
     Decode and verify a JWT token with HS256 algorithm.
@@ -118,12 +133,25 @@ def decode_jwt(
     except Exception as e:
         raise ValueError("Invalid payload") from e
 
+    if leeway is None:
+        leeway = jwt_leeway()
+    now = time.time()
+
+    # nbf ("not before"): reject a token presented before its validity window,
+    # allowing `leeway` seconds of clock skew. Purely additive — tokens without
+    # an nbf claim are unaffected.
+    if "nbf" in payload:
+        nbf = payload["nbf"]
+        if not isinstance(nbf, (int, float)) or isinstance(nbf, bool):
+            raise ValueError("Invalid nbf claim type")
+        if now + leeway < nbf:
+            raise ValueError("Token not yet valid")
+
     if "exp" in payload:
         exp = payload["exp"]
         if not isinstance(exp, (int, float)) or isinstance(exp, bool):
             raise ValueError("Invalid exp claim type")
-        now = time.time()
-        if now > exp:
+        if now > exp + leeway:
             raise ValueError("Token has expired")
         if max_lifetime is not None and (exp - now) > max_lifetime:
             raise ValueError("Token lifetime exceeds maximum allowed")

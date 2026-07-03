@@ -10,6 +10,9 @@ import json
 import httpx
 import re
 import shutil
+import time
+import email.utils
+from datetime import timezone
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -568,17 +571,40 @@ def is_transient_error(exception) -> bool:
 
 
 # Define a wait strategy that respects Retry-After headers or falls back to exponential backoff
+def _parse_retry_after(value):
+    """Parse a Retry-After header (RFC 7231): either delta-seconds or an
+    HTTP-date. Returns the delay in seconds, or None when unparseable.
+
+    The old code honored only the numeric form and silently fell through to
+    exponential backoff for the (spec-legal) HTTP-date form.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        dt = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp() - time.time()
+
+
 def wait_strategy(retry_state):
     # Check if the last attempt raised an HTTPStatusError with Retry-After header
     exception = retry_state.outcome.exception()
     if isinstance(exception, httpx.HTTPStatusError):
         retry_after = exception.response.headers.get("Retry-After")
         if retry_after:
-            try:
-                delay = float(retry_after)
-                return min(delay, 60.0)
-            except ValueError:
-                pass
+            delay = _parse_retry_after(retry_after)
+            if delay is not None:
+                # Clamp: a negative delay (a past HTTP-date or a bogus value)
+                # must not cause an immediate re-hit of a throttled server;
+                # floor at 0 and cap at 60s.
+                return max(0.0, min(delay, 60.0))
     # Fallback to standard exponential backoff: 2^attempt, min 1s, max 10s
     return wait_exponential(multiplier=1, min=1, max=10)(retry_state)
 
