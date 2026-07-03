@@ -533,7 +533,7 @@ def format_cmd_args(
 
 from ag_core.config import load_config
 from ag_core.scanner.project_scanner import ProjectScanner
-from ag_core.utils.db import log_conversation
+from ag_core.utils.db import log_conversation_async
 from ag_core.utils.security import verify_checksum
 
 
@@ -1333,7 +1333,7 @@ async def process_single_file(
                 created_by="codex",
                 parent_id=parent_art_id,
             )
-            codex_art_id = message_bus.publish(codex_art)
+            codex_art_id = await message_bus.publish_async(codex_art)
 
             # 2. Write code to projects/[project_name]/[file_path]
             try:
@@ -1474,7 +1474,7 @@ async def process_single_file(
                     created_by="tester",
                     parent_id=codex_art_id,
                 )
-                message_bus.publish(tester_art)
+                await message_bus.publish_async(tester_art)
 
                 security_art = Artifact(
                     name=f"audit_{file_path}",
@@ -1482,7 +1482,7 @@ async def process_single_file(
                     created_by="security",
                     parent_id=codex_art_id,
                 )
-                message_bus.publish(security_art)
+                await message_bus.publish_async(security_art)
 
                 # 4. Write debug/log files to disk
                 try:
@@ -1758,7 +1758,7 @@ async def run_pipeline(
             logger.info(
                 f"Step '{agent_key}' completed successfully via routing. Output: {output_file}"
             )
-            log_conversation(prompt, result)
+            await log_conversation_async(prompt, result)
             return result
 
         # Step 1: Research (agy/claude/codex fallback chain) - Call API
@@ -1794,7 +1794,7 @@ async def run_pipeline(
             )
 
         # Publish to MessageBus
-        research_art_id = message_bus.publish(
+        research_art_id = await message_bus.publish_async(
             Artifact(
                 name="research_data", content=research_content, created_by="researcher"
             )
@@ -1939,7 +1939,7 @@ async def run_pipeline(
                 logger.info(f"Debate Round {round_idx} End: Round complete.")
 
         # Publish Claude content to MessageBus
-        claude_art_id = message_bus.publish(
+        claude_art_id = await message_bus.publish_async(
             Artifact(
                 name="design_plan",
                 content=claude_content,
@@ -1979,7 +1979,7 @@ async def run_pipeline(
                     poll_timeout=poll_timeout,
                 )
                 # Re-publish to MessageBus
-                claude_art_id = message_bus.publish(
+                claude_art_id = await message_bus.publish_async(
                     Artifact(
                         name="design_plan",
                         content=claude_content,
@@ -2122,7 +2122,7 @@ async def run_pipeline(
                 )
             else:
                 review_content = "All files successfully implemented and verified through self-healing loop."
-            review_art_id = message_bus.publish(
+            review_art_id = await message_bus.publish_async(
                 Artifact(
                     name="review_data",
                     content=review_content,
@@ -2146,7 +2146,7 @@ async def run_pipeline(
                 if aggregated_audits
                 else "Consolidated project implementation and testing passed."
             )
-            consolidated_art_id = message_bus.publish(
+            consolidated_art_id = await message_bus.publish_async(
                 Artifact(
                     name="consolidated_audit",
                     content=consolidated_audit,
@@ -2208,7 +2208,7 @@ async def run_pipeline(
                 )
 
             # Publish DevOps to MessageBus
-            message_bus.publish(
+            await message_bus.publish_async(
                 Artifact(
                     name="devops_deploy",
                     content=devops_content,
@@ -2235,7 +2235,7 @@ async def run_pipeline(
             logger.info(
                 "Pipeline executed successfully and all files implemented, verified, and deployed."
             )
-            log_conversation(prompt, devops_content)
+            await log_conversation_async(prompt, devops_content)
             return devops_content
 
         # LEGACY single-file fallback — PYTEST-ONLY compatibility path. In
@@ -2349,7 +2349,7 @@ async def run_pipeline(
                 app_content = f.read()
         except Exception:
             app_content = ""
-        app_art_id = message_bus.publish(
+        app_art_id = await message_bus.publish_async(
             Artifact(
                 name="app_code",
                 content=app_content,
@@ -2380,7 +2380,7 @@ async def run_pipeline(
         )
 
         # Publish Codex review to MessageBus
-        codex_art_id = message_bus.publish(
+        codex_art_id = await message_bus.publish_async(
             Artifact(
                 name="review_data",
                 content=codex_content,
@@ -2446,7 +2446,7 @@ async def run_pipeline(
         )
 
         # Publish to MessageBus
-        message_bus.publish(
+        await message_bus.publish_async(
             Artifact(
                 name="test_code",
                 content=tester_content,
@@ -2454,7 +2454,7 @@ async def run_pipeline(
                 parent_id=codex_art_id,
             )
         )
-        message_bus.publish(
+        await message_bus.publish_async(
             Artifact(
                 name="security_audit",
                 content=security_content,
@@ -2462,7 +2462,7 @@ async def run_pipeline(
                 parent_id=codex_art_id,
             )
         )
-        message_bus.publish(
+        await message_bus.publish_async(
             Artifact(
                 name="devops_deploy",
                 content=devops_content,
@@ -2523,7 +2523,7 @@ async def run_pipeline(
         logger.info(
             "Pipeline executed successfully and all intermediate files verified."
         )
-        log_conversation(prompt, devops_content)
+        await log_conversation_async(prompt, devops_content)
     finally:
         await client.aclose()
 

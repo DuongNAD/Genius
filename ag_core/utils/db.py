@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sqlite3
 import queue
@@ -265,3 +266,11 @@ def log_conversation(prompt: str, result: str):
         _submit_write(_log_conversation_impl, prompt, result)
     except Exception as e:
         logger.error(f"Error logging conversation: {e}")
+
+
+async def log_conversation_async(prompt: str, result: str):
+    """Async wrapper for :func:`log_conversation`. The underlying write blocks
+    on the single SQLite writer thread; offload it to a worker thread so async
+    pipeline code doesn't stall the event loop (and, in --auto-pilot where the
+    servers share the loop, every skill server with it)."""
+    await asyncio.to_thread(log_conversation, prompt, result)
