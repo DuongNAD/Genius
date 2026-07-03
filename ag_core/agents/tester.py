@@ -5,6 +5,7 @@ from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
 from ag_core.utils.code_extract import extract_code
+from ag_core.utils.cli_runner import communicate_with_timeout, test_timeout
 
 
 class TesterAgent(BaseAgent):
@@ -108,7 +109,12 @@ class TesterAgent(BaseAgent):
                             stderr=asyncio.subprocess.PIPE,
                             env=env,
                         )
-                        stdout, stderr = await process.communicate()
+                        # Bounded so a hung generated test can't freeze the
+                        # self-heal loop forever; the except below treats a
+                        # timeout as a failed run and steers the next attempt.
+                        stdout, stderr = await communicate_with_timeout(
+                            process, timeout=test_timeout(), cli_name="pytest"
+                        )
                         exit_code = process.returncode
                         test_failures_logs = (
                             stdout.decode("utf-8", errors="replace")

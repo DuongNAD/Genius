@@ -3,9 +3,11 @@ import sys
 import json
 import time
 import uuid
+import hmac
 import asyncio
+import traceback
 from typing import Any, Dict, List
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 
 # Add project root to sys.path
@@ -65,7 +67,19 @@ async def execute_agent(
     config = load_config()
     provider = make_provider(role, config, default_chain=default_chain)
     agent_class = globals()[agent_cls_name]
-    agent = agent_class(provider=provider, config=config, output_file="None")
+    # stateless=True mirrors the skill-server hardening: the reviewer agent must
+    # NOT fall into its flake8/pytest self-healing loop, which runs the host's
+    # test suite and writes model-generated code into the server's working tree
+    # (a remote-code-execution surface reachable from the MCP `review`/`code`
+    # tools). use_memory=False also avoids a blocking VectorMemory/model load on
+    # the event loop. output_file="None" keeps suppressing the artifact write.
+    agent = agent_class(
+        provider=provider,
+        config=config,
+        output_file="None",
+        stateless=True,
+        use_memory=False,
+    )
 
     if agent_name == "code":
         prompt = f"/code {prompt}"
@@ -157,7 +171,19 @@ async def _run_review(code: str, instructions: str) -> str:
     config = load_config()
     provider = make_provider(role, config, default_chain=default_chain)
     agent_class = globals()[agent_cls_name]
-    agent = agent_class(provider=provider, config=config, output_file="None")
+    # stateless=True mirrors the skill-server hardening: the reviewer agent must
+    # NOT fall into its flake8/pytest self-healing loop, which runs the host's
+    # test suite and writes model-generated code into the server's working tree
+    # (a remote-code-execution surface reachable from the MCP `review`/`code`
+    # tools). use_memory=False also avoids a blocking VectorMemory/model load on
+    # the event loop. output_file="None" keeps suppressing the artifact write.
+    agent = agent_class(
+        provider=provider,
+        config=config,
+        output_file="None",
+        stateless=True,
+        use_memory=False,
+    )
 
     prompt = (
         "Perform a thorough code review of the following code. Identify bugs, "
@@ -501,6 +527,26 @@ def _read_resource(uri: str, workspace: str = None) -> List[Dict[str, str]]:
 # The pipeline is long-running, so orchestrate launches it as a background job
 # and returns a job_id; clients poll orchestrate_status for the result.
 ORCHESTRATION_JOBS: Dict[str, Dict[str, Any]] = {}
+# Strong refs to running pipeline tasks: asyncio only holds a weak ref, so a
+# task with no strong reference can be GC'd and cancelled mid-run.
+_ORCHESTRATION_TASKS: set = set()
+# Cap retained finished jobs so a long-lived server doesn't accumulate their
+# artifact strings without bound.
+_MAX_FINISHED_JOBS = 200
+
+
+def _prune_finished_jobs() -> None:
+    finished = [
+        (j.get("finished_at") or 0.0, jid)
+        for jid, j in ORCHESTRATION_JOBS.items()
+        if j.get("status") in ("completed", "failed")
+    ]
+    if len(finished) <= _MAX_FINISHED_JOBS:
+        return
+    finished.sort()  # oldest first
+    for _, jid in finished[: len(finished) - _MAX_FINISHED_JOBS]:
+        ORCHESTRATION_JOBS.pop(jid, None)
+
 
 # Root-level artifact files produced by the pipeline, keyed by logical stage.
 _ARTIFACT_FILES = {
@@ -632,6 +678,13 @@ async def _run_orchestration(
         job["finished_at"] = time.time()
 
 
+def _jobs_root() -> str:
+    """Root directory for per-job workspaces (override via GENIUS_JOBS_DIR)."""
+    return os.environ.get("GENIUS_JOBS_DIR") or os.path.join(
+        os.getcwd(), ".genius_jobs"
+    )
+
+
 async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
     """Route a tool call to either the full pipeline or a single agent.
 
@@ -652,6 +705,12 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
                 "pipeline (the e2e variant has no stage gates)."
             )
         job_id = uuid.uuid4().hex
+        if not workspace:
+            # Isolate each job in its own directory. Concurrent jobs sharing the
+            # CWD clobber each other's fixed-name artifacts (design.md, app.py,
+            # ...) and one job's clean_output_files archives another's live
+            # files mid-run.
+            workspace = os.path.join(_jobs_root(), job_id)
         ORCHESTRATION_JOBS[job_id] = {
             "job_id": job_id,
             "status": "running",
@@ -668,9 +727,13 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             "rejected": False,
             "reject_reason": None,
         }
-        asyncio.create_task(
+        _prune_finished_jobs()
+        task = asyncio.create_task(
             _run_orchestration(job_id, prompt, pipeline, workspace, require_approval)
         )
+        # Hold a strong ref until the task finishes so it isn't GC-cancelled.
+        _ORCHESTRATION_TASKS.add(task)
+        task.add_done_callback(_ORCHESTRATION_TASKS.discard)
         message = "Pipeline started. Poll orchestrate_status with this job_id."
         if require_approval:
             message = (
@@ -761,8 +824,24 @@ async def list_tools():
     return {"tools": TOOLS}
 
 
+def _require_http_auth(authorization: str) -> None:
+    """Guard the HTTP tool endpoint. ``/tools/call`` drives local vendor CLIs,
+    the full pipeline, and filesystem writes, so an exposed (non-localhost)
+    server must not be open. When GENIUS_MCP_TOKEN is set, require a matching
+    bearer token; the default localhost bind keeps the token optional for the
+    trusted single-user case."""
+    expected = (os.environ.get("GENIUS_MCP_TOKEN") or "").strip()
+    if not expected:
+        return
+    header = (authorization or "").strip()
+    provided = header[7:].strip() if header.lower().startswith("bearer ") else header
+    if not (provided and hmac.compare_digest(provided, expected)):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 @app.post("/tools/call")
-async def call_tool(req: CallToolRequest):
+async def call_tool(req: CallToolRequest, authorization: str = Header(default="")):
+    _require_http_auth(authorization)
     valid_tool_names = {t["name"] for t in TOOLS}
     if req.name not in valid_tool_names:
         raise HTTPException(status_code=400, detail=f"Tool {req.name} not found")
@@ -771,9 +850,16 @@ async def call_tool(req: CallToolRequest):
         result = await dispatch_tool(req.name, req.arguments)
         return {"content": [{"type": "text", "text": result}]}
     except ValueError as e:
+        # Client input errors are safe to echo (they describe the bad request).
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # Don't leak internal detail (paths, upstream response bodies, auth
+        # diagnostics) to the caller; log it server-side instead.
+        print(
+            f"[MCP] tool '{req.name}' failed:\n{traceback.format_exc()}",
+            file=sys.stderr,
+        )
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -945,9 +1031,19 @@ if __name__ == "__main__":
     else:
         import uvicorn
 
-        # Localhost-only by default; expose wider via GENIUS_BIND_HOST.
-        uvicorn.run(
-            "mcp_server:app",
-            host=os.environ.get("GENIUS_BIND_HOST") or "127.0.0.1",
-            port=8000,
+        # Bind localhost by default so the unauthenticated tool endpoint isn't
+        # reachable off-box. To expose it (GENIUS_MCP_HOST=0.0.0.0), set
+        # GENIUS_MCP_TOKEN so /tools/call requires a bearer token.
+        # `or` (not a get() default): a blank GENIUS_MCP_HOST shipped in
+        # .env.example and loaded as "" by python-dotenv would otherwise become
+        # the empty host, which uvicorn/socket binds as 0.0.0.0 — exposing the
+        # unauthenticated tool endpoint to the whole network. Blank == loopback.
+        # The MCP-specific GENIUS_MCP_HOST wins over the generic
+        # GENIUS_BIND_HOST shared with the other locally-consumed servers.
+        host = (
+            os.environ.get("GENIUS_MCP_HOST")
+            or os.environ.get("GENIUS_BIND_HOST")
+            or "127.0.0.1"
         )
+        port = int(os.environ.get("GENIUS_MCP_PORT") or 8000)
+        uvicorn.run("mcp_server:app", host=host, port=port)

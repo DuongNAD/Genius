@@ -98,7 +98,12 @@ def test_stress_large_prompt(temp_workspace):
         if p.exists():
             p.unlink()
 
-    # 2. Extremely large prompt (100,000 characters) - should fail on command line length
+    # 2. Extremely large prompt (100,000 characters) - should fail on command line length.
+    # The command-line length limit is a Windows constraint (~8191 chars). POSIX
+    # ARG_MAX is ~1MB, so a 100k-char arg is accepted and the pipeline succeeds;
+    # only assert the failure path on Windows.
+    if sys.platform != "win32":
+        return
     huge_prompt = "B" * 100000
     with pytest.raises(PipelineError) as exc_info:
         asyncio.run(

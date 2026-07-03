@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import json
 import time
@@ -156,6 +157,15 @@ class MessageBus:
                 except Exception:
                     raise
         return artifact.artifact_id
+
+    async def publish_async(self, artifact: Artifact) -> str:
+        """Async wrapper around :meth:`publish`. ``publish`` blocks on the single
+        SQLite writer thread (``task.event.wait()``); calling it directly from an
+        orchestrator pipeline coroutine froze the event loop until the artifact
+        write committed (up to the 30s busy timeout under DB contention). Run it
+        in a worker thread — ``self.lock`` is a ``threading.Lock``, so this is
+        safe — so the loop keeps servicing concurrent polls and heartbeats."""
+        return await asyncio.to_thread(self.publish, artifact)
 
     def retrieve(self, artifact_id: str) -> Optional[Dict[str, Any]]:
         """Retrieves artifact by unique ID."""

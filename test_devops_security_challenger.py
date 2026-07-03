@@ -424,8 +424,11 @@ def test_rate_limiter_active_and_retry_after(get_app, role):
     app = get_app()
     client = TestClient(app)
 
-    # Import limiter instance and reset it
-    from ag_core.utils.rate_limiter import limiter
+    # Import this role's rate-limit bucket (skill servers now use a per-role
+    # limiter, not one process-global bucket) and reset it.
+    from ag_core.utils.rate_limiter import get_role_limiter
+
+    limiter = get_role_limiter(role)
 
     # Store original values
     orig_rate = limiter.rate

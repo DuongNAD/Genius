@@ -4,6 +4,11 @@ import asyncio
 import logging
 from typing import List, Optional, Union
 from ag_core.config import load_config
+from ag_core.utils.cli_runner import (
+    communicate_with_timeout,
+    cli_timeout,
+    CLITimeoutError,
+)
 
 logger = logging.getLogger("ag_core.utils.git")
 
@@ -101,16 +106,30 @@ class GitManager:
         masked_cmd = "git " + " ".join(self._mask(arg) for arg in args)
         logger.info(f"Running command: {masked_cmd}")
 
+        # Never let git block on an interactive credential/passphrase prompt: a
+        # missing or expired token on a push/pull/clone would otherwise hang the
+        # coroutine forever. GIT_TERMINAL_PROMPT=0 plus a closed stdin makes auth
+        # failures fail fast, and communicate_with_timeout is a hard backstop.
+        run_env = dict(env) if env is not None else os.environ.copy()
+        run_env.setdefault("GIT_TERMINAL_PROMPT", "0")
+        run_env.setdefault("GCM_INTERACTIVE", "never")
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 "git",
                 *args,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
-                env=env,
+                env=run_env,
             )
-            stdout_bytes, stderr_bytes = await proc.communicate()
+            try:
+                stdout_bytes, stderr_bytes = await communicate_with_timeout(
+                    proc, timeout=cli_timeout(), cli_name="git"
+                )
+            except CLITimeoutError as e:
+                raise GitError(self._mask(str(e)))
             stdout = stdout_bytes.decode(errors="replace")
             stderr = stderr_bytes.decode(errors="replace")
 
@@ -126,16 +145,19 @@ class GitManager:
 
     async def clone(self, repo_url: str, target_path: str) -> str:
         auth_url = self._get_auth_url(repo_url)
-        return await self._run_git(["clone", auth_url, target_path])
+        # `--` so a repo_url beginning with `-` can't be parsed as a git option
+        # (e.g. --upload-pack=...); it's forced to be positional.
+        return await self._run_git(["clone", "--", auth_url, target_path])
 
     async def status(self, cwd: Optional[str] = None) -> str:
         return await self._run_git(["status"], cwd=cwd)
 
     async def add(self, files: Union[str, List[str]], cwd: Optional[str] = None) -> str:
+        # `--` so a filename beginning with `-` isn't parsed as an option flag.
         if isinstance(files, str):
-            args = ["add", files]
+            args = ["add", "--", files]
         else:
-            args = ["add"] + list(files)
+            args = ["add", "--"] + list(files)
         return await self._run_git(args, cwd=cwd)
 
     async def commit(

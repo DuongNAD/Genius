@@ -22,14 +22,15 @@ def setup_temp_db(tmp_path):
 
     yield temp_db
 
+    # Blank original (empty GENIUS_DB_PATH= from .env.example) must not become
+    # DB_PATH — sqlite3.connect("") opens a temp database per connection.
     if original_db_path is not None:
         os.environ["GENIUS_DB_PATH"] = original_db_path
-        ag_core.utils.db.DB_PATH = original_db_path
     else:
         os.environ.pop("GENIUS_DB_PATH", None)
-        ag_core.utils.db.DB_PATH = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "genius.db")
-        )
+    ag_core.utils.db.DB_PATH = original_db_path or os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "genius.db")
+    )
 
 
 from dashboard import app

@@ -30,13 +30,14 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _occupy_port() -> socket.socket:
     """Bind and listen on an OS-assigned port, keeping it occupied.
 
-    Bound on loopback: agent servers bind 127.0.0.1 by default now (see
-    serve.bind_host), and on Windows a wildcard-bound blocker would not
-    conflict with a specific-interface bind, so the fallback under test
-    would never trigger.
+    Bound on the wildcard address: on Windows that conflicts with a later
+    server bind of either kind (0.0.0.0 — the skill-server default — or
+    127.0.0.1 via GENIUS_SKILL_HOST/GENIUS_BIND_HOST). The reverse does NOT
+    hold: a loopback-bound blocker coexists with a later wildcard bind, and
+    the fallback under test would silently stop triggering.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
+    sock.bind(("0.0.0.0", 0))
     sock.listen(1)
     return sock
 

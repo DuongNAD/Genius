@@ -159,7 +159,7 @@ def test_openai_provider_fallback_path():
             assert response["content"] == "Fallback test"
             mock_exec.assert_called_once()
             args, kwargs = mock_exec.call_args
-            assert args[0] == "codex.exe"
+            assert args[0] == ("codex.exe" if os.name == "nt" else "codex")
             assert args[1:] == (
                 "exec",
                 "-",
@@ -402,6 +402,7 @@ def test_grok_provider_success():
             patch.dict("os.environ", {"GROK_API_KEY": "fake_key"}),
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
         ):
+            os.environ.pop("GENIUS_GROK_MODEL", None)
             provider = GrokProvider()
             response = await provider.send_prompt("Test prompt")
 
@@ -595,11 +596,74 @@ def test_grok_provider_exit_zero_error_json_raises():
     asyncio.run(run_test())
 
 
-def test_grok_provider_unparseable_stdout_raises_with_tails():
+def test_grok_provider_plain_text_stdout_used_as_content():
+    # Some Grok CLI builds ignore --output-format json and print a plain-text
+    # answer on a clean exit; the raw stdout is used as the content instead of
+    # being discarded as "no result" (real-world Grok builds do exactly this).
     async def run_test():
         mock_process = AsyncMock()
         mock_process.returncode = 0
-        mock_process.communicate.return_value = (b"plain text noise", b"stderr blob")
+        mock_process.communicate.return_value = (b"plain text answer", b"")
+
+        with (
+            patch("shutil.which", return_value="/usr/local/bin/grok"),
+            patch.dict("os.environ", {"GROK_API_KEY": "fake_key"}),
+            patch(
+                "asyncio.create_subprocess_exec", new_callable=AsyncMock
+            ) as mock_exec,
+        ):
+            mock_exec.return_value = mock_process
+            provider = GrokProvider()
+            result = await provider.send_prompt("Test prompt")
+
+        assert result["content"] == "plain text answer"
+
+    asyncio.run(run_test())
+
+
+def test_grok_provider_text_key_envelope_extracts_answer_only():
+    # The current xAI Grok CLI returns {"text": ..., "stopReason": ...,
+    # "sessionId": ..., "thought": ...} instead of {"result": ...}. The answer
+    # lives in "text"; "thought" (internal reasoning) and the ids must NOT leak
+    # into the content.
+    async def run_test():
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        envelope = json.dumps(
+            {
+                "text": "Python la ngon ngu lap trinh bac cao.",
+                "stopReason": "EndTurn",
+                "sessionId": "019f270f-370e-7c11-9139-2c10da3934ce",
+                "requestId": "e5630313-b27a-482b-9fbe-580590f6f16a",
+                "thought": "The user is asking a simple question in Vietnamese.",
+            }
+        )
+
+        with (
+            patch("shutil.which", return_value="/usr/local/bin/grok"),
+            patch.dict("os.environ", {"GROK_API_KEY": "fake_key"}),
+            patch(
+                "asyncio.create_subprocess_exec", new_callable=AsyncMock
+            ) as mock_exec,
+        ):
+            mock_exec.return_value = mock_process
+            mock_process.communicate.return_value = (envelope.encode(), b"")
+            provider = GrokProvider()
+            result = await provider.send_prompt("Test prompt")
+
+        assert result["content"] == "Python la ngon ngu lap trinh bac cao."
+        assert "thought" not in result["content"]
+        assert "sessionId" not in result["content"]
+
+    asyncio.run(run_test())
+
+
+def test_grok_provider_empty_stdout_raises():
+    # A clean exit with NO output is still an error — there is nothing to return.
+    async def run_test():
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"", b"stderr blob")
 
         with (
             patch("shutil.which", return_value="/usr/local/bin/grok"),
@@ -613,11 +677,56 @@ def test_grok_provider_unparseable_stdout_raises_with_tails():
             with pytest.raises(RuntimeError) as exc_info:
                 await provider.send_prompt("Test prompt")
 
-        msg = str(exc_info.value)
-        assert "plain text noise" in msg
-        assert "stderr blob" in msg
+        assert "stderr blob" in str(exc_info.value)
 
     asyncio.run(run_test())
+
+
+def _grok_invocation_cmd(env_overrides):
+    """Run send_prompt with a mocked CLI and return the argv passed to it."""
+
+    async def run():
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (
+            json.dumps({"result": "ok"}).encode(),
+            b"",
+        )
+        with (
+            patch("shutil.which", return_value="/usr/local/bin/grok"),
+            patch.dict("os.environ", {"GROK_API_KEY": "fake_key"}),
+            patch(
+                "asyncio.create_subprocess_exec", new_callable=AsyncMock
+            ) as mock_exec,
+        ):
+            os.environ.pop("GENIUS_GROK_MODEL", None)
+            os.environ.update(env_overrides)
+            mock_exec.return_value = mock_process
+            provider = GrokProvider()
+            await provider.send_prompt("Test prompt")
+            args, _kwargs = mock_exec.call_args
+            return list(args)
+
+    return asyncio.run(run())
+
+
+def test_grok_provider_no_model_flag_by_default():
+    # With GENIUS_GROK_MODEL unset, no -m flag is added — the Grok CLI uses its
+    # own configured default model (grok model ids are install-specific).
+    cmd = _grok_invocation_cmd({})
+    assert "-m" not in cmd
+    assert cmd[1] == "--prompt-file"
+
+
+def test_grok_provider_model_flag_override_via_env():
+    cmd = _grok_invocation_cmd({"GENIUS_GROK_MODEL": "grok-code-fast-1"})
+    assert cmd[cmd.index("-m") + 1] == "grok-code-fast-1"
+
+
+def test_grok_provider_empty_model_env_adds_no_flag():
+    # An explicit empty value falls back to the CLI's own default (no -m).
+    cmd = _grok_invocation_cmd({"GENIUS_GROK_MODEL": ""})
+    assert "-m" not in cmd
 
 
 def test_grok_provider_json_with_noise_banner_still_parses():

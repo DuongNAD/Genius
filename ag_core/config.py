@@ -224,8 +224,15 @@ def load_config(config_path: str = "config.yaml") -> Config:
             with open(actual_path, "r", encoding="utf-8") as f:
                 yaml_data = yaml.safe_load(f) or {}
         except Exception as e:
-            print(f"Warning: Failed to load config file ({e}). Using defaults.")
-            raise e
+            # A malformed config.yaml is a real misconfiguration, not something
+            # to silently paper over with defaults. Fail fast with an
+            # actionable message that names the file and the parse error
+            # (the old code printed "Using defaults" then raised — a lie).
+            raise RuntimeError(
+                f"Failed to parse config file {actual_path}: {e}. "
+                f"Fix the YAML syntax (or remove the file to use built-in "
+                f"defaults)."
+            ) from e
 
     env_keys = {
         "openai_api_key": "OPENAI_API_KEY",
@@ -237,7 +244,11 @@ def load_config(config_path: str = "config.yaml") -> Config:
     }
     for field_name, env_var in env_keys.items():
         val = os.getenv(env_var)
-        if val is not None:
+        # `if val` (not `is not None`): a blank env value — e.g. the empty
+        # SKILL_API_KEY shipped in .env.example and loaded into os.environ as
+        # "" by python-dotenv — must NOT clobber a real value set in
+        # config.yaml. Treat blank as unset (same idiom as the GENIUS_* vars).
+        if val:
             yaml_data[field_name] = val
 
     # Legacy config.yaml key: the Researcher service used to be

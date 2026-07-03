@@ -10,6 +10,9 @@ import json
 import httpx
 import re
 import shutil
+import time
+import email.utils
+from datetime import timezone
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -20,8 +23,14 @@ from tenacity import (
 # Re-exported so existing `from orchestrator import extract_code` callers (and
 # tests) keep working after the helper moved to a shared module.
 from ag_core.utils.code_extract import extract_code
-from ag_core.utils.cli_runner import cli_timeout
+from ag_core.utils.cli_runner import (
+    cli_timeout,
+    test_timeout,
+    communicate_with_timeout,
+    CLITimeoutError,
+)
 from ag_core.runtime import under_pytest
+from collections import OrderedDict
 
 
 def make_http_client() -> httpx.AsyncClient:
@@ -325,7 +334,17 @@ async def run_subprocess(cmd: list, env: dict = None) -> tuple[int, str]:
     process = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
     )
-    stdout, stderr = await process.communicate()
+    cli_name = " ".join(str(c) for c in cmd[:2]) if cmd else "subprocess"
+    try:
+        stdout, stderr = await communicate_with_timeout(
+            process, timeout=test_timeout(), cli_name=cli_name
+        )
+    except CLITimeoutError as e:
+        # Bound the wait so a hung flake8/pytest (an LLM-generated infinite loop
+        # or blocking call) can't freeze the pipeline forever; surface it as a
+        # non-zero exit (124, the conventional timeout code) so callers treat it
+        # as a verification failure and self-heal instead of hanging.
+        return 124, str(e)
     output = (
         stdout.decode("utf-8", errors="replace")
         + "\n"
@@ -342,7 +361,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger("orchestrator")
 
+import contextvars
+
+# Module-level default; tests set this directly (orchestrator.DISTRIBUTED_MODE).
 DISTRIBUTED_MODE = False
+# Per-pipeline override: run_pipeline sets this in its own task context so two
+# concurrent pipelines (e.g. MCP orchestrate jobs) don't stomp a shared global.
+# Task contexts are copied at create_task time and discarded on completion, so
+# the set is naturally scoped — no reset needed.
+_DISTRIBUTED_MODE_VAR: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "genius_distributed_mode"
+)
+
+
+def _is_distributed() -> bool:
+    """Effective distributed-dispatch flag: the pipeline's contextvar if set,
+    else the module-level DISTRIBUTED_MODE (the direct-call/test path)."""
+    try:
+        return _DISTRIBUTED_MODE_VAR.get()
+    except LookupError:
+        return DISTRIBUTED_MODE
+
 
 DEFAULT_ANTIGRAVITY_ARGS = ["--design", "{input}", "--output", "{output}"]
 
@@ -499,7 +538,7 @@ def format_cmd_args(
 
 from ag_core.config import load_config
 from ag_core.scanner.project_scanner import ProjectScanner
-from ag_core.utils.db import log_conversation
+from ag_core.utils.db import log_conversation_async
 from ag_core.utils.security import verify_checksum
 
 
@@ -534,19 +573,54 @@ def is_transient_error(exception) -> bool:
 
 
 # Define a wait strategy that respects Retry-After headers or falls back to exponential backoff
+def _parse_retry_after(value):
+    """Parse a Retry-After header (RFC 7231): either delta-seconds or an
+    HTTP-date. Returns the delay in seconds, or None when unparseable.
+
+    The old code honored only the numeric form and silently fell through to
+    exponential backoff for the (spec-legal) HTTP-date form.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        dt = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp() - time.time()
+
+
 def wait_strategy(retry_state):
     # Check if the last attempt raised an HTTPStatusError with Retry-After header
     exception = retry_state.outcome.exception()
     if isinstance(exception, httpx.HTTPStatusError):
         retry_after = exception.response.headers.get("Retry-After")
         if retry_after:
-            try:
-                delay = float(retry_after)
-                return min(delay, 60.0)
-            except ValueError:
-                pass
+            delay = _parse_retry_after(retry_after)
+            if delay is not None:
+                # Clamp: a negative delay (a past HTTP-date or a bogus value)
+                # must not cause an immediate re-hit of a throttled server;
+                # floor at 0 and cap at 60s.
+                return max(0.0, min(delay, 60.0))
     # Fallback to standard exponential backoff: 2^attempt, min 1s, max 10s
     return wait_exponential(multiplier=1, min=1, max=10)(retry_state)
+
+
+def _resolve_headers(headers):
+    """Build request headers, minting a FRESH JWT per call when a factory is
+    given. The skill server's anti-replay consumes a token's ``jti`` on the
+    first auth check (even for a request that then 429s), so re-sending the
+    same token on a tenacity retry is rejected as "Token replay detected"
+    (401) — turning any transient 429/5xx into a hard failure and defeating the
+    idempotency dedup. Passing a callable makes each retry attempt authenticate
+    with a new jti; a plain dict is still accepted for callers that don't care.
+    """
+    return headers() if callable(headers) else headers
 
 
 @retry(
@@ -556,7 +630,9 @@ def wait_strategy(retry_state):
     reraise=True,
 )
 async def perform_post_with_retry(client, url, payload_bytes, headers):
-    response = await client.post(url, content=payload_bytes, headers=headers)
+    response = await client.post(
+        url, content=payload_bytes, headers=_resolve_headers(headers)
+    )
     response.raise_for_status()
     verify_response_checksum(response)
     return response
@@ -569,22 +645,27 @@ async def perform_post_with_retry(client, url, payload_bytes, headers):
     reraise=True,
 )
 async def perform_get_with_retry(client, url, headers):
-    response = await client.get(url, headers=headers)
+    response = await client.get(url, headers=_resolve_headers(headers))
     response.raise_for_status()
     verify_response_checksum(response)
     return response
 
 
-_API_RESPONSE_CACHE = {}
-# FIFO bound so a long-lived process (serve --auto-pilot, MCP server) cannot
-# grow the cache without limit. Dicts preserve insertion order.
-_API_RESPONSE_CACHE_MAX = 256
+# Process-global response cache. Bounded with LRU eviction so a long-lived
+# server (MCP / hub) can't grow it without limit — every distinct agent call
+# used to store its full response string forever. Size configurable via
+# GENIUS_CACHE_MAXSIZE (entries).
+_API_RESPONSE_CACHE: "OrderedDict[str, str]" = OrderedDict()
+_API_RESPONSE_CACHE_MAXSIZE = max(1, int(os.environ.get("GENIUS_CACHE_MAXSIZE") or 256))
 
 
-def _cache_response(cache_key: str, result) -> None:
-    _API_RESPONSE_CACHE[cache_key] = result
-    while len(_API_RESPONSE_CACHE) > _API_RESPONSE_CACHE_MAX:
-        _API_RESPONSE_CACHE.pop(next(iter(_API_RESPONSE_CACHE)))
+def _cache_store(key: str, value: str) -> None:
+    cache = _API_RESPONSE_CACHE
+    if key in cache:
+        cache.move_to_end(key)
+    cache[key] = value
+    while len(cache) > _API_RESPONSE_CACHE_MAXSIZE:
+        cache.popitem(last=False)
 
 
 async def call_api(
@@ -618,9 +699,10 @@ async def call_api(
 
     if use_cache and cache_key in _API_RESPONSE_CACHE:
         logger.info(f"Cache hit for URL: {url}")
+        _API_RESPONSE_CACHE.move_to_end(cache_key)
         return _API_RESPONSE_CACHE[cache_key]
 
-    if DISTRIBUTED_MODE:
+    if _is_distributed():
         from serve import (
             worker_registry,
             pending_tasks,
@@ -676,10 +758,14 @@ async def call_api(
                     payload_workers, sort_keys=True, separators=(",", ":")
                 ).encode("utf-8")
 
-                # The hub authenticates with the RAW shared secret compared
-                # via hmac.compare_digest (CentralHub.verify_auth); it does
-                # not decode JWTs, so sending a token here 401s against a
-                # real hub. Same key the checksums are computed with.
+                # The hub's HTTP endpoints authenticate the RAW shared secret:
+                # CentralHub.verify_auth constant-time-compares X-API-Key against
+                # SKILL_API_KEY, and the hub's own create_headers sends the raw
+                # key. A JWT never equals the raw key, so sending one (as this
+                # used to) 401'd every hub request and made distributed mode
+                # dead-on-arrival. Sending the raw key matches the hub contract
+                # and also avoids the one-time-jti replay rejection when this
+                # same header dict is re-posted in the poll loops below.
                 headers = {
                     "X-API-Key": secret,
                     "X-Payload-SHA256": workers_checksum,
@@ -777,8 +863,15 @@ async def call_api(
                     status = task_info.get("status")
                     if status == "completed":
                         result = task_info.get("result")
+                        # The worker wraps its output as {"output": <content>};
+                        # unwrap to the content string (the in-memory WS path
+                        # does the same in serve.py). Returning the raw dict made
+                        # every stage write a dict to its artifact file, which
+                        # failed and left research.md/design.md/... empty.
+                        if isinstance(result, dict):
+                            result = result.get("output", result)
                         if use_cache:
-                            _cache_response(cache_key, result)
+                            _cache_store(cache_key, result)
                         return result
                     elif status == "failed":
                         err = task_info.get("result", {}).get(
@@ -788,161 +881,211 @@ async def call_api(
 
                     await asyncio.sleep(0.5)
         else:
-            logger.info(f"[Distributed] Selecting idle worker for role '{role}'")
+            # Dispatch to an idle worker over the in-memory WS registry, with
+            # RE-DISPATCH on worker loss: if the chosen worker disconnects (or
+            # its WS send fails) mid-task, pick another idle worker — or wait for
+            # the same one to reconnect — and retry, instead of failing the whole
+            # pipeline. Bounded by GENIUS_DISPATCH_RETRIES (default 3). A genuine
+            # task timeout or an orchestrator cancel is NOT worker loss and is
+            # never retried here.
+            max_dispatch = max(1, int(os.environ.get("GENIUS_DISPATCH_RETRIES") or 3))
+            dispatch_deadline = time.time() + poll_timeout
+            last_disconnect = None
 
-            worker_id = None
-            poll_start = time.time()
-            while worker_id is None:
-                worker_id = await worker_registry.select_idle_worker(role)
-                if worker_id is None:
-                    if time.time() - poll_start > poll_timeout:
-                        raise PipelineError(
-                            f"No idle worker available for role '{role}' within {poll_timeout} seconds."
-                        )
-                    await asyncio.sleep(0.5)
-
-            logger.info(
-                f"[Distributed] Selected worker '{worker_id}' for role '{role}'"
-            )
-
-            async with worker_registry.lock:
-                worker = await worker_registry.get_worker(worker_id)
-                if not worker:
-                    raise PipelineError(
-                        f"Worker '{worker_id}' disappeared from registry."
-                    )
-                worker["status"] = "busy"
-
-            task_id = f"task_{uuid.uuid4().hex[:8]}"
-            task_data = {"role": role, "prompt": prompt, "context": context or {}}
-
-            async with central_hub.lock:
-                central_hub.tasks[task_id] = {
-                    "task_id": task_id,
-                    "role": role,
-                    "task_data": task_data,
-                    "status": "running",
-                    "result": None,
-                    "created_at": time.time(),
-                    "worker_id": worker_id,
-                    "started_at": time.time(),
-                }
-
-            ws = worker.get("ws")
-            if ws is None:
-                raise PipelineError(
-                    f"Worker '{worker_id}' does not have an active WebSocket connection."
+            async def _dispatch_once(worker_id):
+                logger.info(
+                    f"[Distributed] Selected worker '{worker_id}' for role '{role}'"
                 )
 
-            serialized = json.dumps(task_data, sort_keys=True).encode("utf-8")
-            checksum = hashlib.sha256(serialized).hexdigest()
-
-            dispatch_payload = {
-                "type": "dispatch",
-                "task_id": task_id,
-                "task_data": task_data,
-                "checksum": checksum,
-            }
-            loop = asyncio.get_running_loop()
-            fut = loop.create_future()
-            pending_tasks[task_id] = fut
-
-            logger.info(
-                f"[Distributed] Sending dispatch message for task '{task_id}' to worker '{worker_id}'"
-            )
-            try:
-                await ws.send_json(dispatch_payload)
-            except Exception as e:
-                pending_tasks.pop(task_id, None)
                 async with worker_registry.lock:
-                    worker["status"] = "idle"
-                async with central_hub.lock:
-                    central_hub.tasks[task_id]["status"] = "failed"
-                    central_hub.tasks[task_id]["result"] = {
-                        "error": f"WS send error: {str(e)}"
-                    }
-                raise PipelineError(
-                    f"Failed to send task to worker '{worker_id}' over WebSocket: {e}"
-                )
+                    worker = await worker_registry.get_worker(worker_id)
+                    if not worker:
+                        raise WorkerDisconnectedError(
+                            f"Worker '{worker_id}' disappeared from registry."
+                        )
+                    worker["status"] = "busy"
 
-            try:
-                result = await asyncio.wait_for(fut, timeout=poll_timeout)
-                logger.info(f"[Distributed] Task '{task_id}' completed successfully")
-                if use_cache:
-                    _cache_response(cache_key, result)
-                return result
-            except (asyncio.TimeoutError, TimeoutError) as e:
-                logger.error(f"[Distributed] Task '{task_id}' timed out: {e}")
+                task_id = f"task_{uuid.uuid4().hex[:8]}"
+                task_data = {"role": role, "prompt": prompt, "context": context or {}}
+
                 async with central_hub.lock:
-                    if task_id in central_hub.tasks:
+                    central_hub.tasks[task_id] = {
+                        "task_id": task_id,
+                        "role": role,
+                        "task_data": task_data,
+                        "status": "running",
+                        "result": None,
+                        "created_at": time.time(),
+                        "worker_id": worker_id,
+                        "started_at": time.time(),
+                    }
+
+                ws = worker.get("ws")
+                if ws is None:
+                    async with worker_registry.lock:
+                        worker["status"] = "idle"
+                    raise WorkerDisconnectedError(
+                        f"Worker '{worker_id}' has no active WebSocket connection."
+                    )
+
+                # HMAC (not plain SHA-256): the worker verifies the dispatch with
+                # verify_checksum(task_data, checksum, api_key), HMAC-only in prod.
+                from ag_core.utils.security import calculate_checksum
+
+                secret = load_config().skill_api_key or os.getenv("SKILL_API_KEY", "")
+                checksum = calculate_checksum(task_data, secret)
+
+                dispatch_payload = {
+                    "type": "dispatch",
+                    "task_id": task_id,
+                    "task_data": task_data,
+                    "checksum": checksum,
+                }
+                loop = asyncio.get_running_loop()
+                fut = loop.create_future()
+                pending_tasks[task_id] = fut
+
+                logger.info(
+                    f"[Distributed] Sending dispatch message for task '{task_id}' to worker '{worker_id}'"
+                )
+                try:
+                    await ws.send_json(dispatch_payload)
+                except Exception as e:
+                    pending_tasks.pop(task_id, None)
+                    async with worker_registry.lock:
+                        worker["status"] = "idle"
+                    async with central_hub.lock:
                         central_hub.tasks[task_id]["status"] = "failed"
                         central_hub.tasks[task_id]["result"] = {
-                            "error": f"Task timed out after {poll_timeout}s"
+                            "error": f"WS send error: {str(e)}"
                         }
-                async with worker_registry.lock:
-                    worker = await worker_registry.get_worker(worker_id)
-                    if worker:
-                        worker["status"] = "idle"
-                        ws = worker.get("ws")
-                        if ws:
-                            try:
-                                await ws.send_json(
-                                    {"type": "cancel", "task_id": task_id}
+                    # A failed send == the worker's connection is gone: surface it
+                    # as worker loss so the caller re-dispatches to another worker.
+                    raise WorkerDisconnectedError(
+                        f"Failed to send task to worker '{worker_id}' over WebSocket: {e}"
+                    )
+
+                try:
+                    result = await asyncio.wait_for(fut, timeout=poll_timeout)
+                    logger.info(
+                        f"[Distributed] Task '{task_id}' completed successfully"
+                    )
+                    if use_cache:
+                        _cache_store(cache_key, result)
+                    return result
+                except (asyncio.TimeoutError, TimeoutError) as e:
+                    logger.error(f"[Distributed] Task '{task_id}' timed out: {e}")
+                    async with central_hub.lock:
+                        if task_id in central_hub.tasks:
+                            central_hub.tasks[task_id]["status"] = "failed"
+                            central_hub.tasks[task_id]["result"] = {
+                                "error": f"Task timed out after {poll_timeout}s"
+                            }
+                    async with worker_registry.lock:
+                        worker = await worker_registry.get_worker(worker_id)
+                        if worker:
+                            worker["status"] = "idle"
+                            ws = worker.get("ws")
+                            if ws:
+                                try:
+                                    await ws.send_json(
+                                        {"type": "cancel", "task_id": task_id}
+                                    )
+                                except Exception:
+                                    pass
+                            elif central_hub.network:
+                                try:
+                                    payload = {"task_id": task_id}
+                                    headers = central_hub.create_headers(payload)
+                                    await central_hub.network.send_to_worker(
+                                        worker_id, "/cancel", payload, headers
+                                    )
+                                except Exception:
+                                    pass
+                    raise asyncio.TimeoutError(
+                        f"Task timed out after {poll_timeout} seconds"
+                    )
+                except WorkerDisconnectedError as e:
+                    logger.error(
+                        f"[Distributed] Worker disconnected during task '{task_id}': {e}"
+                    )
+                    raise
+                except asyncio.CancelledError:
+                    logger.info(
+                        f"[Distributed] Task '{task_id}' cancelled by orchestrator"
+                    )
+                    async with central_hub.lock:
+                        if task_id in central_hub.tasks:
+                            central_hub.tasks[task_id]["status"] = "failed"
+                            central_hub.tasks[task_id]["result"] = {
+                                "error": "cancelled"
+                            }
+                    async with worker_registry.lock:
+                        worker = await worker_registry.get_worker(worker_id)
+                        if worker:
+                            worker["status"] = "idle"
+                            ws = worker.get("ws")
+                            if ws:
+                                try:
+                                    await ws.send_json(
+                                        {"type": "cancel", "task_id": task_id}
+                                    )
+                                except Exception:
+                                    pass
+                            elif central_hub.network:
+                                try:
+                                    payload = {"task_id": task_id}
+                                    headers = central_hub.create_headers(payload)
+                                    await central_hub.network.send_to_worker(
+                                        worker_id, "/cancel", payload, headers
+                                    )
+                                except Exception:
+                                    pass
+                    raise
+                except Exception as e:
+                    logger.error(f"[Distributed] Task '{task_id}' failed: {e}")
+                    raise PipelineError(
+                        f"Task '{task_id}' failed on worker '{worker_id}': {e}"
+                    )
+                finally:
+                    pending_tasks.pop(task_id, None)
+
+            logger.info(f"[Distributed] Selecting idle worker for role '{role}'")
+            for dispatch_attempt in range(1, max_dispatch + 1):
+                worker_id = None
+                while worker_id is None:
+                    worker_id = await worker_registry.select_idle_worker(role)
+                    if worker_id is None:
+                        if time.time() > dispatch_deadline:
+                            if last_disconnect is not None:
+                                # We were re-dispatching after a worker loss, but
+                                # no replacement worker (nor the same one
+                                # reconnecting) became available in time — surface
+                                # the loss as the disconnect, not a generic
+                                # no-worker error.
+                                raise WorkerDisconnectedError(
+                                    f"Worker for role '{role}' disconnected and no "
+                                    f"replacement became available within "
+                                    f"{poll_timeout}s: {last_disconnect}"
                                 )
-                            except Exception:
-                                pass
-                        elif central_hub.network:
-                            try:
-                                payload = {"task_id": task_id}
-                                headers = central_hub.create_headers(payload)
-                                await central_hub.network.send_to_worker(
-                                    worker_id, "/cancel", payload, headers
-                                )
-                            except Exception:
-                                pass
-                raise asyncio.TimeoutError(
-                    f"Task timed out after {poll_timeout} seconds"
-                )
-            except WorkerDisconnectedError as e:
-                logger.error(
-                    f"[Distributed] Worker disconnected during task '{task_id}': {e}"
-                )
-                raise
-            except asyncio.CancelledError:
-                logger.info(f"[Distributed] Task '{task_id}' cancelled by orchestrator")
-                async with central_hub.lock:
-                    if task_id in central_hub.tasks:
-                        central_hub.tasks[task_id]["status"] = "failed"
-                        central_hub.tasks[task_id]["result"] = {"error": "cancelled"}
-                async with worker_registry.lock:
-                    worker = await worker_registry.get_worker(worker_id)
-                    if worker:
-                        worker["status"] = "idle"
-                        ws = worker.get("ws")
-                        if ws:
-                            try:
-                                await ws.send_json(
-                                    {"type": "cancel", "task_id": task_id}
-                                )
-                            except Exception:
-                                pass
-                        elif central_hub.network:
-                            try:
-                                payload = {"task_id": task_id}
-                                headers = central_hub.create_headers(payload)
-                                await central_hub.network.send_to_worker(
-                                    worker_id, "/cancel", payload, headers
-                                )
-                            except Exception:
-                                pass
-                raise
-            except Exception as e:
-                logger.error(f"[Distributed] Task '{task_id}' failed: {e}")
-                raise PipelineError(
-                    f"Task '{task_id}' failed on worker '{worker_id}': {e}"
-                )
-            finally:
-                pending_tasks.pop(task_id, None)
+                            raise PipelineError(
+                                f"No idle worker available for role '{role}' within {poll_timeout} seconds."
+                            )
+                        await asyncio.sleep(0.5)
+                try:
+                    return await _dispatch_once(worker_id)
+                except WorkerDisconnectedError as e:
+                    last_disconnect = e
+                    logger.warning(
+                        f"[Distributed] worker '{worker_id}' lost on attempt "
+                        f"{dispatch_attempt}/{max_dispatch} for role '{role}'; "
+                        f"re-dispatching to another worker"
+                    )
+                    continue
+            raise WorkerDisconnectedError(
+                f"All {max_dispatch} dispatch attempts for role '{role}' failed; "
+                f"last error: {last_disconnect}"
+            )
 
     req_payload = {"prompt": prompt, "context": context}
 
@@ -952,6 +1095,8 @@ async def call_api(
     config = load_config()
     secret = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
     req_checksum = calculate_checksum(req_payload, secret)
+    # GET /status has an empty body, so its checksum is over empty bytes.
+    get_checksum = calculate_checksum(b"", secret)
     payload_bytes = json.dumps(
         req_payload, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -971,20 +1116,36 @@ async def call_api(
                 return ""
         return ""
 
+    def _make_post_headers():
+        # Fresh jti per attempt (see _resolve_headers); the idempotency key is
+        # deliberately STABLE across retries so a re-sent /run after a lost
+        # response is deduplicated server-side instead of running twice.
+        post_token = encode_jwt(
+            {"sub": "orchestrator", "exp": time.time() + 300}, api_key
+        )
+        return {
+            "X-API-Key": post_token,
+            "Authorization": f"Bearer {post_token}",
+            "X-Payload-SHA256": req_checksum,
+            "Content-Type": "application/json",
+            "X-Idempotency-Key": idempotency_key,
+        }
+
+    def _make_get_headers():
+        poll_token = encode_jwt(
+            {"sub": "orchestrator", "exp": time.time() + 300}, api_key
+        )
+        return {
+            "X-Payload-SHA256": get_checksum,
+            "X-API-Key": poll_token,
+            "Authorization": f"Bearer {poll_token}",
+        }
+
     async def _execute(c):
         try:
             # 1. Start the run
-            post_payload = {"sub": "orchestrator", "exp": time.time() + 300}
-            post_token = encode_jwt(post_payload, api_key)
-            post_headers = {
-                "X-API-Key": post_token,
-                "Authorization": f"Bearer {post_token}",
-                "X-Payload-SHA256": req_checksum,
-                "Content-Type": "application/json",
-                "X-Idempotency-Key": idempotency_key,
-            }
             response = await perform_post_with_retry(
-                c, f"{base_url}/run", payload_bytes, post_headers
+                c, f"{base_url}/run", payload_bytes, _make_post_headers
             )
             res_data = response.json()
             task_id = res_data.get("task_id")
@@ -999,9 +1160,6 @@ async def call_api(
                 f"HTTP request to start task at {base_url}/run failed: {e}{detail}"
             )
 
-        # GET request has empty body, so checksum is of empty bytes
-        get_checksum = calculate_checksum(b"", secret)
-
         # 2. Poll for completion
         poll_start = time.time()
         while True:
@@ -1013,15 +1171,8 @@ async def call_api(
                     f"GENIUS_CLI_TIMEOUT."
                 )
             try:
-                poll_payload = {"sub": "orchestrator", "exp": time.time() + 300}
-                poll_token = encode_jwt(poll_payload, api_key)
-                get_headers = {
-                    "X-Payload-SHA256": get_checksum,
-                    "X-API-Key": poll_token,
-                    "Authorization": f"Bearer {poll_token}",
-                }
                 status_response = await perform_get_with_retry(
-                    c, f"{base_url}/status/{task_id}", get_headers
+                    c, f"{base_url}/status/{task_id}", _make_get_headers
                 )
                 status_data = status_response.json()
                 curr_status = status_data.get("status")
@@ -1059,7 +1210,7 @@ async def call_api(
             result = await _execute(local_client)
 
     if use_cache:
-        _cache_response(cache_key, result)
+        _cache_store(cache_key, result)
     return result
 
 
@@ -1247,7 +1398,7 @@ async def process_single_file(
                 created_by="codex",
                 parent_id=parent_art_id,
             )
-            codex_art_id = message_bus.publish(codex_art)
+            codex_art_id = await message_bus.publish_async(codex_art)
 
             # 2. Write code to projects/[project_name]/[file_path]
             try:
@@ -1386,7 +1537,7 @@ async def process_single_file(
                     created_by="tester",
                     parent_id=codex_art_id,
                 )
-                message_bus.publish(tester_art)
+                await message_bus.publish_async(tester_art)
 
                 security_art = Artifact(
                     name=f"audit_{file_path}",
@@ -1394,7 +1545,7 @@ async def process_single_file(
                     created_by="security",
                     parent_id=codex_art_id,
                 )
-                message_bus.publish(security_art)
+                await message_bus.publish_async(security_art)
 
                 # 4. Write debug/log files to disk
                 try:
@@ -1436,7 +1587,13 @@ async def process_single_file(
                         stderr=asyncio.subprocess.PIPE,
                         env=env,
                     )
-                    stdout, stderr = await process.communicate()
+                    # Bounded: a generated test with an infinite loop or a
+                    # blocking call would otherwise hang this file's task (and
+                    # the whole asyncio.gather fan-out) forever. On timeout the
+                    # process tree is killed and CLITimeoutError is caught below.
+                    stdout, stderr = await communicate_with_timeout(
+                        process, timeout=test_timeout(), cli_name="pytest"
+                    )
                     pytest_exit_code = process.returncode
                     test_failures_logs = (
                         stdout.decode("utf-8", errors="replace")
@@ -1458,7 +1615,18 @@ async def process_single_file(
             # output (crash, truncation, stripped result) — fail closed rather than
             # treating an absent audit as "clean". Test modules are exempt:
             # their audit is skipped by design.
-            tests_passed = pytest_exit_code == 0
+            # Exit 5 = "no tests were collected". For a directly-executed test
+            # module that is a support file (tests/__init__.py, conftest.py) or
+            # simply defines no test functions, that is NOT a failure — pytest
+            # can never make such a file exit 0, so treating 5 as failure loops
+            # the self-heal until it gives up and fails the whole pipeline (a
+            # DesignPlan listing tests/__init__.py used to guarantee that). Only
+            # relaxed for designer-provided test modules run directly; a
+            # generated test_<file>.py returning 5 still means the Tester failed.
+            PYTEST_NO_TESTS_COLLECTED = 5
+            tests_passed = pytest_exit_code == 0 or (
+                file_is_test and pytest_exit_code == PYTEST_NO_TESTS_COLLECTED
+            )
             security_missing = not file_is_test and not (
                 security_report and security_report.strip()
             )
@@ -1528,8 +1696,7 @@ async def run_pipeline(
     the research, design and code stages complete; it may pause (human
     approval) or raise to abort. None (the default) runs straight through.
     """
-    global DISTRIBUTED_MODE
-    DISTRIBUTED_MODE = distributed
+    _DISTRIBUTED_MODE_VAR.set(distributed)
 
     project_name, workspace, max_debate_rounds = _resolve_pipeline_setup(
         prompt, workspace, max_debate_rounds
@@ -1649,7 +1816,7 @@ async def run_pipeline(
             logger.info(
                 f"Step '{agent_key}' completed successfully via routing. Output: {output_file}"
             )
-            log_conversation(prompt, result)
+            await log_conversation_async(prompt, result)
             return result
 
         # Step 1: Research (agy/claude/codex fallback chain) - Call API
@@ -1685,7 +1852,7 @@ async def run_pipeline(
             )
 
         # Publish to MessageBus
-        research_art_id = message_bus.publish(
+        research_art_id = await message_bus.publish_async(
             Artifact(
                 name="research_data", content=research_content, created_by="researcher"
             )
@@ -1824,7 +1991,7 @@ async def run_pipeline(
                 logger.info(f"Debate Round {round_idx} End: Round complete.")
 
         # Publish Claude content to MessageBus
-        claude_art_id = message_bus.publish(
+        claude_art_id = await message_bus.publish_async(
             Artifact(
                 name="design_plan",
                 content=claude_content,
@@ -1843,8 +2010,12 @@ async def run_pipeline(
         if interactive:
             print(f"\n[Claude Design Output]\n{claude_content}\n")
             while True:
-                feedback = input(
-                    "Verify architecture. Press Enter to proceed or type modifications/comments: "
+                feedback = (
+                    await asyncio.to_thread(
+                        input,
+                        "Verify architecture. Press Enter to proceed or type "
+                        "modifications/comments: ",
+                    )
                 ).strip()
                 if not feedback:
                     break
@@ -1860,7 +2031,7 @@ async def run_pipeline(
                     poll_timeout=poll_timeout,
                 )
                 # Re-publish to MessageBus
-                claude_art_id = message_bus.publish(
+                claude_art_id = await message_bus.publish_async(
                     Artifact(
                         name="design_plan",
                         content=claude_content,
@@ -2003,7 +2174,7 @@ async def run_pipeline(
                 )
             else:
                 review_content = "All files successfully implemented and verified through self-healing loop."
-            review_art_id = message_bus.publish(
+            review_art_id = await message_bus.publish_async(
                 Artifact(
                     name="review_data",
                     content=review_content,
@@ -2023,7 +2194,7 @@ async def run_pipeline(
                 if aggregated_audits
                 else "Consolidated project implementation and testing passed."
             )
-            consolidated_art_id = message_bus.publish(
+            consolidated_art_id = await message_bus.publish_async(
                 Artifact(
                     name="consolidated_audit",
                     content=consolidated_audit,
@@ -2081,7 +2252,7 @@ async def run_pipeline(
                 )
 
             # Publish DevOps to MessageBus
-            message_bus.publish(
+            await message_bus.publish_async(
                 Artifact(
                     name="devops_deploy",
                     content=devops_content,
@@ -2104,7 +2275,7 @@ async def run_pipeline(
             logger.info(
                 "Pipeline executed successfully and all files implemented, verified, and deployed."
             )
-            log_conversation(prompt, devops_content)
+            await log_conversation_async(prompt, devops_content)
             return devops_content
 
         # LEGACY single-file fallback — PYTEST-ONLY compatibility path. In
@@ -2217,7 +2388,7 @@ async def run_pipeline(
                 app_content = f.read()
         except Exception:
             app_content = ""
-        app_art_id = message_bus.publish(
+        app_art_id = await message_bus.publish_async(
             Artifact(
                 name="app_code",
                 content=app_content,
@@ -2248,7 +2419,7 @@ async def run_pipeline(
         )
 
         # Publish Codex review to MessageBus
-        codex_art_id = message_bus.publish(
+        codex_art_id = await message_bus.publish_async(
             Artifact(
                 name="review_data",
                 content=codex_content,
@@ -2312,7 +2483,7 @@ async def run_pipeline(
         )
 
         # Publish to MessageBus
-        message_bus.publish(
+        await message_bus.publish_async(
             Artifact(
                 name="test_code",
                 content=tester_content,
@@ -2320,7 +2491,7 @@ async def run_pipeline(
                 parent_id=codex_art_id,
             )
         )
-        message_bus.publish(
+        await message_bus.publish_async(
             Artifact(
                 name="security_audit",
                 content=security_content,
@@ -2328,7 +2499,7 @@ async def run_pipeline(
                 parent_id=codex_art_id,
             )
         )
-        message_bus.publish(
+        await message_bus.publish_async(
             Artifact(
                 name="devops_deploy",
                 content=devops_content,
@@ -2383,7 +2554,7 @@ async def run_pipeline(
         logger.info(
             "Pipeline executed successfully and all intermediate files verified."
         )
-        log_conversation(prompt, devops_content)
+        await log_conversation_async(prompt, devops_content)
     finally:
         await client.aclose()
 
@@ -2406,8 +2577,7 @@ async def run_e2e_pipeline(
     distributed: bool = False,
 ):
     """Execute the E2E automated pipeline (Claude -> critic critique -> Codex implementation & self-healing -> Tester test generation & self-healing)."""
-    global DISTRIBUTED_MODE
-    DISTRIBUTED_MODE = distributed
+    _DISTRIBUTED_MODE_VAR.set(distributed)
 
     project_name, workspace, max_debate_rounds = _resolve_pipeline_setup(
         prompt, workspace, max_debate_rounds
@@ -2562,7 +2732,19 @@ async def run_e2e_pipeline(
         # Parse plan for files
         files_to_implement = parse_design_for_files(claude_content)
         if not files_to_implement:
-            logger.info("No files parsed from plan.md. Nothing to implement.")
+            # A plan with no parseable files means nothing gets implemented.
+            # Returning the plan text as a "successful" result silently exits 0
+            # having built nothing (a prose answer from the architect did exactly
+            # that in a real run). Fail loudly in production; keep the legacy
+            # return under pytest, where design self-heal is off and fixtures
+            # rely on it (same convention as run_pipeline).
+            logger.warning("No files parsed from plan.md. Nothing to implement.")
+            if design_selfheal_enabled():
+                raise PipelineError(
+                    "E2E design produced no implementable files — the architect "
+                    "response was not a parseable plan. Refine the prompt or "
+                    "re-run."
+                )
             return claude_content
 
         logger.info(
@@ -2670,9 +2852,18 @@ async def run_e2e_pipeline(
                         [project_dir, project_src_dir, env.get("PYTHONPATH", "")]
                     ).strip(os.path.pathsep)
 
-                    # Check lint with flake8
-                    flake8_cmd = [sys.executable, "-m", "flake8", target_file_path]
-                    flake8_code, flake8_out = await run_subprocess(flake8_cmd, env=env)
+                    # Check lint with flake8 — Python files only. A non-.py
+                    # target (README.md, Dockerfile, JSON, ...) linted as Python
+                    # yields a spurious E999 SyntaxError that fails every attempt
+                    # and dooms the whole e2e run; its content is written as-is.
+                    file_is_python = target_file_path.endswith(".py")
+                    if file_is_python:
+                        flake8_cmd = [sys.executable, "-m", "flake8", target_file_path]
+                        flake8_code, flake8_out = await run_subprocess(
+                            flake8_cmd, env=env
+                        )
+                    else:
+                        flake8_code, flake8_out = 0, ""
                     # flake8 is only a dev dependency; if it's not installed, don't
                     # treat its absence as a lint failure that fails every attempt.
                     if flake8_code != 0 and "No module named flake8" in flake8_out:
@@ -2687,7 +2878,7 @@ async def run_e2e_pipeline(
                     # file, so a sibling's not-yet-implemented or mid-write test
                     # would fail our verification non-deterministically. Each
                     # sibling's test is verified by its own task.
-                    if os.path.exists(test_file_path):
+                    if file_is_python and os.path.exists(test_file_path):
                         pytest_cmd = [sys.executable, "-m", "pytest", test_file_path]
                         pytest_code, pytest_out = await run_subprocess(
                             pytest_cmd, env=env

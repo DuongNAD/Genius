@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sqlite3
 import queue
@@ -5,15 +6,20 @@ import threading
 from contextlib import contextmanager
 from ag_core.utils.logger import logger
 
-DB_PATH = os.environ.get(
-    "GENIUS_DB_PATH",
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "genius.db")),
+# `or` (not a get() default) so the blank GENIUS_DB_PATH shipped in
+# .env.example (and put into os.environ as "" by python-dotenv) falls back to
+# the in-repo default. sqlite3.connect("") opens a fresh temporary database
+# per connection, so tables created by init_db would be invisible to every
+# later connection (e.g. the seen_jtis anti-replay table used by decode_jwt).
+_DEFAULT_DB_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "genius.db")
 )
+DB_PATH = os.environ.get("GENIUS_DB_PATH") or _DEFAULT_DB_PATH
 
 
 def get_db_path() -> str:
     """Dynamically resolves the DB_PATH from the environment or module-level fallback."""
-    return os.environ.get("GENIUS_DB_PATH", DB_PATH)
+    return os.environ.get("GENIUS_DB_PATH") or DB_PATH or _DEFAULT_DB_PATH
 
 
 def init_db():
@@ -260,3 +266,11 @@ def log_conversation(prompt: str, result: str):
         _submit_write(_log_conversation_impl, prompt, result)
     except Exception as e:
         logger.error(f"Error logging conversation: {e}")
+
+
+async def log_conversation_async(prompt: str, result: str):
+    """Async wrapper for :func:`log_conversation`. The underlying write blocks
+    on the single SQLite writer thread; offload it to a worker thread so async
+    pipeline code doesn't stall the event loop (and, in --auto-pilot where the
+    servers share the loop, every skill server with it)."""
+    await asyncio.to_thread(log_conversation, prompt, result)

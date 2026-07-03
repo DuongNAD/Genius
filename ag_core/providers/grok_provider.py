@@ -25,6 +25,35 @@ logger = logging.getLogger("ag_core")
 _LOGIN_ATTEMPTED = False
 
 
+def _skip_grok_login() -> bool:
+    """Whether to skip the auto ``grok login``.
+
+    Set ``GENIUS_GROK_SKIP_LOGIN=1`` when grok is ALREADY authenticated via the
+    CLI (``grok login`` done once by hand): the auto-login re-runs ``grok login``
+    with ``stdin=DEVNULL`` on the first task of every worker process, which — for
+    a session/OAuth CLI — just re-prompts for login and blocks until timeout,
+    even though the real call would have used the existing session fine.
+    """
+    return os.getenv("GENIUS_GROK_SKIP_LOGIN", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _grok_model() -> str:
+    """Model to pass to the Grok CLI via ``-m`` (headless Grok Build syntax).
+
+    Empty by default, so no ``-m`` flag is added and the Grok CLI uses its own
+    configured default model. Grok model ids are account- and CLI-version
+    specific (an unknown id fails the whole call with "unknown model id"), so
+    pin one explicitly via ``GENIUS_GROK_MODEL`` (e.g. ``grok-composer-2.5-fast``)
+    rather than hardcoding a default that may not exist on a given install.
+    """
+    return os.getenv("GENIUS_GROK_MODEL", "").strip()
+
+
 @memoize_cli_path
 def resolve_grok_cli() -> str:
     """Resolve the real Grok CLI path, never the bundled repo wrapper.
@@ -124,7 +153,7 @@ class GrokProvider(BaseProvider):
 
             cli_path = resolve_grok_cli()
 
-            if not self.api_key:
+            if not self.api_key and not _skip_grok_login():
                 await self._maybe_login(cli_path)
 
             temp_file_path = None
@@ -133,17 +162,22 @@ class GrokProvider(BaseProvider):
                 # `-p <prompt>` argument goes through cmd.exe on Windows,
                 # which interprets `&|<>^%` and newlines in LLM-generated
                 # prompt text (garbling/injection) and hits the command-line
-                # length limit. The system prompt is embedded into the same
-                # file (marker sections, like the agy provider) instead of a
-                # --system-prompt-override argv element, for the same reason:
-                # model-generated text must never reach cmd.exe parsing.
-                payload = prompt
+                # length limit.
+                # Fold the system prompt into the file too. Passing it as a
+                # --system-prompt-override argv element has the same Windows
+                # cmd.exe problem the prompt itself avoids: on a .cmd shim the
+                # text is truncated at the first newline and &|<>^% is
+                # interpreted, silently dropping most of the system contract.
+                file_content = prompt
                 if sys_prompt:
-                    payload = f"[System instructions]\n{sys_prompt}\n\n[Task]\n{prompt}"
+                    file_content = (
+                        f"[SYSTEM INSTRUCTIONS]\n{sys_prompt}\n\n"
+                        f"[USER REQUEST]\n{prompt}"
+                    )
                 with tempfile.NamedTemporaryFile(
                     mode="w", suffix=".txt", delete=False, encoding="utf-8"
                 ) as f:
-                    f.write(payload)
+                    f.write(file_content)
                     temp_file_path = f.name
                 cmd = [
                     cli_path,
@@ -153,7 +187,19 @@ class GrokProvider(BaseProvider):
                     "json",
                 ]
 
-                session_id = extra.pop("session_id", None)
+                # Pin the model with ``-m`` when GENIUS_GROK_MODEL is set (no
+                # flag by default → the CLI's own default model). Appended AFTER
+                # the base args so cmd[1] stays "--prompt-file" (the login-vs-
+                # prompt call is told apart by cmd[1]).
+                model = _grok_model()
+                if model:
+                    cmd.extend(["-m", model])
+
+                session_id = (
+                    extra.pop("session_id", None)
+                    or kwargs.get("session_id")
+                    or self.extra_params.get("session_id")
+                )
                 if session_id:
                     cmd.extend(["--session-id", str(session_id)])
 
@@ -193,11 +239,33 @@ class GrokProvider(BaseProvider):
                     f"stderr tail: {tail_text(stderr_str)}"
                 )
 
-            content = res_json.get("result", "")
+            # Grok CLI builds disagree on the answer key. The older "build" CLI
+            # returns {"result": ...}; the current xAI Grok CLI returns
+            # {"text": ..., "stopReason": ..., "sessionId": ..., "thought": ...}
+            # — where "thought" is the model's internal reasoning and MUST NOT
+            # leak into the answer. Try the known answer keys in priority order.
+            # (An error-shaped payload was already handled above, so "message"
+            # is deliberately not treated as an answer key here.)
+            content = ""
+            for key in ("result", "text", "response", "output"):
+                val = res_json.get(key)
+                if val:
+                    content = val if isinstance(val, str) else str(val)
+                    break
+            if not content:
+                # Some Grok CLI builds/modes ignore --output-format json and just
+                # print the answer as plain text (no JSON envelope at all). On a
+                # clean exit (returncode 0, checked above) treat the raw stdout as
+                # the answer rather than discarding a valid non-JSON response —
+                # but only when it decoded CLEANLY: undecodable/binary output
+                # (U+FFFD replacement chars or NUL bytes) is corruption, not an
+                # answer, and must still surface as an error.
+                if stdout_str and "�" not in stdout_str and "\x00" not in stdout_str:
+                    content = stdout_str
             if not content:
                 raise RuntimeError(
-                    "Grok CLI produced no result (output was empty or not the "
-                    "expected JSON envelope). "
+                    "Grok CLI produced no result (output was empty, undecodable, "
+                    "or not the expected JSON envelope). "
                     f"stdout tail: {tail_text(stdout_str)} | "
                     f"stderr tail: {tail_text(stderr_str)}"
                 )

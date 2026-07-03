@@ -229,7 +229,11 @@ class FallbackProvider:
                 result = await provider.send_prompt(*args, **kwargs)
             except (asyncio.CancelledError, KeyboardInterrupt):
                 raise
-            except RuntimeError as exc:  # includes CLITimeoutError
+            except (RuntimeError, OSError) as exc:
+                # RuntimeError includes CLITimeoutError; OSError (e.g.
+                # FileNotFoundError when a backend's CLI path is wrong or the
+                # binary isn't installed) previously escaped the chain and
+                # failed the stage even when a healthy fallback backend existed.
                 last_exc = exc
                 remaining = [self._backends[i][0] for i in order[pos + 1 :]]
                 if remaining:

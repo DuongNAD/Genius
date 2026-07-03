@@ -9,7 +9,7 @@ import traceback
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
-from ag_core.utils.jwt import decode_jwt
+from ag_core.utils.jwt import decode_jwt, jwt_max_lifetime
 
 # Add project root to sys.path
 root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -151,9 +151,9 @@ worker_registry = WorkerRegistry()
 
 
 async def prune_stale_workers(timeout_sec: float = 30.0, check_interval: float = 5.0):
-    try:
-        central_hub.config["heartbeat_timeout"] = timeout_sec
-        while True:
+    central_hub.config["heartbeat_timeout"] = timeout_sec
+    while True:
+        try:
             await asyncio.sleep(check_interval)
             await central_hub.sweep()
             for task_id, fut in list(pending_tasks.items()):
@@ -183,10 +183,17 @@ async def prune_stale_workers(timeout_sec: float = 30.0, check_interval: float =
                                 fut.set_exception(WorkerDisconnectedError(error_msg))
                             else:
                                 fut.set_exception(ValueError(error_msg))
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        pass
+        except asyncio.CancelledError:
+            # Shutdown: propagate so the task actually stops.
+            raise
+        except Exception:
+            # One bad sweep must not kill the pruner for the process lifetime;
+            # log and keep looping so future stale workers still get swept.
+            print(
+                "[Hub] prune_stale_workers: sweep iteration failed",
+                file=sys.stderr,
+            )
+            traceback.print_exc()
 
 
 @asynccontextmanager
@@ -260,7 +267,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         await websocket.close(code=4001)
         return
     try:
-        payload = decode_jwt(token, secret)
+        # decode_jwt records the token's jti in the anti-replay table via the
+        # single blocking SQLite writer thread. Offload it so a DB-contended
+        # write can't freeze the hub event loop mid-handshake — which would
+        # stall heartbeat processing and the sweeper and trigger spurious
+        # worker eviction (and, in --auto-pilot, freeze every skill server too).
+        payload = await asyncio.to_thread(
+            decode_jwt,
+            token,
+            secret,
+            require_exp=True,
+            max_lifetime=jwt_max_lifetime(),
+        )
         worker_id_from_jwt = payload.get("sub") or payload.get("worker_id")
     except Exception:
         await websocket.accept()
@@ -397,23 +415,33 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             await worker_registry.unregister(registered_worker_id, websocket)
 
 
-def bind_host(default: str = "127.0.0.1") -> str:
-    """Bind address for the servers this process starts.
-
-    Agent skill servers and the dashboard are only ever addressed via the
-    localhost URLs in config.yaml, so they default to loopback; the hub
-    passes default="0.0.0.0" because remote LAN workers must reach it.
-    ``GENIUS_BIND_HOST`` overrides both (blank = unset).
-    """
-    return os.environ.get("GENIUS_BIND_HOST") or default
-
-
 async def start_hub_server(port: int):
-    config = uvicorn.Config(
-        app, host=bind_host("0.0.0.0"), port=port, log_level="info", ws="auto"
+    # Default 0.0.0.0 (the hub is auth-protected and Docker maps its port);
+    # `or` so a blank GENIUS_HUB_HOST from .env is treated as unset. Set
+    # GENIUS_HUB_HOST=127.0.0.1 to restrict it to loopback on bare metal.
+    # The specific env wins over GENIUS_BIND_HOST (generic, all servers).
+    hub_host = (
+        os.environ.get("GENIUS_HUB_HOST")
+        or os.environ.get("GENIUS_BIND_HOST")
+        or "0.0.0.0"
     )
+    config = uvicorn.Config(app, host=hub_host, port=port, log_level="info", ws="auto")
     server = uvicorn.Server(config)
-    await server.serve()
+    # Drive the lifecycle manually (startup -> main_loop -> shutdown) instead of
+    # server.serve(): serve() installs uvicorn's own SIGINT/SIGTERM handlers,
+    # which swallow the FIRST Ctrl+C to gracefully stop only the hub while the
+    # manually-driven agent servers (start_server) keep running until a second
+    # Ctrl+C. Without those handlers, SIGINT propagates to asyncio.run and
+    # main_async's finally cancels every server task at once. Mirrors
+    # start_server's manual lifecycle.
+    if not config.loaded:
+        config.load()
+    server.lifespan = config.lifespan_class(config)
+    await server.startup()
+    try:
+        await server.main_loop()
+    finally:
+        await server.shutdown()
 
 
 ROUTING_TABLE = {
@@ -575,6 +603,44 @@ def _server_task_crash(server_tasks):
     return None
 
 
+async def wait_for_hub_ready(hub_port: int, server_tasks=(), timeout=None):
+    """Wait until the central hub is accepting connections before proceeding.
+
+    The hub exposes no ``GET /health`` (only an authenticated catch-all POST
+    and the ``/ws/connect`` upgrade), so readiness is probed at the TCP level:
+    a successful connection means uvicorn finished startup and is listening.
+    Without this, ``serve.py --distributed --prompt`` launched the orchestrator
+    pipeline before the hub was up and the first dispatch died with "All
+    connection attempts failed". Raises RuntimeError on deadline or as soon as
+    the hub server task has crashed.
+    """
+    if timeout is None:
+        timeout = _startup_timeout()
+    deadline = time.time() + timeout
+    while True:
+        crash = _server_task_crash(server_tasks)
+        if crash is not None:
+            raise RuntimeError(
+                f"The hub server task crashed during startup: {crash!r}"
+            ) from crash
+        try:
+            _, writer = await asyncio.open_connection("127.0.0.1", hub_port)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return
+        except (ConnectionRefusedError, OSError):
+            pass
+        if time.time() > deadline:
+            raise RuntimeError(
+                f"Central hub on port {hub_port} did not become ready within "
+                f"{timeout:.0f}s"
+            )
+        await asyncio.sleep(0.1)
+
+
 async def wait_for_servers_ready(agent_ports: dict, server_tasks=(), timeout=None):
     """Poll each launched agent server's ``GET /health`` until it answers 200.
 
@@ -668,9 +734,18 @@ async def start_server(role: str, port: int):
     app = get_api_app(role)
 
     def _make_server(bind_port: int) -> uvicorn.Server:
+        # Default 0.0.0.0 (skill servers are JWT-protected and Docker maps
+        # their ports); `or` so a blank GENIUS_SKILL_HOST is treated as unset.
+        # Set GENIUS_SKILL_HOST=127.0.0.1 to keep them on loopback on bare
+        # metal. The specific env wins over GENIUS_BIND_HOST (generic).
+        skill_host = (
+            os.environ.get("GENIUS_SKILL_HOST")
+            or os.environ.get("GENIUS_BIND_HOST")
+            or "0.0.0.0"
+        )
         config = uvicorn.Config(
             app,
-            host=bind_host(),
+            host=skill_host,
             port=bind_port,
             log_level="info",
             ws="auto",
@@ -773,6 +848,15 @@ async def main_async():
         help="Port to run the central hub service on",
     )
     parser.add_argument(
+        "--keep-alive",
+        action="store_true",
+        help=(
+            "After the orchestrator pipeline finishes (or fails), keep the hub "
+            "and servers running instead of shutting down — so distributed "
+            "workers stay connected and more jobs can run. Ctrl+C to stop."
+        ),
+    )
+    parser.add_argument(
         "--doctor",
         action="store_true",
         help="Run preflight checks (CLI resolution, auth, SKILL_API_KEY) and exit",
@@ -788,6 +872,7 @@ async def main_async():
     auto_pilot = getattr(args, "auto_pilot", False) is True
     interactive = getattr(args, "interactive", False) is True
     distributed = getattr(args, "distributed", False) is True
+    keep_alive = getattr(args, "keep_alive", False) is True
 
     global IS_DISTRIBUTED
     IS_DISTRIBUTED = distributed
@@ -863,6 +948,13 @@ async def main_async():
                 await asyncio.sleep(0)
             else:
                 try:
+                    if distributed:
+                        # Distributed dispatch calls the hub before any agent
+                        # server; wait for it to listen or the first /workers
+                        # POST dies with "All connection attempts failed".
+                        print("Waiting for central hub to become ready...")
+                        await wait_for_hub_ready(args.hub_port, server_tasks)
+                        print("Central hub is ready.")
                     print("Waiting for API servers to become ready...")
                     await wait_for_servers_ready(agent_ports, server_tasks)
                     print("All requested agent servers are ready.")
@@ -891,7 +983,9 @@ async def main_async():
                     await asyncio.gather(*server_tasks, return_exceptions=True)
                 return
             try:
-                prompt = input("Enter prompt for orchestrator: ").strip()
+                prompt = (
+                    await asyncio.to_thread(input, "Enter prompt for orchestrator: ")
+                ).strip()
             except KeyboardInterrupt:
                 print("\nExiting.")
                 return
@@ -923,7 +1017,7 @@ async def main_async():
             print(f"Orchestrator pipeline failed: {e}")
             pipeline_failed = True
         finally:
-            if pipeline_run:
+            if pipeline_run and not keep_alive:
                 for task in server_tasks:
                     task.cancel()
                 if server_tasks:
@@ -933,6 +1027,17 @@ async def main_async():
                     # auto-pilot cannot exit 0 on a failed pipeline.
                     raise SystemExit(1)
                 return
+            elif pipeline_run and keep_alive:
+                # A finished OR failed pipeline must NOT take the hub down with
+                # it when --keep-alive is set: leave the servers running and fall
+                # through to the persistent loop below, so distributed workers
+                # stay connected (no more WinError 1225 / connection-refused) and
+                # further jobs can run.
+                print(
+                    "Pipeline "
+                    + ("FAILED" if pipeline_failed else "completed")
+                    + "; keeping hub/servers up (--keep-alive). Press Ctrl+C to stop."
+                )
 
     # If we started servers, we await them to run continuously
     if server_tasks:
@@ -957,4 +1062,13 @@ def main():
 
 
 if __name__ == "__main__":
+    # Launched as `python serve.py`, this module is registered as "__main__".
+    # The orchestrator later runs `from serve import worker_registry,
+    # central_hub, pending_tasks` at dispatch time; without this alias Python
+    # re-imports and RE-EXECUTES serve.py as a separate "serve" module with its
+    # own empty CentralHub, so the in-process registry the orchestrator reads is
+    # always empty (the distributed in-memory fast path is unreachable) and the
+    # dashboard's worker view is permanently blank. Alias so `import serve`
+    # returns this same, already-initialized running module.
+    sys.modules["serve"] = sys.modules[__name__]
     main()
