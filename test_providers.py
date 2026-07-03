@@ -416,7 +416,7 @@ def test_grok_provider_success():
             args = captured["args"]
             assert args[0] == "/usr/local/bin/grok"
             assert args[1] == "--prompt-file"
-            assert args[3:] == ("--output-format", "json", "-m", "composer-2.5-fast")
+            assert args[3:] == ("--output-format", "json")
             assert captured["prompt"] == "Test prompt"
 
     asyncio.run(run_test())
@@ -461,12 +461,7 @@ def test_grok_provider_login_when_no_key():
             second_args, second_kwargs = mock_exec.call_args_list[1]
             assert second_args[0] == "/usr/local/bin/grok"
             assert second_args[1] == "--prompt-file"
-            assert second_args[3:] == (
-                "--output-format",
-                "json",
-                "-m",
-                "composer-2.5-fast",
-            )
+            assert second_args[3:] == ("--output-format", "json")
 
     asyncio.run(run_test())
 
@@ -715,13 +710,11 @@ def _grok_invocation_cmd(env_overrides):
     return asyncio.run(run())
 
 
-def test_grok_provider_model_flag_defaults_to_composer():
-    # With GENIUS_GROK_MODEL unset, the CLI is pinned to Composer 2.5 Fast.
+def test_grok_provider_no_model_flag_by_default():
+    # With GENIUS_GROK_MODEL unset, no -m flag is added — the Grok CLI uses its
+    # own configured default model (grok model ids are install-specific).
     cmd = _grok_invocation_cmd({})
-    assert "-m" in cmd
-    assert cmd[cmd.index("-m") + 1] == "composer-2.5-fast"
-    # The -m flag must be APPENDED, not injected at position 1, so the
-    # login-vs-prompt call is still told apart by cmd[1].
+    assert "-m" not in cmd
     assert cmd[1] == "--prompt-file"
 
 
