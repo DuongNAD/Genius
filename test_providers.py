@@ -402,6 +402,7 @@ def test_grok_provider_success():
             patch.dict("os.environ", {"GROK_API_KEY": "fake_key"}),
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
         ):
+            os.environ.pop("GENIUS_GROK_MODEL", None)
             provider = GrokProvider()
             response = await provider.send_prompt("Test prompt")
 
@@ -415,7 +416,7 @@ def test_grok_provider_success():
             args = captured["args"]
             assert args[0] == "/usr/local/bin/grok"
             assert args[1] == "--prompt-file"
-            assert args[3:] == ("--output-format", "json")
+            assert args[3:] == ("--output-format", "json", "-m", "composer-2.5-fast")
             assert captured["prompt"] == "Test prompt"
 
     asyncio.run(run_test())
@@ -460,7 +461,12 @@ def test_grok_provider_login_when_no_key():
             second_args, second_kwargs = mock_exec.call_args_list[1]
             assert second_args[0] == "/usr/local/bin/grok"
             assert second_args[1] == "--prompt-file"
-            assert second_args[3:] == ("--output-format", "json")
+            assert second_args[3:] == (
+                "--output-format",
+                "json",
+                "-m",
+                "composer-2.5-fast",
+            )
 
     asyncio.run(run_test())
 
@@ -679,6 +685,55 @@ def test_grok_provider_empty_stdout_raises():
         assert "stderr blob" in str(exc_info.value)
 
     asyncio.run(run_test())
+
+
+def _grok_invocation_cmd(env_overrides):
+    """Run send_prompt with a mocked CLI and return the argv passed to it."""
+
+    async def run():
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (
+            json.dumps({"result": "ok"}).encode(),
+            b"",
+        )
+        with (
+            patch("shutil.which", return_value="/usr/local/bin/grok"),
+            patch.dict("os.environ", {"GROK_API_KEY": "fake_key"}),
+            patch(
+                "asyncio.create_subprocess_exec", new_callable=AsyncMock
+            ) as mock_exec,
+        ):
+            os.environ.pop("GENIUS_GROK_MODEL", None)
+            os.environ.update(env_overrides)
+            mock_exec.return_value = mock_process
+            provider = GrokProvider()
+            await provider.send_prompt("Test prompt")
+            args, _kwargs = mock_exec.call_args
+            return list(args)
+
+    return asyncio.run(run())
+
+
+def test_grok_provider_model_flag_defaults_to_composer():
+    # With GENIUS_GROK_MODEL unset, the CLI is pinned to Composer 2.5 Fast.
+    cmd = _grok_invocation_cmd({})
+    assert "-m" in cmd
+    assert cmd[cmd.index("-m") + 1] == "composer-2.5-fast"
+    # The -m flag must be APPENDED, not injected at position 1, so the
+    # login-vs-prompt call is still told apart by cmd[1].
+    assert cmd[1] == "--prompt-file"
+
+
+def test_grok_provider_model_flag_override_via_env():
+    cmd = _grok_invocation_cmd({"GENIUS_GROK_MODEL": "grok-code-fast-1"})
+    assert cmd[cmd.index("-m") + 1] == "grok-code-fast-1"
+
+
+def test_grok_provider_empty_model_env_adds_no_flag():
+    # An explicit empty value falls back to the CLI's own default (no -m).
+    cmd = _grok_invocation_cmd({"GENIUS_GROK_MODEL": ""})
+    assert "-m" not in cmd
 
 
 def test_grok_provider_json_with_noise_banner_still_parses():
