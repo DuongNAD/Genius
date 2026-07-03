@@ -256,15 +256,27 @@ class GrokProvider(BaseProvider):
                     f"stderr tail: {tail_text(stderr_str)}"
                 )
 
-            content = res_json.get("result", "")
+            # Grok CLI builds disagree on the answer key. The older "build" CLI
+            # returns {"result": ...}; the current xAI Grok CLI returns
+            # {"text": ..., "stopReason": ..., "sessionId": ..., "thought": ...}
+            # — where "thought" is the model's internal reasoning and MUST NOT
+            # leak into the answer. Try the known answer keys in priority order.
+            # (An error-shaped payload was already handled above, so "message"
+            # is deliberately not treated as an answer key here.)
+            content = ""
+            for key in ("result", "text", "response", "output"):
+                val = res_json.get(key)
+                if val:
+                    content = val if isinstance(val, str) else str(val)
+                    break
             if not content:
                 # Some Grok CLI builds/modes ignore --output-format json and just
-                # print the answer as plain text (no {"result": ...} envelope).
-                # On a clean exit (returncode 0, checked above) treat the raw
-                # stdout as the answer rather than discarding a valid non-JSON
-                # response — but only when it decoded CLEANLY: undecodable/binary
-                # output (U+FFFD replacement chars or NUL bytes) is corruption,
-                # not an answer, and must still surface as an error.
+                # print the answer as plain text (no JSON envelope at all). On a
+                # clean exit (returncode 0, checked above) treat the raw stdout as
+                # the answer rather than discarding a valid non-JSON response —
+                # but only when it decoded CLEANLY: undecodable/binary output
+                # (U+FFFD replacement chars or NUL bytes) is corruption, not an
+                # answer, and must still surface as an error.
                 if stdout_str and "�" not in stdout_str and "\x00" not in stdout_str:
                     content = stdout_str
             if not content:

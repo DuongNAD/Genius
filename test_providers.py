@@ -620,6 +620,43 @@ def test_grok_provider_plain_text_stdout_used_as_content():
     asyncio.run(run_test())
 
 
+def test_grok_provider_text_key_envelope_extracts_answer_only():
+    # The current xAI Grok CLI returns {"text": ..., "stopReason": ...,
+    # "sessionId": ..., "thought": ...} instead of {"result": ...}. The answer
+    # lives in "text"; "thought" (internal reasoning) and the ids must NOT leak
+    # into the content.
+    async def run_test():
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        envelope = json.dumps(
+            {
+                "text": "Python la ngon ngu lap trinh bac cao.",
+                "stopReason": "EndTurn",
+                "sessionId": "019f270f-370e-7c11-9139-2c10da3934ce",
+                "requestId": "e5630313-b27a-482b-9fbe-580590f6f16a",
+                "thought": "The user is asking a simple question in Vietnamese.",
+            }
+        )
+
+        with (
+            patch("shutil.which", return_value="/usr/local/bin/grok"),
+            patch.dict("os.environ", {"GROK_API_KEY": "fake_key"}),
+            patch(
+                "asyncio.create_subprocess_exec", new_callable=AsyncMock
+            ) as mock_exec,
+        ):
+            mock_exec.return_value = mock_process
+            mock_process.communicate.return_value = (envelope.encode(), b"")
+            provider = GrokProvider()
+            result = await provider.send_prompt("Test prompt")
+
+        assert result["content"] == "Python la ngon ngu lap trinh bac cao."
+        assert "thought" not in result["content"]
+        assert "sessionId" not in result["content"]
+
+    asyncio.run(run_test())
+
+
 def test_grok_provider_empty_stdout_raises():
     # A clean exit with NO output is still an error — there is nothing to return.
     async def run_test():
