@@ -1080,4 +1080,15 @@ if __name__ == "__main__":
     # dashboard's worker view is permanently blank. Alias so `import serve`
     # returns this same, already-initialized running module.
     sys.modules["serve"] = sys.modules[__name__]
+    # mac branch: uvloop as the event loop for the hub + agent servers.
+    # serve.py owns its loop via asyncio.run (uvicorn's loop="auto" only
+    # applies when uvicorn owns startup), so install the policy explicitly.
+    # Guarded: uvloop has no Windows build, and its absence must never stop
+    # the servers from booting.
+    try:
+        import uvloop
+
+        uvloop.install()
+    except ImportError:
+        pass
     main()

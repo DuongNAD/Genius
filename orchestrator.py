@@ -3251,4 +3251,11 @@ def main():
 run_pipeline_async = run_pipeline
 
 if __name__ == "__main__":
+    # mac branch: faster event loop for the CLI pipeline run (see serve.py).
+    try:
+        import uvloop
+
+        uvloop.install()
+    except ImportError:
+        pass
     main()

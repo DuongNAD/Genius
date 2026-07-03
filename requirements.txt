@@ -19,3 +19,8 @@ pytest-asyncio==1.4.0
 # Per-test hang backstop (see pytest.ini `timeout`): a wedged WS/subprocess
 # test must fail with stack dumps instead of hanging CI forever.
 pytest-timeout==2.4.0
+# mac-branch divergence: uvloop event loop for the hub/agent servers and the
+# CLI pipeline (installed via guarded uvloop.install() in serve.py /
+# orchestrator.py; uvicorn.run entrypoints pick it up automatically).
+# No Windows build exists — do NOT carry this line to the win branch.
+uvloop==0.21.0
