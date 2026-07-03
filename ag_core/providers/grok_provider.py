@@ -44,11 +44,13 @@ def _skip_grok_login() -> bool:
 def _grok_model() -> str:
     """Model to pass to the Grok CLI via ``-m`` (headless Grok Build syntax).
 
-    Defaults to ``composer-2.5-fast`` (the CLI's "Composer 2.5 Fast"). Override
-    with ``GENIUS_GROK_MODEL``; set it to an empty string to add no ``-m`` flag
-    at all and let the Grok CLI use its own configured default model.
+    Empty by default, so no ``-m`` flag is added and the Grok CLI uses its own
+    configured default model. Grok model ids are account- and CLI-version
+    specific (an unknown id fails the whole call with "unknown model id"), so
+    pin one explicitly via ``GENIUS_GROK_MODEL`` (e.g. ``grok-composer-2.5-fast``)
+    rather than hardcoding a default that may not exist on a given install.
     """
-    return os.getenv("GENIUS_GROK_MODEL", "composer-2.5-fast").strip()
+    return os.getenv("GENIUS_GROK_MODEL", "").strip()
 
 
 def resolve_grok_cli() -> str:
@@ -205,9 +207,10 @@ class GrokProvider(BaseProvider):
                     "json",
                 ]
 
-                # Pin the model with ``-m`` (defaults to Composer 2.5 Fast).
-                # Appended AFTER the base args so cmd[1] stays "--prompt-file"
-                # (the login-vs-prompt call is told apart by cmd[1]).
+                # Pin the model with ``-m`` when GENIUS_GROK_MODEL is set (no
+                # flag by default → the CLI's own default model). Appended AFTER
+                # the base args so cmd[1] stays "--prompt-file" (the login-vs-
+                # prompt call is told apart by cmd[1]).
                 model = _grok_model()
                 if model:
                     cmd.extend(["-m", model])
