@@ -24,6 +24,23 @@ logger = logging.getLogger("ag_core")
 _LOGIN_ATTEMPTED = False
 
 
+def _skip_grok_login() -> bool:
+    """Whether to skip the auto ``grok login``.
+
+    Set ``GENIUS_GROK_SKIP_LOGIN=1`` when grok is ALREADY authenticated via the
+    CLI (``grok login`` done once by hand): the auto-login re-runs ``grok login``
+    with ``stdin=DEVNULL`` on the first task of every worker process, which — for
+    a session/OAuth CLI — just re-prompts for login and blocks until timeout,
+    even though the real call would have used the existing session fine.
+    """
+    return os.getenv("GENIUS_GROK_SKIP_LOGIN", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def resolve_grok_cli() -> str:
     """Resolve the real Grok CLI path, never the bundled repo wrapper.
 
@@ -144,7 +161,7 @@ class GrokProvider(BaseProvider):
 
             cli_path = resolve_grok_cli()
 
-            if not self.api_key:
+            if not self.api_key and not _skip_grok_login():
                 await self._maybe_login(cli_path)
 
             temp_file_path = None
