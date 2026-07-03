@@ -258,9 +258,19 @@ class GrokProvider(BaseProvider):
 
             content = res_json.get("result", "")
             if not content:
+                # Some Grok CLI builds/modes ignore --output-format json and just
+                # print the answer as plain text (no {"result": ...} envelope).
+                # On a clean exit (returncode 0, checked above) treat the raw
+                # stdout as the answer rather than discarding a valid non-JSON
+                # response — but only when it decoded CLEANLY: undecodable/binary
+                # output (U+FFFD replacement chars or NUL bytes) is corruption,
+                # not an answer, and must still surface as an error.
+                if stdout_str and "�" not in stdout_str and "\x00" not in stdout_str:
+                    content = stdout_str
+            if not content:
                 raise RuntimeError(
-                    "Grok CLI produced no result (output was empty or not the "
-                    "expected JSON envelope). "
+                    "Grok CLI produced no result (output was empty, undecodable, "
+                    "or not the expected JSON envelope). "
                     f"stdout tail: {tail_text(stdout_str)} | "
                     f"stderr tail: {tail_text(stderr_str)}"
                 )

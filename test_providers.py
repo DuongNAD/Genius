@@ -595,11 +595,37 @@ def test_grok_provider_exit_zero_error_json_raises():
     asyncio.run(run_test())
 
 
-def test_grok_provider_unparseable_stdout_raises_with_tails():
+def test_grok_provider_plain_text_stdout_used_as_content():
+    # Some Grok CLI builds ignore --output-format json and print a plain-text
+    # answer on a clean exit; the raw stdout is used as the content instead of
+    # being discarded as "no result" (real-world Grok builds do exactly this).
     async def run_test():
         mock_process = AsyncMock()
         mock_process.returncode = 0
-        mock_process.communicate.return_value = (b"plain text noise", b"stderr blob")
+        mock_process.communicate.return_value = (b"plain text answer", b"")
+
+        with (
+            patch("shutil.which", return_value="/usr/local/bin/grok"),
+            patch.dict("os.environ", {"GROK_API_KEY": "fake_key"}),
+            patch(
+                "asyncio.create_subprocess_exec", new_callable=AsyncMock
+            ) as mock_exec,
+        ):
+            mock_exec.return_value = mock_process
+            provider = GrokProvider()
+            result = await provider.send_prompt("Test prompt")
+
+        assert result["content"] == "plain text answer"
+
+    asyncio.run(run_test())
+
+
+def test_grok_provider_empty_stdout_raises():
+    # A clean exit with NO output is still an error — there is nothing to return.
+    async def run_test():
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"", b"stderr blob")
 
         with (
             patch("shutil.which", return_value="/usr/local/bin/grok"),
@@ -613,9 +639,7 @@ def test_grok_provider_unparseable_stdout_raises_with_tails():
             with pytest.raises(RuntimeError) as exc_info:
                 await provider.send_prompt("Test prompt")
 
-        msg = str(exc_info.value)
-        assert "plain text noise" in msg
-        assert "stderr blob" in msg
+        assert "stderr blob" in str(exc_info.value)
 
     asyncio.run(run_test())
 
