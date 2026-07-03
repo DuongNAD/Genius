@@ -838,6 +838,15 @@ async def main_async():
         help="Port to run the central hub service on",
     )
     parser.add_argument(
+        "--keep-alive",
+        action="store_true",
+        help=(
+            "After the orchestrator pipeline finishes (or fails), keep the hub "
+            "and servers running instead of shutting down — so distributed "
+            "workers stay connected and more jobs can run. Ctrl+C to stop."
+        ),
+    )
+    parser.add_argument(
         "--doctor",
         action="store_true",
         help="Run preflight checks (CLI resolution, auth, SKILL_API_KEY) and exit",
@@ -853,6 +862,7 @@ async def main_async():
     auto_pilot = getattr(args, "auto_pilot", False) is True
     interactive = getattr(args, "interactive", False) is True
     distributed = getattr(args, "distributed", False) is True
+    keep_alive = getattr(args, "keep_alive", False) is True
 
     global IS_DISTRIBUTED
     IS_DISTRIBUTED = distributed
@@ -997,7 +1007,7 @@ async def main_async():
             print(f"Orchestrator pipeline failed: {e}")
             pipeline_failed = True
         finally:
-            if pipeline_run:
+            if pipeline_run and not keep_alive:
                 for task in server_tasks:
                     task.cancel()
                 if server_tasks:
@@ -1007,6 +1017,17 @@ async def main_async():
                     # auto-pilot cannot exit 0 on a failed pipeline.
                     raise SystemExit(1)
                 return
+            elif pipeline_run and keep_alive:
+                # A finished OR failed pipeline must NOT take the hub down with
+                # it when --keep-alive is set: leave the servers running and fall
+                # through to the persistent loop below, so distributed workers
+                # stay connected (no more WinError 1225 / connection-refused) and
+                # further jobs can run.
+                print(
+                    "Pipeline "
+                    + ("FAILED" if pipeline_failed else "completed")
+                    + "; keeping hub/servers up (--keep-alive). Press Ctrl+C to stop."
+                )
 
     # If we started servers, we await them to run continuously
     if server_tasks:

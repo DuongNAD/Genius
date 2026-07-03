@@ -881,168 +881,211 @@ async def call_api(
 
                     await asyncio.sleep(0.5)
         else:
-            logger.info(f"[Distributed] Selecting idle worker for role '{role}'")
+            # Dispatch to an idle worker over the in-memory WS registry, with
+            # RE-DISPATCH on worker loss: if the chosen worker disconnects (or
+            # its WS send fails) mid-task, pick another idle worker — or wait for
+            # the same one to reconnect — and retry, instead of failing the whole
+            # pipeline. Bounded by GENIUS_DISPATCH_RETRIES (default 3). A genuine
+            # task timeout or an orchestrator cancel is NOT worker loss and is
+            # never retried here.
+            max_dispatch = max(1, int(os.environ.get("GENIUS_DISPATCH_RETRIES") or 3))
+            dispatch_deadline = time.time() + poll_timeout
+            last_disconnect = None
 
-            worker_id = None
-            poll_start = time.time()
-            while worker_id is None:
-                worker_id = await worker_registry.select_idle_worker(role)
-                if worker_id is None:
-                    if time.time() - poll_start > poll_timeout:
-                        raise PipelineError(
-                            f"No idle worker available for role '{role}' within {poll_timeout} seconds."
-                        )
-                    await asyncio.sleep(0.5)
-
-            logger.info(
-                f"[Distributed] Selected worker '{worker_id}' for role '{role}'"
-            )
-
-            async with worker_registry.lock:
-                worker = await worker_registry.get_worker(worker_id)
-                if not worker:
-                    raise PipelineError(
-                        f"Worker '{worker_id}' disappeared from registry."
-                    )
-                worker["status"] = "busy"
-
-            task_id = f"task_{uuid.uuid4().hex[:8]}"
-            task_data = {"role": role, "prompt": prompt, "context": context or {}}
-
-            async with central_hub.lock:
-                central_hub.tasks[task_id] = {
-                    "task_id": task_id,
-                    "role": role,
-                    "task_data": task_data,
-                    "status": "running",
-                    "result": None,
-                    "created_at": time.time(),
-                    "worker_id": worker_id,
-                    "started_at": time.time(),
-                }
-
-            ws = worker.get("ws")
-            if ws is None:
-                raise PipelineError(
-                    f"Worker '{worker_id}' does not have an active WebSocket connection."
+            async def _dispatch_once(worker_id):
+                logger.info(
+                    f"[Distributed] Selected worker '{worker_id}' for role '{role}'"
                 )
 
-            # HMAC (not plain SHA-256): the worker verifies the dispatch with
-            # verify_checksum(task_data, checksum, api_key), which is HMAC-only
-            # in production. Plain SHA-256 here was silently accepted only under
-            # pytest (conftest patches verify_checksum to allow it) and rejected
-            # every real in-memory dispatch as "Bad Checksum".
-            from ag_core.utils.security import calculate_checksum
-
-            secret = load_config().skill_api_key or os.getenv("SKILL_API_KEY", "")
-            checksum = calculate_checksum(task_data, secret)
-
-            dispatch_payload = {
-                "type": "dispatch",
-                "task_id": task_id,
-                "task_data": task_data,
-                "checksum": checksum,
-            }
-            loop = asyncio.get_running_loop()
-            fut = loop.create_future()
-            pending_tasks[task_id] = fut
-
-            logger.info(
-                f"[Distributed] Sending dispatch message for task '{task_id}' to worker '{worker_id}'"
-            )
-            try:
-                await ws.send_json(dispatch_payload)
-            except Exception as e:
-                pending_tasks.pop(task_id, None)
                 async with worker_registry.lock:
-                    worker["status"] = "idle"
-                async with central_hub.lock:
-                    central_hub.tasks[task_id]["status"] = "failed"
-                    central_hub.tasks[task_id]["result"] = {
-                        "error": f"WS send error: {str(e)}"
-                    }
-                raise PipelineError(
-                    f"Failed to send task to worker '{worker_id}' over WebSocket: {e}"
-                )
+                    worker = await worker_registry.get_worker(worker_id)
+                    if not worker:
+                        raise WorkerDisconnectedError(
+                            f"Worker '{worker_id}' disappeared from registry."
+                        )
+                    worker["status"] = "busy"
 
-            try:
-                result = await asyncio.wait_for(fut, timeout=poll_timeout)
-                logger.info(f"[Distributed] Task '{task_id}' completed successfully")
-                if use_cache:
-                    _cache_store(cache_key, result)
-                return result
-            except (asyncio.TimeoutError, TimeoutError) as e:
-                logger.error(f"[Distributed] Task '{task_id}' timed out: {e}")
+                task_id = f"task_{uuid.uuid4().hex[:8]}"
+                task_data = {"role": role, "prompt": prompt, "context": context or {}}
+
                 async with central_hub.lock:
-                    if task_id in central_hub.tasks:
+                    central_hub.tasks[task_id] = {
+                        "task_id": task_id,
+                        "role": role,
+                        "task_data": task_data,
+                        "status": "running",
+                        "result": None,
+                        "created_at": time.time(),
+                        "worker_id": worker_id,
+                        "started_at": time.time(),
+                    }
+
+                ws = worker.get("ws")
+                if ws is None:
+                    async with worker_registry.lock:
+                        worker["status"] = "idle"
+                    raise WorkerDisconnectedError(
+                        f"Worker '{worker_id}' has no active WebSocket connection."
+                    )
+
+                # HMAC (not plain SHA-256): the worker verifies the dispatch with
+                # verify_checksum(task_data, checksum, api_key), HMAC-only in prod.
+                from ag_core.utils.security import calculate_checksum
+
+                secret = load_config().skill_api_key or os.getenv("SKILL_API_KEY", "")
+                checksum = calculate_checksum(task_data, secret)
+
+                dispatch_payload = {
+                    "type": "dispatch",
+                    "task_id": task_id,
+                    "task_data": task_data,
+                    "checksum": checksum,
+                }
+                loop = asyncio.get_running_loop()
+                fut = loop.create_future()
+                pending_tasks[task_id] = fut
+
+                logger.info(
+                    f"[Distributed] Sending dispatch message for task '{task_id}' to worker '{worker_id}'"
+                )
+                try:
+                    await ws.send_json(dispatch_payload)
+                except Exception as e:
+                    pending_tasks.pop(task_id, None)
+                    async with worker_registry.lock:
+                        worker["status"] = "idle"
+                    async with central_hub.lock:
                         central_hub.tasks[task_id]["status"] = "failed"
                         central_hub.tasks[task_id]["result"] = {
-                            "error": f"Task timed out after {poll_timeout}s"
+                            "error": f"WS send error: {str(e)}"
                         }
-                async with worker_registry.lock:
-                    worker = await worker_registry.get_worker(worker_id)
-                    if worker:
-                        worker["status"] = "idle"
-                        ws = worker.get("ws")
-                        if ws:
-                            try:
-                                await ws.send_json(
-                                    {"type": "cancel", "task_id": task_id}
+                    # A failed send == the worker's connection is gone: surface it
+                    # as worker loss so the caller re-dispatches to another worker.
+                    raise WorkerDisconnectedError(
+                        f"Failed to send task to worker '{worker_id}' over WebSocket: {e}"
+                    )
+
+                try:
+                    result = await asyncio.wait_for(fut, timeout=poll_timeout)
+                    logger.info(
+                        f"[Distributed] Task '{task_id}' completed successfully"
+                    )
+                    if use_cache:
+                        _cache_store(cache_key, result)
+                    return result
+                except (asyncio.TimeoutError, TimeoutError) as e:
+                    logger.error(f"[Distributed] Task '{task_id}' timed out: {e}")
+                    async with central_hub.lock:
+                        if task_id in central_hub.tasks:
+                            central_hub.tasks[task_id]["status"] = "failed"
+                            central_hub.tasks[task_id]["result"] = {
+                                "error": f"Task timed out after {poll_timeout}s"
+                            }
+                    async with worker_registry.lock:
+                        worker = await worker_registry.get_worker(worker_id)
+                        if worker:
+                            worker["status"] = "idle"
+                            ws = worker.get("ws")
+                            if ws:
+                                try:
+                                    await ws.send_json(
+                                        {"type": "cancel", "task_id": task_id}
+                                    )
+                                except Exception:
+                                    pass
+                            elif central_hub.network:
+                                try:
+                                    payload = {"task_id": task_id}
+                                    headers = central_hub.create_headers(payload)
+                                    await central_hub.network.send_to_worker(
+                                        worker_id, "/cancel", payload, headers
+                                    )
+                                except Exception:
+                                    pass
+                    raise asyncio.TimeoutError(
+                        f"Task timed out after {poll_timeout} seconds"
+                    )
+                except WorkerDisconnectedError as e:
+                    logger.error(
+                        f"[Distributed] Worker disconnected during task '{task_id}': {e}"
+                    )
+                    raise
+                except asyncio.CancelledError:
+                    logger.info(
+                        f"[Distributed] Task '{task_id}' cancelled by orchestrator"
+                    )
+                    async with central_hub.lock:
+                        if task_id in central_hub.tasks:
+                            central_hub.tasks[task_id]["status"] = "failed"
+                            central_hub.tasks[task_id]["result"] = {
+                                "error": "cancelled"
+                            }
+                    async with worker_registry.lock:
+                        worker = await worker_registry.get_worker(worker_id)
+                        if worker:
+                            worker["status"] = "idle"
+                            ws = worker.get("ws")
+                            if ws:
+                                try:
+                                    await ws.send_json(
+                                        {"type": "cancel", "task_id": task_id}
+                                    )
+                                except Exception:
+                                    pass
+                            elif central_hub.network:
+                                try:
+                                    payload = {"task_id": task_id}
+                                    headers = central_hub.create_headers(payload)
+                                    await central_hub.network.send_to_worker(
+                                        worker_id, "/cancel", payload, headers
+                                    )
+                                except Exception:
+                                    pass
+                    raise
+                except Exception as e:
+                    logger.error(f"[Distributed] Task '{task_id}' failed: {e}")
+                    raise PipelineError(
+                        f"Task '{task_id}' failed on worker '{worker_id}': {e}"
+                    )
+                finally:
+                    pending_tasks.pop(task_id, None)
+
+            logger.info(f"[Distributed] Selecting idle worker for role '{role}'")
+            for dispatch_attempt in range(1, max_dispatch + 1):
+                worker_id = None
+                while worker_id is None:
+                    worker_id = await worker_registry.select_idle_worker(role)
+                    if worker_id is None:
+                        if time.time() > dispatch_deadline:
+                            if last_disconnect is not None:
+                                # We were re-dispatching after a worker loss, but
+                                # no replacement worker (nor the same one
+                                # reconnecting) became available in time — surface
+                                # the loss as the disconnect, not a generic
+                                # no-worker error.
+                                raise WorkerDisconnectedError(
+                                    f"Worker for role '{role}' disconnected and no "
+                                    f"replacement became available within "
+                                    f"{poll_timeout}s: {last_disconnect}"
                                 )
-                            except Exception:
-                                pass
-                        elif central_hub.network:
-                            try:
-                                payload = {"task_id": task_id}
-                                headers = central_hub.create_headers(payload)
-                                await central_hub.network.send_to_worker(
-                                    worker_id, "/cancel", payload, headers
-                                )
-                            except Exception:
-                                pass
-                raise asyncio.TimeoutError(
-                    f"Task timed out after {poll_timeout} seconds"
-                )
-            except WorkerDisconnectedError as e:
-                logger.error(
-                    f"[Distributed] Worker disconnected during task '{task_id}': {e}"
-                )
-                raise
-            except asyncio.CancelledError:
-                logger.info(f"[Distributed] Task '{task_id}' cancelled by orchestrator")
-                async with central_hub.lock:
-                    if task_id in central_hub.tasks:
-                        central_hub.tasks[task_id]["status"] = "failed"
-                        central_hub.tasks[task_id]["result"] = {"error": "cancelled"}
-                async with worker_registry.lock:
-                    worker = await worker_registry.get_worker(worker_id)
-                    if worker:
-                        worker["status"] = "idle"
-                        ws = worker.get("ws")
-                        if ws:
-                            try:
-                                await ws.send_json(
-                                    {"type": "cancel", "task_id": task_id}
-                                )
-                            except Exception:
-                                pass
-                        elif central_hub.network:
-                            try:
-                                payload = {"task_id": task_id}
-                                headers = central_hub.create_headers(payload)
-                                await central_hub.network.send_to_worker(
-                                    worker_id, "/cancel", payload, headers
-                                )
-                            except Exception:
-                                pass
-                raise
-            except Exception as e:
-                logger.error(f"[Distributed] Task '{task_id}' failed: {e}")
-                raise PipelineError(
-                    f"Task '{task_id}' failed on worker '{worker_id}': {e}"
-                )
-            finally:
-                pending_tasks.pop(task_id, None)
+                            raise PipelineError(
+                                f"No idle worker available for role '{role}' within {poll_timeout} seconds."
+                            )
+                        await asyncio.sleep(0.5)
+                try:
+                    return await _dispatch_once(worker_id)
+                except WorkerDisconnectedError as e:
+                    last_disconnect = e
+                    logger.warning(
+                        f"[Distributed] worker '{worker_id}' lost on attempt "
+                        f"{dispatch_attempt}/{max_dispatch} for role '{role}'; "
+                        f"re-dispatching to another worker"
+                    )
+                    continue
+            raise WorkerDisconnectedError(
+                f"All {max_dispatch} dispatch attempts for role '{role}' failed; "
+                f"last error: {last_disconnect}"
+            )
 
     req_payload = {"prompt": prompt, "context": context}
 
