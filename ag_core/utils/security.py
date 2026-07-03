@@ -68,7 +68,7 @@ from fastapi import Depends, HTTPException, Header, status, Request
 from fastapi.responses import JSONResponse
 from fastapi.responses import Response as FastAPIResponse
 from fastapi.security import APIKeyHeader
-from ag_core.utils.jwt import decode_jwt
+from ag_core.utils.jwt import decode_jwt, jwt_max_lifetime
 from ag_core.config import load_config
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -94,13 +94,30 @@ def verify_api_key(
     config = load_config()
     expected_key = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
     try:
-        payload = decode_jwt(token, expected_key)
+        payload = decode_jwt(
+            token,
+            expected_key,
+            require_exp=True,
+            max_lifetime=jwt_max_lifetime(),
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid or expired token: {str(e)}",
         )
     return payload
+
+
+def _max_request_bytes() -> int:
+    """Max accepted request-body size for /run and /status. Bounds a pre-auth
+    memory-exhaustion DoS; a skill payload (prompt + scanned context) is small
+    relative to this. Tunable via GENIUS_MAX_REQUEST_BYTES; blank/junk -> 25 MiB
+    (matches the response cap)."""
+    try:
+        val = int(os.getenv("GENIUS_MAX_REQUEST_BYTES") or 25 * 1024 * 1024)
+        return val if val > 0 else 25 * 1024 * 1024
+    except (TypeError, ValueError):
+        return 25 * 1024 * 1024
 
 
 async def checksum_middleware(request: Request, call_next):
@@ -110,6 +127,28 @@ async def checksum_middleware(request: Request, call_next):
     request.state.use_plain_checksum = False
 
     if path.endswith("/run") or "/status" in path:
+        # Reject oversized bodies BEFORE buffering them: verify_raw_body_checksum
+        # below reads the entire body into memory, so without this an attacker
+        # who doesn't even know SKILL_API_KEY could POST a multi-GB body and
+        # exhaust RAM before the checksum check fails. A missing/chunked
+        # Content-Length still buffers, but the honest-and-huge case (the
+        # practical DoS) is cut off cheaply here.
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                too_large = int(content_length) > _max_request_bytes()
+            except (TypeError, ValueError):
+                too_large = False
+            if too_large:
+                content = {"detail": "Request body too large"}
+                body_bytes = json.dumps(content).encode("utf-8")
+                checksum = hashlib.sha256(body_bytes).hexdigest()
+                return JSONResponse(
+                    status_code=413,
+                    content=content,
+                    headers={"X-Payload-SHA256": checksum},
+                )
+
         x_payload = request.headers.get("X-Payload-SHA256")
         if not x_payload:
             content = {"detail": "Missing X-Payload-SHA256 header"}
@@ -133,9 +172,25 @@ async def checksum_middleware(request: Request, call_next):
 
     response = await call_next(request)
 
+    # Buffer the response to compute its checksum, but bound the buffer so a
+    # pathologically large response can't exhaust memory. Skill endpoints
+    # return small JSON, so this only trips on a runaway payload.
+    try:
+        max_bytes = int(os.getenv("GENIUS_MAX_RESPONSE_BYTES") or 25 * 1024 * 1024)
+    except (TypeError, ValueError):
+        max_bytes = 25 * 1024 * 1024
     response_body = b""
     async for chunk in response.body_iterator:
         response_body += chunk
+        if len(response_body) > max_bytes:
+            content = {"detail": "Response too large to checksum"}
+            body_bytes = json.dumps(content).encode("utf-8")
+            checksum = hashlib.sha256(body_bytes).hexdigest()
+            return JSONResponse(
+                status_code=500,
+                content=content,
+                headers={"X-Payload-SHA256": checksum},
+            )
 
     if getattr(request.state, "use_plain_checksum", False):
         checksum = hashlib.sha256(response_body).hexdigest()

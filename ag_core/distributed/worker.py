@@ -66,10 +66,19 @@ class ClientWorker:
         network.register_worker(self.worker_id, self)
 
     def create_headers(self, payload: Any) -> Dict[str, str]:
+        import time
+        import uuid
         from ag_core.utils.security import calculate_checksum
 
         checksum = calculate_checksum(payload, self.api_key)
-        return {"X-API-Key": self.api_key, "X-Payload-SHA256": checksum}
+        # X-Timestamp/X-Nonce let the hub enforce anti-replay when
+        # GENIUS_HUB_REPLAY_PROTECTION is on; harmless when it's off.
+        return {
+            "X-API-Key": self.api_key,
+            "X-Payload-SHA256": checksum,
+            "X-Timestamp": str(time.time()),
+            "X-Nonce": uuid.uuid4().hex,
+        }
 
     async def register(self) -> tuple[int, Any]:
         payload = {"worker_id": self.worker_id, "roles": self.roles}
@@ -238,7 +247,18 @@ class ClientWorker:
 
                         provider = make_provider(factory_role, config)
                         agent = agent_class(
-                            provider=provider, config=config, output_file="None"
+                            provider=provider,
+                            config=config,
+                            output_file="None",
+                            # Mirror the skill-server hardening (build_agent):
+                            # no VectorMemory — its lazy sentence-transformers
+                            # model load / O(N) query runs synchronously on this
+                            # worker's event loop and would stall the heartbeat,
+                            # risking hub-side eviction and duplicate dispatch —
+                            # and stateless so a codex task doesn't run the
+                            # host's pytest or write files on the worker.
+                            stateless=True,
+                            use_memory=False,
                         )
 
                         output = await agent.run(prompt=prompt, context_data=context)
@@ -324,10 +344,15 @@ class ClientWorker:
                         await asyncio.sleep(backoff)
                         backoff *= 2
 
+            report_coro = report()
             try:
-                await asyncio.shield(report())
+                await asyncio.shield(report_coro)
             except Exception as e:
                 print(f"[Worker] Shielded report failed: {e}")
+                # shield() may fail before wrapping the coroutine in a task
+                # (e.g. no running event loop at shutdown); close it so it
+                # doesn't leak a "coroutine was never awaited" warning.
+                report_coro.close()
 
     def generate_jwt(self) -> str:
         # Use the same resolved key as checksums (config.skill_api_key or
@@ -352,8 +377,11 @@ class ClientWorker:
         while True:
             token = self.generate_jwt()
             uri = f"ws://{hub_ip}:{hub_port}/ws/connect?token={token}"
+            # The token is a bearer credential in the query string — never log
+            # the full URI (stdout/log capture would leak a replayable token).
+            safe_uri = f"ws://{hub_ip}:{hub_port}/ws/connect"
             try:
-                print(f"[Worker] Connecting to {uri}...")
+                print(f"[Worker] Connecting to {safe_uri} ...")
                 async with websockets.connect(uri) as websocket:
                     self.ws = websocket
                     backoff = 1.0  # Reset backoff

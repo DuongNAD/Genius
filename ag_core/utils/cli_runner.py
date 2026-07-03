@@ -50,6 +50,30 @@ def cli_timeout(default: float = DEFAULT_CLI_TIMEOUT) -> float:
     return default
 
 
+# Verification subprocesses (flake8 / pytest on generated or reviewed code)
+# must also be bounded: LLM-generated code can contain an infinite loop or a
+# blocking call (input(), socket.accept()), which would otherwise hang the
+# self-healing loop — and, via the MCP review tool, the whole server — forever.
+DEFAULT_TEST_TIMEOUT = 300.0
+
+
+def test_timeout(default: float = DEFAULT_TEST_TIMEOUT) -> float:
+    """Resolve the verification-subprocess timeout from ``GENIUS_TEST_TIMEOUT``.
+
+    Separate from :func:`cli_timeout` (which bounds the LLM CLIs): a generated
+    test suite should finish in seconds, so the default ceiling is tighter.
+    """
+    raw = os.getenv("GENIUS_TEST_TIMEOUT")
+    if raw:
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return default
+
+
 def tail_text(text: str, limit: int = TAIL_CHARS) -> str:
     """Return the last ``limit`` characters of ``text`` (for error messages)."""
     text = (text or "").strip()
@@ -133,8 +157,16 @@ async def communicate_with_timeout(
     :class:`CLITimeoutError` (after terminating the process tree) on timeout.
     """
     timeout = timeout if timeout is not None else cli_timeout()
+    # Call communicate() with no argument when there's nothing to send on stdin,
+    # so callers (and test doubles) that define a zero-arg communicate() keep
+    # working; only pass input= when we actually have bytes to write. For a real
+    # subprocess communicate(input=None) and communicate() are equivalent.
+    if input is not None:
+        comm = process.communicate(input=input)
+    else:
+        comm = process.communicate()
     try:
-        return await asyncio.wait_for(process.communicate(input=input), timeout=timeout)
+        return await asyncio.wait_for(comm, timeout=timeout)
     except asyncio.TimeoutError:
         await _terminate(process)
         raise CLITimeoutError(

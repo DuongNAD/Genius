@@ -159,7 +159,7 @@ def test_openai_provider_fallback_path():
             assert response["content"] == "Fallback test"
             mock_exec.assert_called_once()
             args, kwargs = mock_exec.call_args
-            assert args[0] == "codex.exe"
+            assert args[0] == ("codex.exe" if os.name == "nt" else "codex")
             assert args[1:] == (
                 "exec",
                 "-",

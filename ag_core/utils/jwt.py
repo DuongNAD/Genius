@@ -2,7 +2,21 @@ import base64
 import json
 import hmac
 import hashlib
+import os
 import time
+
+
+def jwt_max_lifetime() -> float:
+    """Max allowed (exp - now) for an authenticating token, in seconds.
+
+    Caps how far in the future a token may claim to be valid so an absurd or
+    forever-lived credential is rejected at the auth boundary. Production
+    tokens are minted with a 300s lifetime; the default 3600s leaves margin.
+    """
+    try:
+        return float(os.environ.get("GENIUS_JWT_MAX_LIFETIME") or 3600.0)
+    except (TypeError, ValueError):
+        return 3600.0
 
 
 def base64url_encode(data: bytes) -> str:
@@ -19,11 +33,13 @@ def base64url_decode(data_str: str) -> bytes:
 
 
 import uuid
-import threading
 
-_seen_jtis = {}
-_jtis_lock = threading.Lock()
-_cleaned_expired_jtis = False
+# Purge expired jtis from the replay table every N inserts so it doesn't grow
+# without bound on a long-lived process. The insert path runs on the single DB
+# writer thread (enqueue_db_write serializes it), so the plain counter is safe
+# without a lock.
+_JTI_PURGE_INTERVAL = 500
+_jti_insert_count = 0
 
 
 def encode_jwt(payload: dict, secret: str) -> str:
@@ -52,10 +68,21 @@ def encode_jwt(payload: dict, secret: str) -> str:
     return f"{header_b64}.{payload_b64}.{signature_b64}"
 
 
-def decode_jwt(token: str, secret: str) -> dict:
+def decode_jwt(
+    token: str,
+    secret: str,
+    *,
+    require_exp: bool = False,
+    max_lifetime: float = None,
+) -> dict:
     """
     Decode and verify a JWT token with HS256 algorithm.
     Raises ValueError on any parsing, verification or expiration error.
+
+    ``require_exp`` rejects a token with no ``exp`` claim (a forever-valid
+    credential); ``max_lifetime`` rejects one whose ``exp`` is further than
+    that many seconds in the future. Both default off so the general-purpose
+    decode path is unchanged — auth entry points opt into the strict checks.
     """
     if not secret:
         raise ValueError("JWT secret key must be non-empty")
@@ -93,10 +120,15 @@ def decode_jwt(token: str, secret: str) -> dict:
 
     if "exp" in payload:
         exp = payload["exp"]
-        if not isinstance(exp, (int, float)):
+        if not isinstance(exp, (int, float)) or isinstance(exp, bool):
             raise ValueError("Invalid exp claim type")
-        if time.time() > exp:
+        now = time.time()
+        if now > exp:
             raise ValueError("Token has expired")
+        if max_lifetime is not None and (exp - now) > max_lifetime:
+            raise ValueError("Token lifetime exceeds maximum allowed")
+    elif require_exp:
+        raise ValueError("Token missing required exp claim")
 
     jti = payload.get("jti")
     if not jti:
@@ -105,14 +137,14 @@ def decode_jwt(token: str, secret: str) -> dict:
     from ag_core.utils.db import enqueue_db_write
 
     def _verify_and_save_jti_impl(conn, jti_str: str, exp_val: float | None):
-        global _cleaned_expired_jtis
-        if not _cleaned_expired_jtis:
+        global _jti_insert_count
+        if _jti_insert_count % _JTI_PURGE_INTERVAL == 0:
             now = time.time()
             conn.execute(
                 "DELETE FROM seen_jtis WHERE exp IS NOT NULL AND ? > exp", (now,)
             )
             conn.commit()
-            _cleaned_expired_jtis = True
+        _jti_insert_count += 1
 
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM seen_jtis WHERE jti = ?", (jti_str,))

@@ -61,15 +61,43 @@ class TokenBucketRateLimiter:
                 return False
 
 
-# Central default rate limiter instance
+# Central default rate limiter instance (kept for backward compatibility and
+# for the role-less case).
 limiter = TokenBucketRateLimiter(rate=10.0, capacity=10.0)
+
+# Per-role limiters. When serve.py hosts several skill servers in ONE process
+# (the default menu / --auto-pilot), a single shared bucket is drained by normal
+# pipeline fan-out — each role is polled concurrently per file — so legitimate
+# traffic gets 429'd and one chatty stage starves the others. Give each role its
+# own token bucket instead.
+_role_limiters = {}
+_role_limiters_lock = threading.Lock()
+
+
+def get_role_limiter(
+    role: str, rate: float = 10.0, capacity: float = 10.0
+) -> TokenBucketRateLimiter:
+    """Return (creating on first use) the token bucket dedicated to ``role``."""
+    key = role or "_default"
+    with _role_limiters_lock:
+        rl = _role_limiters.get(key)
+        if rl is None:
+            rl = TokenBucketRateLimiter(rate=rate, capacity=capacity)
+            _role_limiters[key] = rl
+        return rl
+
+
+def _rate_limiter_bypassed() -> bool:
+    """Rate limiting is off in plain test runs (rapid sequential requests would
+    otherwise 429) unless ENABLE_RATE_LIMITER is set."""
+    return "PYTEST_CURRENT_TEST" in os.environ and not os.environ.get(
+        "ENABLE_RATE_LIMITER"
+    )
 
 
 async def rate_limit_dependency():
     # Bypass rate limiting in standard test runs to prevent rate-limiting rapid sequential test requests.
-    if "PYTEST_CURRENT_TEST" in os.environ and not os.environ.get(
-        "ENABLE_RATE_LIMITER"
-    ):
+    if _rate_limiter_bypassed():
         return
 
     if not await limiter.consume_async(1.0):
@@ -78,3 +106,21 @@ async def rate_limit_dependency():
             detail="Too Many Requests",
             headers={"Retry-After": "1"},
         )
+
+
+def make_rate_limit_dependency(role: str):
+    """FastAPI dependency that rate-limits using ``role``'s own token bucket, so
+    skill servers co-hosted in one process don't share a single global budget."""
+    rl = get_role_limiter(role)
+
+    async def _role_rate_limit_dependency():
+        if _rate_limiter_bypassed():
+            return
+        if not await rl.consume_async(1.0):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too Many Requests",
+                headers={"Retry-After": "1"},
+            )
+
+    return _role_rate_limit_dependency

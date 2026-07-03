@@ -154,10 +154,21 @@ class GrokProvider(BaseProvider):
                 # which interprets `&|<>^%` and newlines in LLM-generated
                 # prompt text (garbling/injection) and hits the command-line
                 # length limit.
+                # Fold the system prompt into the file too. Passing it as a
+                # --system-prompt-override argv element has the same Windows
+                # cmd.exe problem the prompt itself avoids: on a .cmd shim the
+                # text is truncated at the first newline and &|<>^% is
+                # interpreted, silently dropping most of the system contract.
+                file_content = prompt
+                if sys_prompt:
+                    file_content = (
+                        f"[SYSTEM INSTRUCTIONS]\n{sys_prompt}\n\n"
+                        f"[USER REQUEST]\n{prompt}"
+                    )
                 with tempfile.NamedTemporaryFile(
                     mode="w", suffix=".txt", delete=False, encoding="utf-8"
                 ) as f:
-                    f.write(prompt)
+                    f.write(file_content)
                     temp_file_path = f.name
                 cmd = [
                     cli_path,
@@ -174,9 +185,6 @@ class GrokProvider(BaseProvider):
                 )
                 if session_id:
                     cmd.extend(["--session-id", str(session_id)])
-
-                if sys_prompt:
-                    cmd.extend(["--system-prompt-override", sys_prompt])
 
                 actual_cmd = _wrap_windows(cmd, cli_path)
 

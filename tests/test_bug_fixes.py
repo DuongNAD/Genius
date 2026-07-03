@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import json
 import asyncio
@@ -68,6 +69,11 @@ async def test_r2_codex_reviewer_path_traversal():
 
 
 # R3 & R4. Windows Subprocess wrapper & Command Line Length Limit
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Exercises Windows cmd.exe /c wrapping for .cmd shims; on POSIX the "
+    "resolver returns the real binary directly (no cmd.exe wrapper).",
+)
 @pytest.mark.asyncio
 async def test_r3_r4_windows_subprocess_and_length_limit():
     provider = AnthropicProvider()

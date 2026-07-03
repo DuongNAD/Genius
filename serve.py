@@ -9,7 +9,7 @@ import traceback
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
-from ag_core.utils.jwt import decode_jwt
+from ag_core.utils.jwt import decode_jwt, jwt_max_lifetime
 
 # Add project root to sys.path
 root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -150,9 +150,9 @@ worker_registry = WorkerRegistry()
 
 
 async def prune_stale_workers(timeout_sec: float = 30.0, check_interval: float = 5.0):
-    try:
-        central_hub.config["heartbeat_timeout"] = timeout_sec
-        while True:
+    central_hub.config["heartbeat_timeout"] = timeout_sec
+    while True:
+        try:
             await asyncio.sleep(check_interval)
             await central_hub.sweep()
             for task_id, fut in list(pending_tasks.items()):
@@ -182,10 +182,17 @@ async def prune_stale_workers(timeout_sec: float = 30.0, check_interval: float =
                                 fut.set_exception(WorkerDisconnectedError(error_msg))
                             else:
                                 fut.set_exception(ValueError(error_msg))
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        pass
+        except asyncio.CancelledError:
+            # Shutdown: propagate so the task actually stops.
+            raise
+        except Exception:
+            # One bad sweep must not kill the pruner for the process lifetime;
+            # log and keep looping so future stale workers still get swept.
+            print(
+                "[Hub] prune_stale_workers: sweep iteration failed",
+                file=sys.stderr,
+            )
+            traceback.print_exc()
 
 
 @asynccontextmanager
@@ -261,7 +268,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         await websocket.close(code=4001)
         return
     try:
-        payload = decode_jwt(token, secret)
+        # decode_jwt records the token's jti in the anti-replay table via the
+        # single blocking SQLite writer thread. Offload it so a DB-contended
+        # write can't freeze the hub event loop mid-handshake — which would
+        # stall heartbeat processing and the sweeper and trigger spurious
+        # worker eviction (and, in --auto-pilot, freeze every skill server too).
+        payload = await asyncio.to_thread(
+            decode_jwt,
+            token,
+            secret,
+            require_exp=True,
+            max_lifetime=jwt_max_lifetime(),
+        )
         worker_id_from_jwt = payload.get("sub") or payload.get("worker_id")
     except Exception:
         await websocket.accept()
@@ -399,8 +417,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
 
 async def start_hub_server(port: int):
+    # Default 0.0.0.0 (the hub is auth-protected and Docker maps its port);
+    # `or` so a blank GENIUS_HUB_HOST from .env is treated as unset. Set
+    # GENIUS_HUB_HOST=127.0.0.1 to restrict it to loopback on bare metal.
+    hub_host = os.environ.get("GENIUS_HUB_HOST") or "0.0.0.0"
     config = uvicorn.Config(
-        app, host="0.0.0.0", port=port, log_level="info", ws="auto"
+        app, host=hub_host, port=port, log_level="info", ws="auto"
     )
     server = uvicorn.Server(config)
     await server.serve()
@@ -655,9 +677,13 @@ async def start_server(role: str, port: int):
     app = get_api_app(role)
 
     def _make_server(bind_port: int) -> uvicorn.Server:
+        # Default 0.0.0.0 (skill servers are JWT-protected and Docker maps
+        # their ports); `or` so a blank GENIUS_SKILL_HOST is treated as unset.
+        # Set GENIUS_SKILL_HOST=127.0.0.1 to keep them on loopback on bare metal.
+        skill_host = os.environ.get("GENIUS_SKILL_HOST") or "0.0.0.0"
         config = uvicorn.Config(
             app,
-            host="0.0.0.0",
+            host=skill_host,
             port=bind_port,
             log_level="info",
             ws="auto",
@@ -878,7 +904,9 @@ async def main_async():
                     await asyncio.gather(*server_tasks, return_exceptions=True)
                 return
             try:
-                prompt = input("Enter prompt for orchestrator: ").strip()
+                prompt = (
+                    await asyncio.to_thread(input, "Enter prompt for orchestrator: ")
+                ).strip()
             except KeyboardInterrupt:
                 print("\nExiting.")
                 return
@@ -944,4 +972,13 @@ def main():
 
 
 if __name__ == "__main__":
+    # Launched as `python serve.py`, this module is registered as "__main__".
+    # The orchestrator later runs `from serve import worker_registry,
+    # central_hub, pending_tasks` at dispatch time; without this alias Python
+    # re-imports and RE-EXECUTES serve.py as a separate "serve" module with its
+    # own empty CentralHub, so the in-process registry the orchestrator reads is
+    # always empty (the distributed in-memory fast path is unreachable) and the
+    # dashboard's worker view is permanently blank. Alias so `import serve`
+    # returns this same, already-initialized running module.
+    sys.modules["serve"] = sys.modules[__name__]
     main()

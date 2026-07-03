@@ -18,6 +18,10 @@ services:
       - "8080:8080"
     environment:
       - GENIUS_DB_PATH=/app/genius.db
+      # The dashboard now binds loopback by default; inside a container it must
+      # bind all interfaces for the 8080 port mapping to reach it. Set a token
+      # to require auth: GENIUS_DASHBOARD_TOKEN=<secret>.
+      - GENIUS_DASHBOARD_HOST=0.0.0.0
     depends_on:
       - hub
     volumes:

@@ -11,6 +11,7 @@ The agent/provider wiring mirrors ``ag_core.distributed.worker.execute_task``
 
 import importlib
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
@@ -18,7 +19,8 @@ from pydantic import BaseModel
 
 from ag_core.config import load_config
 from ag_core.provider_factory import canonical_role, make_provider
-from ag_core.utils.rate_limiter import rate_limit_dependency
+from ag_core.utils.db import init_db
+from ag_core.utils.rate_limiter import make_rate_limit_dependency
 from ag_core.utils.security import checksum_middleware, verify_api_key
 
 # role -> (agent module, agent class). Provider selection lives in
@@ -47,7 +49,24 @@ MAX_TRACKED_TASKS = 500
 
 
 def evict_oldest(store: dict, cap: int = MAX_TRACKED_TASKS) -> None:
-    """Drop the oldest entries (by insertion order) until ``len(store) <= cap``."""
+    """Drop entries until ``len(store) <= cap``.
+
+    When values carry a ``status`` (the task store), finished tasks are evicted
+    first — oldest-first — so an in-flight ``processing`` task isn't dropped out
+    from under its ``/status`` poller (which would then 404 and fail the whole
+    pipeline for a task that actually completed). Only if the store is still
+    over cap after removing every finished task (i.e. it is full of live tasks)
+    does it fall back to plain FIFO eviction. Status-less stores (idempotency
+    map) always use FIFO.
+    """
+    if len(store) <= cap:
+        return
+    for key in list(store):
+        if len(store) <= cap:
+            return
+        val = store.get(key)
+        if isinstance(val, dict) and val.get("status") in ("completed", "failed"):
+            store.pop(key, None)
     while len(store) > cap:
         store.pop(next(iter(store)))
 
@@ -73,6 +92,10 @@ def build_agent(role: str, stateless: bool = True):
     if stateless:
         agent_kwargs["output_file"] = "None"
         agent_kwargs["use_memory"] = False
+        # Signal side-effect-free mode to agents that would otherwise execute
+        # the host's test suite / write files (e.g. CodexReviewerAgent's
+        # self-healing loop).
+        agent_kwargs["stateless"] = True
     return agent_class(**agent_kwargs)
 
 
@@ -83,7 +106,18 @@ def create_skill_app(role: str) -> FastAPI:
     if role not in ROLE_MAP:
         raise ValueError(f"Unknown role: {role}")
 
-    app = FastAPI(title=f"Genius {role} Skill Server")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Ensure the DB — including the seen_jtis anti-replay table that
+        # decode_jwt writes to on every authenticated request — exists even when
+        # this app is served standalone (`uvicorn <role>_agent.api:app`) rather
+        # than through serve.py, which init_db's at import. Without it every
+        # authenticated request 401s with "no such table: seen_jtis" while
+        # /health still reports ok. Idempotent (CREATE TABLE IF NOT EXISTS).
+        init_db()
+        yield
+
+    app = FastAPI(title=f"Genius {role} Skill Server", lifespan=lifespan)
     app.middleware("http")(checksum_middleware)
 
     # Security and DevOps servers strictly reject empty prompts; the other
@@ -99,6 +133,10 @@ def create_skill_app(role: str) -> FastAPI:
     # first POST) returns the same task instead of dispatching the agent twice.
     idempotency: dict = {}
 
+    # This role's own rate-limit bucket (not a single process-global one shared
+    # by every co-hosted skill server — that would 429 normal fan-out).
+    rate_limit = make_rate_limit_dependency(role)
+
     @app.get("/health")
     async def health_endpoint():
         """Unauthenticated liveness probe used by serve.py's startup readiness
@@ -110,8 +148,11 @@ def create_skill_app(role: str) -> FastAPI:
         request: RunRequest,
         background_tasks: BackgroundTasks,
         idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key"),
+        # Rate-limit BEFORE auth so a flood that's going to be 429'd doesn't
+        # first consume its JWT's one-time jti in the anti-replay table (which
+        # would then reject the client's legitimate retry as a replay).
+        _rl: None = Depends(rate_limit),
         _auth: dict = Depends(verify_api_key),
-        _rl: None = Depends(rate_limit_dependency),
     ):
         if strict_prompt and (not request.prompt or not request.prompt.strip()):
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
@@ -150,8 +191,8 @@ def create_skill_app(role: str) -> FastAPI:
     @app.get("/status/{task_id}")
     async def status_endpoint(
         task_id: str,
+        _rl: None = Depends(rate_limit),
         _auth: dict = Depends(verify_api_key),
-        _rl: None = Depends(rate_limit_dependency),
     ):
         if task_id not in tasks:
             raise HTTPException(status_code=404, detail="Task not found")
