@@ -598,6 +598,44 @@ def _server_task_crash(server_tasks):
     return None
 
 
+async def wait_for_hub_ready(hub_port: int, server_tasks=(), timeout=None):
+    """Wait until the central hub is accepting connections before proceeding.
+
+    The hub exposes no ``GET /health`` (only an authenticated catch-all POST
+    and the ``/ws/connect`` upgrade), so readiness is probed at the TCP level:
+    a successful connection means uvicorn finished startup and is listening.
+    Without this, ``serve.py --distributed --prompt`` launched the orchestrator
+    pipeline before the hub was up and the first dispatch died with "All
+    connection attempts failed". Raises RuntimeError on deadline or as soon as
+    the hub server task has crashed.
+    """
+    if timeout is None:
+        timeout = _startup_timeout()
+    deadline = time.time() + timeout
+    while True:
+        crash = _server_task_crash(server_tasks)
+        if crash is not None:
+            raise RuntimeError(
+                f"The hub server task crashed during startup: {crash!r}"
+            ) from crash
+        try:
+            _, writer = await asyncio.open_connection("127.0.0.1", hub_port)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return
+        except (ConnectionRefusedError, OSError):
+            pass
+        if time.time() > deadline:
+            raise RuntimeError(
+                f"Central hub on port {hub_port} did not become ready within "
+                f"{timeout:.0f}s"
+            )
+        await asyncio.sleep(0.1)
+
+
 async def wait_for_servers_ready(agent_ports: dict, server_tasks=(), timeout=None):
     """Poll each launched agent server's ``GET /health`` until it answers 200.
 
@@ -890,6 +928,13 @@ async def main_async():
                 await asyncio.sleep(0)
             else:
                 try:
+                    if distributed:
+                        # Distributed dispatch calls the hub before any agent
+                        # server; wait for it to listen or the first /workers
+                        # POST dies with "All connection attempts failed".
+                        print("Waiting for central hub to become ready...")
+                        await wait_for_hub_ready(args.hub_port, server_tasks)
+                        print("Central hub is ready.")
                     print("Waiting for API servers to become ready...")
                     await wait_for_servers_ready(agent_ports, server_tasks)
                     print("All requested agent servers are ready.")

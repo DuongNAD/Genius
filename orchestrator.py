@@ -863,6 +863,13 @@ async def call_api(
                     status = task_info.get("status")
                     if status == "completed":
                         result = task_info.get("result")
+                        # The worker wraps its output as {"output": <content>};
+                        # unwrap to the content string (the in-memory WS path
+                        # does the same in serve.py). Returning the raw dict made
+                        # every stage write a dict to its artifact file, which
+                        # failed and left research.md/design.md/... empty.
+                        if isinstance(result, dict):
+                            result = result.get("output", result)
                         if use_cache:
                             _cache_store(cache_key, result)
                         return result
