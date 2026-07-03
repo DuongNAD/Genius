@@ -108,6 +108,18 @@ def verify_api_key(
     return payload
 
 
+def _max_request_bytes() -> int:
+    """Max accepted request-body size for /run and /status. Bounds a pre-auth
+    memory-exhaustion DoS; a skill payload (prompt + scanned context) is small
+    relative to this. Tunable via GENIUS_MAX_REQUEST_BYTES; blank/junk -> 25 MiB
+    (matches the response cap)."""
+    try:
+        val = int(os.getenv("GENIUS_MAX_REQUEST_BYTES") or 25 * 1024 * 1024)
+        return val if val > 0 else 25 * 1024 * 1024
+    except (TypeError, ValueError):
+        return 25 * 1024 * 1024
+
+
 async def checksum_middleware(request: Request, call_next):
     path = request.url.path
     config = load_config()
@@ -115,6 +127,28 @@ async def checksum_middleware(request: Request, call_next):
     request.state.use_plain_checksum = False
 
     if path.endswith("/run") or "/status" in path:
+        # Reject oversized bodies BEFORE buffering them: verify_raw_body_checksum
+        # below reads the entire body into memory, so without this an attacker
+        # who doesn't even know SKILL_API_KEY could POST a multi-GB body and
+        # exhaust RAM before the checksum check fails. A missing/chunked
+        # Content-Length still buffers, but the honest-and-huge case (the
+        # practical DoS) is cut off cheaply here.
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                too_large = int(content_length) > _max_request_bytes()
+            except (TypeError, ValueError):
+                too_large = False
+            if too_large:
+                content = {"detail": "Request body too large"}
+                body_bytes = json.dumps(content).encode("utf-8")
+                checksum = hashlib.sha256(body_bytes).hexdigest()
+                return JSONResponse(
+                    status_code=413,
+                    content=content,
+                    headers={"X-Payload-SHA256": checksum},
+                )
+
         x_payload = request.headers.get("X-Payload-SHA256")
         if not x_payload:
             content = {"detail": "Missing X-Payload-SHA256 header"}

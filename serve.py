@@ -268,8 +268,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         await websocket.close(code=4001)
         return
     try:
-        payload = decode_jwt(
-            token, secret, require_exp=True, max_lifetime=jwt_max_lifetime()
+        # decode_jwt records the token's jti in the anti-replay table via the
+        # single blocking SQLite writer thread. Offload it so a DB-contended
+        # write can't freeze the hub event loop mid-handshake — which would
+        # stall heartbeat processing and the sweeper and trigger spurious
+        # worker eviction (and, in --auto-pilot, freeze every skill server too).
+        payload = await asyncio.to_thread(
+            decode_jwt,
+            token,
+            secret,
+            require_exp=True,
+            max_lifetime=jwt_max_lifetime(),
         )
         worker_id_from_jwt = payload.get("sub") or payload.get("worker_id")
     except Exception:
@@ -408,8 +417,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
 
 async def start_hub_server(port: int):
+    # Default 0.0.0.0 (the hub is auth-protected and Docker maps its port);
+    # `or` so a blank GENIUS_HUB_HOST from .env is treated as unset. Set
+    # GENIUS_HUB_HOST=127.0.0.1 to restrict it to loopback on bare metal.
+    hub_host = os.environ.get("GENIUS_HUB_HOST") or "0.0.0.0"
     config = uvicorn.Config(
-        app, host="0.0.0.0", port=port, log_level="info", ws="auto"
+        app, host=hub_host, port=port, log_level="info", ws="auto"
     )
     server = uvicorn.Server(config)
     await server.serve()
@@ -664,9 +677,13 @@ async def start_server(role: str, port: int):
     app = get_api_app(role)
 
     def _make_server(bind_port: int) -> uvicorn.Server:
+        # Default 0.0.0.0 (skill servers are JWT-protected and Docker maps
+        # their ports); `or` so a blank GENIUS_SKILL_HOST is treated as unset.
+        # Set GENIUS_SKILL_HOST=127.0.0.1 to keep them on loopback on bare metal.
+        skill_host = os.environ.get("GENIUS_SKILL_HOST") or "0.0.0.0"
         config = uvicorn.Config(
             app,
-            host="0.0.0.0",
+            host=skill_host,
             port=bind_port,
             log_level="info",
             ws="auto",
@@ -955,4 +972,13 @@ def main():
 
 
 if __name__ == "__main__":
+    # Launched as `python serve.py`, this module is registered as "__main__".
+    # The orchestrator later runs `from serve import worker_registry,
+    # central_hub, pending_tasks` at dispatch time; without this alias Python
+    # re-imports and RE-EXECUTES serve.py as a separate "serve" module with its
+    # own empty CentralHub, so the in-process registry the orchestrator reads is
+    # always empty (the distributed in-memory fast path is unreachable) and the
+    # dashboard's worker view is permanently blank. Alias so `import serve`
+    # returns this same, already-initialized running module.
+    sys.modules["serve"] = sys.modules[__name__]
     main()

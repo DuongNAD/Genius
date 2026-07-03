@@ -67,7 +67,19 @@ async def execute_agent(
     config = load_config()
     provider = make_provider(role, config, default_chain=default_chain)
     agent_class = globals()[agent_cls_name]
-    agent = agent_class(provider=provider, config=config, output_file="None")
+    # stateless=True mirrors the skill-server hardening: the reviewer agent must
+    # NOT fall into its flake8/pytest self-healing loop, which runs the host's
+    # test suite and writes model-generated code into the server's working tree
+    # (a remote-code-execution surface reachable from the MCP `review`/`code`
+    # tools). use_memory=False also avoids a blocking VectorMemory/model load on
+    # the event loop. output_file="None" keeps suppressing the artifact write.
+    agent = agent_class(
+        provider=provider,
+        config=config,
+        output_file="None",
+        stateless=True,
+        use_memory=False,
+    )
 
     if agent_name == "code":
         prompt = f"/code {prompt}"
@@ -159,7 +171,19 @@ async def _run_review(code: str, instructions: str) -> str:
     config = load_config()
     provider = make_provider(role, config, default_chain=default_chain)
     agent_class = globals()[agent_cls_name]
-    agent = agent_class(provider=provider, config=config, output_file="None")
+    # stateless=True mirrors the skill-server hardening: the reviewer agent must
+    # NOT fall into its flake8/pytest self-healing loop, which runs the host's
+    # test suite and writes model-generated code into the server's working tree
+    # (a remote-code-execution surface reachable from the MCP `review`/`code`
+    # tools). use_memory=False also avoids a blocking VectorMemory/model load on
+    # the event loop. output_file="None" keeps suppressing the artifact write.
+    agent = agent_class(
+        provider=provider,
+        config=config,
+        output_file="None",
+        stateless=True,
+        use_memory=False,
+    )
 
     prompt = (
         "Perform a thorough code review of the following code. Identify bugs, "
@@ -1007,6 +1031,10 @@ if __name__ == "__main__":
         # Bind localhost by default so the unauthenticated tool endpoint isn't
         # reachable off-box. To expose it (GENIUS_MCP_HOST=0.0.0.0), set
         # GENIUS_MCP_TOKEN so /tools/call requires a bearer token.
-        host = os.environ.get("GENIUS_MCP_HOST", "127.0.0.1")
+        # `or` (not a get() default): a blank GENIUS_MCP_HOST shipped in
+        # .env.example and loaded as "" by python-dotenv would otherwise become
+        # the empty host, which uvicorn/socket binds as 0.0.0.0 — exposing the
+        # unauthenticated tool endpoint to the whole network. Blank == loopback.
+        host = os.environ.get("GENIUS_MCP_HOST") or "127.0.0.1"
         port = int(os.environ.get("GENIUS_MCP_PORT") or 8000)
         uvicorn.run("mcp_server:app", host=host, port=port)

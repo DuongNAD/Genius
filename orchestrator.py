@@ -20,7 +20,12 @@ from tenacity import (
 # Re-exported so existing `from orchestrator import extract_code` callers (and
 # tests) keep working after the helper moved to a shared module.
 from ag_core.utils.code_extract import extract_code
-from ag_core.utils.cli_runner import cli_timeout
+from ag_core.utils.cli_runner import (
+    cli_timeout,
+    test_timeout,
+    communicate_with_timeout,
+    CLITimeoutError,
+)
 
 
 def make_http_client() -> httpx.AsyncClient:
@@ -316,7 +321,17 @@ async def run_subprocess(cmd: list, env: dict = None) -> tuple[int, str]:
     process = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
     )
-    stdout, stderr = await process.communicate()
+    cli_name = " ".join(str(c) for c in cmd[:2]) if cmd else "subprocess"
+    try:
+        stdout, stderr = await communicate_with_timeout(
+            process, timeout=test_timeout(), cli_name=cli_name
+        )
+    except CLITimeoutError as e:
+        # Bound the wait so a hung flake8/pytest (an LLM-generated infinite loop
+        # or blocking call) can't freeze the pipeline forever; surface it as a
+        # non-zero exit (124, the conventional timeout code) so callers treat it
+        # as a verification failure and self-heal instead of hanging.
+        return 124, str(e)
     output = (
         stdout.decode("utf-8", errors="replace")
         + "\n"
@@ -568,6 +583,18 @@ def wait_strategy(retry_state):
     return wait_exponential(multiplier=1, min=1, max=10)(retry_state)
 
 
+def _resolve_headers(headers):
+    """Build request headers, minting a FRESH JWT per call when a factory is
+    given. The skill server's anti-replay consumes a token's ``jti`` on the
+    first auth check (even for a request that then 429s), so re-sending the
+    same token on a tenacity retry is rejected as "Token replay detected"
+    (401) — turning any transient 429/5xx into a hard failure and defeating the
+    idempotency dedup. Passing a callable makes each retry attempt authenticate
+    with a new jti; a plain dict is still accepted for callers that don't care.
+    """
+    return headers() if callable(headers) else headers
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_strategy,
@@ -575,7 +602,9 @@ def wait_strategy(retry_state):
     reraise=True,
 )
 async def perform_post_with_retry(client, url, payload_bytes, headers):
-    response = await client.post(url, content=payload_bytes, headers=headers)
+    response = await client.post(
+        url, content=payload_bytes, headers=_resolve_headers(headers)
+    )
     response.raise_for_status()
     verify_response_checksum(response)
     return response
@@ -588,7 +617,7 @@ async def perform_post_with_retry(client, url, payload_bytes, headers):
     reraise=True,
 )
 async def perform_get_with_retry(client, url, headers):
-    response = await client.get(url, headers=headers)
+    response = await client.get(url, headers=_resolve_headers(headers))
     response.raise_for_status()
     verify_response_checksum(response)
     return response
@@ -703,11 +732,16 @@ async def call_api(
                     payload_workers, sort_keys=True, separators=(",", ":")
                 ).encode("utf-8")
 
-                post_payload = {"sub": "orchestrator", "exp": time.time() + 300}
-                post_token = encode_jwt(post_payload, api_key)
+                # The hub's HTTP endpoints authenticate the RAW shared secret:
+                # CentralHub.verify_auth constant-time-compares X-API-Key against
+                # SKILL_API_KEY, and the hub's own create_headers sends the raw
+                # key. A JWT never equals the raw key, so sending one (as this
+                # used to) 401'd every hub request and made distributed mode
+                # dead-on-arrival. Sending the raw key matches the hub contract
+                # and also avoids the one-time-jti replay rejection when this
+                # same header dict is re-posted in the poll loops below.
                 headers = {
-                    "X-API-Key": post_token,
-                    "Authorization": f"Bearer {post_token}",
+                    "X-API-Key": secret,
                     "X-Payload-SHA256": workers_checksum,
                     "Content-Type": "application/json",
                 }
@@ -860,8 +894,15 @@ async def call_api(
                     f"Worker '{worker_id}' does not have an active WebSocket connection."
                 )
 
-            serialized = json.dumps(task_data, sort_keys=True).encode("utf-8")
-            checksum = hashlib.sha256(serialized).hexdigest()
+            # HMAC (not plain SHA-256): the worker verifies the dispatch with
+            # verify_checksum(task_data, checksum, api_key), which is HMAC-only
+            # in production. Plain SHA-256 here was silently accepted only under
+            # pytest (conftest patches verify_checksum to allow it) and rejected
+            # every real in-memory dispatch as "Bad Checksum".
+            from ag_core.utils.security import calculate_checksum
+
+            secret = load_config().skill_api_key or os.getenv("SKILL_API_KEY", "")
+            checksum = calculate_checksum(task_data, secret)
 
             dispatch_payload = {
                 "type": "dispatch",
@@ -978,6 +1019,8 @@ async def call_api(
     config = load_config()
     secret = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
     req_checksum = calculate_checksum(req_payload, secret)
+    # GET /status has an empty body, so its checksum is over empty bytes.
+    get_checksum = calculate_checksum(b"", secret)
     payload_bytes = json.dumps(
         req_payload, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -997,20 +1040,36 @@ async def call_api(
                 return ""
         return ""
 
+    def _make_post_headers():
+        # Fresh jti per attempt (see _resolve_headers); the idempotency key is
+        # deliberately STABLE across retries so a re-sent /run after a lost
+        # response is deduplicated server-side instead of running twice.
+        post_token = encode_jwt(
+            {"sub": "orchestrator", "exp": time.time() + 300}, api_key
+        )
+        return {
+            "X-API-Key": post_token,
+            "Authorization": f"Bearer {post_token}",
+            "X-Payload-SHA256": req_checksum,
+            "Content-Type": "application/json",
+            "X-Idempotency-Key": idempotency_key,
+        }
+
+    def _make_get_headers():
+        poll_token = encode_jwt(
+            {"sub": "orchestrator", "exp": time.time() + 300}, api_key
+        )
+        return {
+            "X-Payload-SHA256": get_checksum,
+            "X-API-Key": poll_token,
+            "Authorization": f"Bearer {poll_token}",
+        }
+
     async def _execute(c):
         try:
             # 1. Start the run
-            post_payload = {"sub": "orchestrator", "exp": time.time() + 300}
-            post_token = encode_jwt(post_payload, api_key)
-            post_headers = {
-                "X-API-Key": post_token,
-                "Authorization": f"Bearer {post_token}",
-                "X-Payload-SHA256": req_checksum,
-                "Content-Type": "application/json",
-                "X-Idempotency-Key": idempotency_key,
-            }
             response = await perform_post_with_retry(
-                c, f"{base_url}/run", payload_bytes, post_headers
+                c, f"{base_url}/run", payload_bytes, _make_post_headers
             )
             res_data = response.json()
             task_id = res_data.get("task_id")
@@ -1025,9 +1084,6 @@ async def call_api(
                 f"HTTP request to start task at {base_url}/run failed: {e}{detail}"
             )
 
-        # GET request has empty body, so checksum is of empty bytes
-        get_checksum = calculate_checksum(b"", secret)
-
         # 2. Poll for completion
         poll_start = time.time()
         while True:
@@ -1039,15 +1095,8 @@ async def call_api(
                     f"GENIUS_CLI_TIMEOUT."
                 )
             try:
-                poll_payload = {"sub": "orchestrator", "exp": time.time() + 300}
-                poll_token = encode_jwt(poll_payload, api_key)
-                get_headers = {
-                    "X-Payload-SHA256": get_checksum,
-                    "X-API-Key": poll_token,
-                    "Authorization": f"Bearer {poll_token}",
-                }
                 status_response = await perform_get_with_retry(
-                    c, f"{base_url}/status/{task_id}", get_headers
+                    c, f"{base_url}/status/{task_id}", _make_get_headers
                 )
                 status_data = status_response.json()
                 curr_status = status_data.get("status")
@@ -1477,7 +1526,13 @@ async def process_single_file(
                         stderr=asyncio.subprocess.PIPE,
                         env=env,
                     )
-                    stdout, stderr = await process.communicate()
+                    # Bounded: a generated test with an infinite loop or a
+                    # blocking call would otherwise hang this file's task (and
+                    # the whole asyncio.gather fan-out) forever. On timeout the
+                    # process tree is killed and CLITimeoutError is caught below.
+                    stdout, stderr = await communicate_with_timeout(
+                        process, timeout=test_timeout(), cli_name="pytest"
+                    )
                     pytest_exit_code = process.returncode
                     test_failures_logs = (
                         stdout.decode("utf-8", errors="replace")
@@ -1500,7 +1555,18 @@ async def process_single_file(
             # output (crash, truncation, stripped result) — fail closed rather than
             # treating an absent audit as "clean". Test modules are exempt:
             # their audit is skipped by design.
-            tests_passed = pytest_exit_code == 0
+            # Exit 5 = "no tests were collected". For a directly-executed test
+            # module that is a support file (tests/__init__.py, conftest.py) or
+            # simply defines no test functions, that is NOT a failure — pytest
+            # can never make such a file exit 0, so treating 5 as failure loops
+            # the self-heal until it gives up and fails the whole pipeline (a
+            # DesignPlan listing tests/__init__.py used to guarantee that). Only
+            # relaxed for designer-provided test modules run directly; a
+            # generated test_<file>.py returning 5 still means the Tester failed.
+            PYTEST_NO_TESTS_COLLECTED = 5
+            tests_passed = pytest_exit_code == 0 or (
+                file_is_test and pytest_exit_code == PYTEST_NO_TESTS_COLLECTED
+            )
             security_missing = not file_is_test and not (
                 security_report and security_report.strip()
             )
@@ -2637,7 +2703,19 @@ async def run_e2e_pipeline(
         # Parse plan for files
         files_to_implement = parse_design_for_files(claude_content)
         if not files_to_implement:
-            logger.info("No files parsed from plan.md. Nothing to implement.")
+            # A plan with no parseable files means nothing gets implemented.
+            # Returning the plan text as a "successful" result silently exits 0
+            # having built nothing (a prose answer from the architect did exactly
+            # that in a real run). Fail loudly in production; keep the legacy
+            # return under pytest, where design self-heal is off and fixtures
+            # rely on it (same convention as run_pipeline).
+            logger.warning("No files parsed from plan.md. Nothing to implement.")
+            if design_selfheal_enabled():
+                raise PipelineError(
+                    "E2E design produced no implementable files — the architect "
+                    "response was not a parseable plan. Refine the prompt or "
+                    "re-run."
+                )
             return claude_content
 
         logger.info(
@@ -2746,9 +2824,20 @@ async def run_e2e_pipeline(
                         [project_dir, project_src_dir, env.get("PYTHONPATH", "")]
                     ).strip(os.path.pathsep)
 
-                    # Check lint with flake8
-                    flake8_cmd = [sys.executable, "-m", "flake8", target_file_path]
-                    flake8_code, flake8_out = await run_subprocess(flake8_cmd, env=env)
+                    # Check lint with flake8 — Python files only. A non-.py
+                    # target (README.md, Dockerfile, JSON, ...) linted as Python
+                    # yields a spurious E999 SyntaxError that fails every attempt
+                    # and dooms the whole e2e run; its content is written as-is.
+                    file_is_python = target_file_path.endswith(".py")
+                    if file_is_python:
+                        flake8_cmd = [
+                            sys.executable, "-m", "flake8", target_file_path
+                        ]
+                        flake8_code, flake8_out = await run_subprocess(
+                            flake8_cmd, env=env
+                        )
+                    else:
+                        flake8_code, flake8_out = 0, ""
                     # flake8 is only a dev dependency; if it's not installed, don't
                     # treat its absence as a lint failure that fails every attempt.
                     if flake8_code != 0 and "No module named flake8" in flake8_out:
@@ -2763,7 +2852,7 @@ async def run_e2e_pipeline(
                     # file, so a sibling's not-yet-implemented or mid-write test
                     # would fail our verification non-deterministically. Each
                     # sibling's test is verified by its own task.
-                    if os.path.exists(test_file_path):
+                    if file_is_python and os.path.exists(test_file_path):
                         pytest_cmd = [sys.executable, "-m", "pytest", test_file_path]
                         pytest_code, pytest_out = await run_subprocess(
                             pytest_cmd, env=env

@@ -191,6 +191,18 @@ def get_status():
     return result
 
 
+def _dashboard_row_limit() -> int:
+    """Max rows returned per data endpoint / pushed over the WebSocket. Bounds
+    the query, JSON serialization, and WS payload so a months-old DB (tens of
+    thousands of multi-MB prompt/result rows) can't OOM the dashboard or its
+    clients. Tunable via GENIUS_DASHBOARD_MAX_ROWS; blank/junk -> 200."""
+    try:
+        val = int(os.environ.get("GENIUS_DASHBOARD_MAX_ROWS") or 200)
+        return val if val > 0 else 200
+    except (TypeError, ValueError):
+        return 200
+
+
 @app.get("/api/conversations", dependencies=[Depends(require_dashboard_auth)])
 def get_conversations():
     try:
@@ -198,7 +210,9 @@ def get_conversations():
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, timestamp, prompt, result FROM conversations ORDER BY id DESC"
+                "SELECT id, timestamp, prompt, result FROM conversations "
+                "ORDER BY id DESC LIMIT ?",
+                (_dashboard_row_limit(),),
             )
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
@@ -213,7 +227,9 @@ def get_logs():
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, timestamp, task_id, agent_name, prompt, result, status, error FROM agent_logs ORDER BY id DESC"
+                "SELECT id, timestamp, task_id, agent_name, prompt, result, "
+                "status, error FROM agent_logs ORDER BY id DESC LIMIT ?",
+                (_dashboard_row_limit(),),
             )
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
@@ -637,6 +653,10 @@ if __name__ == "__main__":
     # Bind localhost by default so the data endpoints (full prompt/result/error
     # history) aren't reachable off-box. To expose it (GENIUS_DASHBOARD_HOST=
     # 0.0.0.0), set GENIUS_DASHBOARD_TOKEN and open /?token=<token>.
-    host = os.environ.get("GENIUS_DASHBOARD_HOST", "127.0.0.1")
+    # `or` (not a get() default): a blank GENIUS_DASHBOARD_HOST shipped in
+    # .env.example and loaded as "" by python-dotenv would otherwise become the
+    # empty host, which binds 0.0.0.0 — exposing the full prompt/result/error
+    # history on all interfaces with no auth. Blank == loopback.
+    host = os.environ.get("GENIUS_DASHBOARD_HOST") or "127.0.0.1"
     port = int(os.environ.get("GENIUS_DASHBOARD_PORT") or 8080)
     uvicorn.run("dashboard:app", host=host, port=port, ws="auto")

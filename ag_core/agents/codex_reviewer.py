@@ -5,6 +5,7 @@ from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
 from ag_core.utils.logger import log_transaction
 from ag_core.utils.code_extract import extract_code
+from ag_core.utils.cli_runner import communicate_with_timeout, test_timeout
 
 
 class CodexReviewerAgent(BaseAgent):
@@ -145,7 +146,9 @@ class CodexReviewerAgent(BaseAgent):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await process.communicate()
+                stdout, stderr = await communicate_with_timeout(
+                    process, timeout=test_timeout(), cli_name="verification"
+                )
                 linter_findings = (
                     stdout.decode("utf-8", errors="replace")
                     + "\n"
@@ -174,7 +177,9 @@ class CodexReviewerAgent(BaseAgent):
                     stderr=asyncio.subprocess.PIPE,
                     env=env,
                 )
-                stdout, stderr = await process.communicate()
+                stdout, stderr = await communicate_with_timeout(
+                    process, timeout=test_timeout(), cli_name="verification"
+                )
                 pytest_exit_code = process.returncode
                 pytest_logs = (
                     stdout.decode("utf-8", errors="replace")
@@ -242,7 +247,9 @@ class CodexReviewerAgent(BaseAgent):
                         stderr=asyncio.subprocess.PIPE,
                         env=env,
                     )
-                    stdout, stderr = await process.communicate()
+                    stdout, stderr = await communicate_with_timeout(
+                        process, timeout=test_timeout(), cli_name="verification"
+                    )
                     pytest_exit_code = process.returncode
                     pytest_logs = (
                         stdout.decode("utf-8", errors="replace")
@@ -260,7 +267,9 @@ class CodexReviewerAgent(BaseAgent):
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE,
                         )
-                        stdout, stderr = await process.communicate()
+                        stdout, stderr = await communicate_with_timeout(
+                            process, timeout=test_timeout(), cli_name="verification"
+                        )
                         linter_findings = (
                             stdout.decode("utf-8", errors="replace")
                             + "\n"

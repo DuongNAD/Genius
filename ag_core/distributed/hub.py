@@ -55,10 +55,19 @@ class CentralHub:
         self.network = None
         self.task_queue = TaskQueue()
         self.task_counter = 0
+        from ag_core.utils.cli_runner import cli_timeout
+
         self.config = {
             "max_workers": 10,
             "heartbeat_timeout": 0.5,
-            "task_timeout": 60.0,
+            # A task on a live, heartbeating worker legitimately runs as long as
+            # the agent CLI (cli_timeout, default 600s), and the orchestrator
+            # waits cli_timeout+60 for it. The old 60s default made the sweeper
+            # reap healthy long-running agent tasks (cancelling them mid-flight),
+            # so distributed mode failed any real LLM call over a minute. Set the
+            # backstop safely beyond the worker's own CLI ceiling; tests still
+            # override this with a small value to exercise expiry.
+            "task_timeout": cli_timeout() + 120.0,
         }
         self._sweeper_task: Optional[asyncio.Task] = None
         self._sweeper_running = False

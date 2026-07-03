@@ -247,7 +247,18 @@ class ClientWorker:
 
                         provider = make_provider(factory_role, config)
                         agent = agent_class(
-                            provider=provider, config=config, output_file="None"
+                            provider=provider,
+                            config=config,
+                            output_file="None",
+                            # Mirror the skill-server hardening (build_agent):
+                            # no VectorMemory — its lazy sentence-transformers
+                            # model load / O(N) query runs synchronously on this
+                            # worker's event loop and would stall the heartbeat,
+                            # risking hub-side eviction and duplicate dispatch —
+                            # and stateless so a codex task doesn't run the
+                            # host's pytest or write files on the worker.
+                            stateless=True,
+                            use_memory=False,
                         )
 
                         output = await agent.run(prompt=prompt, context_data=context)
