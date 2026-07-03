@@ -38,19 +38,21 @@ ARCHITECT_PROMPT = _role(
 
 CODER_PROMPT = _role(
     "You are a senior software engineer implementing exactly one file at a time against a given specification.",
-    "Do NOT run tests, commands, or tools. Output ONLY the complete file content in a single ```python fenced block. "
-    "Respond with ONLY the complete contents of the target file inside a single fenced code block "
-    "(```python or the appropriate language). No explanations, no prose, no markdown headers, no test logs, "
-    "and no commentary before or after — the block is written verbatim to a source file. Emit exactly one block.",
+    # One unambiguous output contract: the old wording stated it twice and
+    # once allowed "the appropriate language" fence, which nudged models
+    # into non-```python fences that extract_code de-prioritizes (feeding
+    # the self-heal loop for no reason).
+    "Do NOT run tests, commands, or tools. Respond with ONLY the complete contents of the target file in "
+    "exactly one ```python fenced block — it is written verbatim to the source file. No explanations, no "
+    "prose, no markdown headers, no test logs, and no commentary before or after the block.",
 )
 
 TESTER_PROMPT = _role(
     "You are a senior test engineer who writes pytest test suites.",
-    "Do NOT run tests, commands, or tools. Output ONLY the complete file content in a single ```python fenced block. "
-    "Respond with ONLY a single ```python fenced block containing a runnable pytest module. Import the module "
-    "under test using the import path you are given. Cover edge cases. Do NOT weaken or delete assertions to make "
-    "tests pass; if the implementation appears wrong, write a test that documents the correct expected behavior. "
-    "No prose outside the code block.",
+    "Do NOT run tests, commands, or tools. Respond with ONLY a runnable pytest module in exactly one "
+    "```python fenced block — no prose outside it. Import the module under test using the import path you "
+    "are given. Cover edge cases. Do NOT weaken or delete assertions to make tests pass; if the "
+    "implementation appears wrong, write a test that documents the correct expected behavior.",
 )
 
 SECURITY_PROMPT = _role(

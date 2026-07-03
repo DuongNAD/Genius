@@ -162,15 +162,40 @@ def _header_lines():
     return lines, bool(skill_key)
 
 
+def _dead_roles(results) -> list:
+    """Roles whose ENTIRE effective chain failed to resolve.
+
+    A single-backend override (e.g. GENIUS_PROVIDER_RESEARCHER=agy with agy
+    not installed) leaves the role with zero working backends; "optional"
+    means safe to lack as a fallback, not safe to be the whole chain.
+    """
+    statuses = {r["cli"]: r["status"] for r in results}
+    dead = []
+    for role in provider_factory.DEFAULT_CHAINS:
+        try:
+            chain = provider_factory.resolve_chain(role)
+        except ValueError:
+            dead.append(role)
+            continue
+        # Only judge backends the check run actually covered; an empty
+        # intersection means we cannot claim the role is dead.
+        known = [b for b in chain if b in statuses]
+        if known and all(statuses[b] == "MISSING" for b in known) and known == chain:
+            dead.append(role)
+    return dead
+
+
 def provider_chain_lines(results):
     """Render each role's effective provider chain (env-knob aware).
 
     Pure (reads only env + the supplied check ``results``). Flags a role whose
     PRIMARY backend CLI failed to resolve when a resolvable fallback backend
-    exists further down its chain.
+    exists further down its chain, and errors a role whose whole chain is
+    missing.
     """
     lines = ["Provider chains (defaults; override with GENIUS_PROVIDER_<ROLE>=a,b):"]
     statuses = {r["cli"]: r["status"] for r in results}
+    dead = set(_dead_roles(results))
     for role in provider_factory.DEFAULT_CHAINS:
         try:
             chain = provider_factory.resolve_chain(role)
@@ -180,6 +205,12 @@ def provider_chain_lines(results):
         source = provider_factory.chain_source(role)
         suffix = f" ({source})" if source else ""
         lines.append(f"[info]    role {role:8} -> {', '.join(chain)}{suffix}")
+        if role in dead:
+            lines.append(
+                f"[ERROR]   role {role}: every backend in its chain is "
+                "MISSING - the role cannot run at all"
+            )
+            continue
         if len(chain) > 1 and statuses.get(chain[0]) == "MISSING":
             alive = next((b for b in chain[1:] if statuses.get(b) != "MISSING"), None)
             if alive:
@@ -222,7 +253,12 @@ def report_lines(results, skill_key_ok: bool):
     optional_missing = [
         r for r in results if r["status"] == "MISSING" and r["cli"] in OPTIONAL_CLIS
     ]
-    if missing or not skill_key_ok:
+    dead_roles = _dead_roles(results)
+    if missing or dead_roles or not skill_key_ok:
+        if dead_roles:
+            lines.append(
+                "Roles with no working backend: " + ", ".join(sorted(dead_roles))
+            )
         lines.append(
             "Result: NOT READY - resolve the items above before running the "
             "real pipeline."

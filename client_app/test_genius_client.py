@@ -16,11 +16,16 @@ from genius_client import (
     TaskFailedError,
     generate_jwt,
     get_endpoints,
+    hmac_checksum,
     verify_response,
     make_request_with_retry,
     run_client,
     main,
 )
+
+# Servers are HMAC-only in production; the client computes/verifies HMAC
+# checksums with the shared key.
+TEST_KEY = "test-shared-key"
 
 
 class TestGeniusClient(unittest.TestCase):
@@ -79,11 +84,11 @@ class TestGeniusClient(unittest.TestCase):
         mock_resp = MagicMock()
         content = b'{"status":"completed","result":"ok"}'
         mock_resp.content = content
-        mock_resp.headers = {"X-Payload-SHA256": hashlib.sha256(content).hexdigest()}
+        mock_resp.headers = {"X-Payload-SHA256": hmac_checksum(content, TEST_KEY)}
 
         # Should not raise exception
         try:
-            verify_response(mock_resp)
+            verify_response(mock_resp, TEST_KEY)
         except ChecksumMismatchError:
             self.fail("verify_response raised ChecksumMismatchError unexpectedly!")
 
@@ -93,15 +98,17 @@ class TestGeniusClient(unittest.TestCase):
         mock_resp.headers = {}
 
         with self.assertRaises(ChecksumMismatchError):
-            verify_response(mock_resp)
+            verify_response(mock_resp, TEST_KEY)
 
     def test_verify_response_mismatch(self):
         mock_resp = MagicMock()
-        mock_resp.content = b'{"status":"completed"}'
-        mock_resp.headers = {"X-Payload-SHA256": "badchecksum"}
+        content = b'{"status":"completed"}'
+        mock_resp.content = content
+        # Plain SHA-256 (the legacy scheme) must NOT be accepted anymore.
+        mock_resp.headers = {"X-Payload-SHA256": hashlib.sha256(content).hexdigest()}
 
         with self.assertRaises(ChecksumMismatchError):
-            verify_response(mock_resp)
+            verify_response(mock_resp, TEST_KEY)
 
     @patch("time.sleep", return_value=None)
     @patch("requests.post")
@@ -130,13 +137,13 @@ class TestGeniusClient(unittest.TestCase):
         response3 = MagicMock()
         response3.status_code = 200
         response3.content = b"content3"
-        response3.headers = {
-            "X-Payload-SHA256": hashlib.sha256(b"content3").hexdigest()
-        }
+        response3.headers = {"X-Payload-SHA256": hmac_checksum(b"content3", TEST_KEY)}
 
         mock_post.side_effect = [response1, response2, response3]
 
-        res = make_request_with_retry("POST", "http://test", {}, b"", max_retries=5)
+        res = make_request_with_retry(
+            "POST", "http://test", {}, b"", max_retries=5, secret=TEST_KEY
+        )
         self.assertEqual(res, response3)
         self.assertEqual(mock_post.call_count, 3)
 

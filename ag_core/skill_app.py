@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from ag_core.config import load_config
 from ag_core.provider_factory import canonical_role, make_provider
 from ag_core.utils.db import init_db
+from ag_core.utils.logger import logger
 from ag_core.utils.rate_limiter import make_rate_limit_dependency
 from ag_core.utils.security import checksum_middleware, verify_api_key
 
@@ -162,11 +163,17 @@ def create_skill_app(role: str) -> FastAPI:
         # them, so concurrent retries cannot both create a task.
         if idempotency_key and idempotency_key in idempotency:
             existing_id = idempotency[idempotency_key]
-            existing = tasks.get(existing_id, {"status": "processing"})
-            return {
-                "task_id": existing_id,
-                "status": existing.get("status", "processing"),
-            }
+            existing = tasks.get(existing_id)
+            if existing is not None:
+                return {
+                    "task_id": existing_id,
+                    "status": existing.get("status", "processing"),
+                }
+            # The deduped task was evicted from the (separately bounded)
+            # task store: handing back its id would 404 every /status poll
+            # and hard-fail the caller's pipeline. Treat the key as new and
+            # dispatch a fresh task instead.
+            idempotency.pop(idempotency_key, None)
 
         task_id = uuid.uuid4().hex
         tasks[task_id] = {"status": "processing", "result": None}
@@ -183,6 +190,10 @@ def create_skill_app(role: str) -> FastAPI:
                 )
                 tasks[task_id] = {"status": "completed", "result": output}
             except Exception as exc:  # noqa: BLE001 - report failure to caller
+                # Server-side traceback too: str(exc) relayed to the client
+                # is all the caller sees, and a CLI/provider failure with no
+                # server log is undebuggable in production.
+                logger.exception("[skill:%s] background task %s failed", role, task_id)
                 tasks[task_id] = {"status": "failed", "error": str(exc)}
 
         background_tasks.add_task(_execute)

@@ -477,12 +477,28 @@ def _resource_catalog() -> Dict[str, str]:
     return catalog
 
 
+# artifact file name -> workspace of the most recent job observed (by
+# orchestrate_status/_stage_progress) to have produced it. resources/read
+# and resources/list serve the CWD first (the long-standing behavior), then
+# fall back here: orchestrate jobs default to isolated .genius_jobs/<id>
+# workspaces, so without this fallback every artifacts_ready URI advertised
+# by orchestrate_status would 404 (-32002) on a follow-up resources/read.
+_ARTIFACT_WORKSPACES: Dict[str, str] = {}
+
+
 def _list_resources(workspace: str = None) -> List[Dict[str, str]]:
-    """Enumerate the whitelisted artifacts that exist in the workspace."""
+    """Enumerate the whitelisted artifacts that exist in the workspace
+    (or, failing that, in the last job workspace observed to hold them)."""
     root = workspace or os.getcwd()
     resources = []
     for name, desc in _resource_catalog().items():
-        if os.path.isfile(os.path.join(root, name)):
+        present = os.path.isfile(os.path.join(root, name))
+        if not present:
+            alt = _ARTIFACT_WORKSPACES.get(name)
+            present = bool(
+                alt and alt != root and os.path.isfile(os.path.join(alt, name))
+            )
+        if present:
             resources.append(
                 {
                     "uri": RESOURCE_URI_PREFIX + name,
@@ -511,16 +527,22 @@ def _read_resource(uri: str, workspace: str = None) -> List[Dict[str, str]]:
             f"{RESOURCE_URI_PREFIX}<name> where <name> is one of the pipeline "
             "artifacts reported by resources/list."
         )
-    path = os.path.join(workspace or os.getcwd(), name)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
-    except OSError:
-        raise ResourceNotFoundError(
-            f"Artifact '{name}' does not exist yet - the pipeline stage that "
-            "produces it has not completed. Poll orchestrate_status."
-        )
-    return [{"uri": uri, "mimeType": "text/markdown", "text": text}]
+    root = workspace or os.getcwd()
+    candidates = [os.path.join(root, name)]
+    alt = _ARTIFACT_WORKSPACES.get(name)
+    if alt and alt != root:
+        candidates.append(os.path.join(alt, name))
+    for path in candidates:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        return [{"uri": uri, "mimeType": "text/markdown", "text": text}]
+    raise ResourceNotFoundError(
+        f"Artifact '{name}' does not exist yet - the pipeline stage that "
+        "produces it has not completed. Poll orchestrate_status."
+    )
 
 
 # --- Full-pipeline orchestration (the "điều phối viên" entrypoint) ---------
@@ -610,6 +632,9 @@ def _stage_progress(job: Dict[str, Any]):
         )
         if done and fname in _RESOURCE_ARTIFACTS:
             ready.append(RESOURCE_URI_PREFIX + fname)
+            # Advertising this URI commits us to serving it: remember which
+            # workspace holds the artifact so resources/read can find it.
+            _ARTIFACT_WORKSPACES[fname] = workspace
     return stages, ready
 
 
@@ -625,6 +650,21 @@ def _collect_artifacts(workspace: str) -> Dict[str, str]:
             except OSError:
                 pass
     return artifacts
+
+
+def _approval_timeout() -> float:
+    """Max seconds an awaiting_approval job waits before failing.
+
+    Without a bound, a client that starts a require_approval job and never
+    approves/rejects (or disconnects) leaves the pipeline task parked on the
+    event forever — the one job class the finished-jobs cap cannot reclaim.
+    GENIUS_APPROVAL_TIMEOUT overrides; blank/junk -> 3600.
+    """
+    try:
+        val = float(os.environ.get("GENIUS_APPROVAL_TIMEOUT") or 3600.0)
+        return val if val > 0 else 3600.0
+    except (TypeError, ValueError):
+        return 3600.0
 
 
 async def _run_orchestration(
@@ -652,7 +692,16 @@ async def _run_orchestration(
                 job["status"] = "awaiting_approval"
                 job["artifacts"] = _collect_artifacts(workspace or os.getcwd())
                 job["approval_event"].clear()
-                await job["approval_event"].wait()
+                try:
+                    await asyncio.wait_for(
+                        job["approval_event"].wait(), timeout=_approval_timeout()
+                    )
+                except asyncio.TimeoutError:
+                    job["awaiting_stage"] = None
+                    raise RuntimeError(
+                        f"Pipeline stopped: stage '{stage}' approval timed "
+                        f"out after {_approval_timeout():.0f}s"
+                    )
                 # The approve/reject handler already flipped status and
                 # cleared awaiting_stage (synchronously, so pollers never see
                 # a stale pause state); only the rejection outcome is ours.

@@ -41,7 +41,7 @@ class ResearcherAgent(BaseAgent):
                 user_prompt = f"Verify facts, check assumptions, and identify potential logical gaps or factual errors in the following query against the project files context:\n\n{query}"
 
         # Scan project files (or use provided context_data) and format context
-        _, context = self.scan_context(context_data)
+        _, context = await self.scan_context_async(context_data)
         history_context = self.format_history()
 
         full_prompt = (

@@ -247,23 +247,57 @@ async def ws_dashboard(websocket: WebSocket):
             return
     await websocket.accept()
 
-    async def send_updates():
-        # get_status/get_conversations/get_logs do blocking socket + sqlite I/O;
-        # run them off the event loop so a slow probe or DB read doesn't stall
-        # the whole dashboard process.
-        status_data = await asyncio.to_thread(get_status)
-        conversations_data = await asyncio.to_thread(get_conversations)
-        logs_data = await asyncio.to_thread(get_logs)
-        await websocket.send_json(
-            {
-                "status": status_data,
-                "conversations": conversations_data,
-                "logs": logs_data,
-            }
-        )
+    send_lock = asyncio.Lock()
+    last_row_version = None  # (MAX(conversations.id), MAX(agent_logs.id))
+
+    def _row_version():
+        """Cheap change probe (two MAX(id) lookups) so the periodic push can
+        skip re-querying/re-serializing/re-sending the full multi-MB row
+        snapshot when nothing was inserted since the last push."""
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT MAX(id) FROM conversations")
+                conv_max = cursor.fetchone()[0]
+                cursor.execute("SELECT MAX(id) FROM agent_logs")
+                log_max = cursor.fetchone()[0]
+                return (conv_max, log_max)
+        except Exception:
+            return None
+
+    async def send_updates(force: bool = False):
+        # The lock serializes the 5s periodic push with an on-demand refresh:
+        # two coroutines interleaving send_json frames on the same socket is
+        # undefined (torn frames / spurious errors both paths would swallow).
+        nonlocal last_row_version
+        async with send_lock:
+            version = await asyncio.to_thread(_row_version)
+            if not force and version is not None and version == last_row_version:
+                # Rows unchanged — push only the (row-independent) status
+                # probe; the frontend guards each key, so a status-only
+                # payload is handled fine.
+                status_data = await asyncio.to_thread(get_status)
+                await websocket.send_json({"status": status_data})
+                return
+            # get_status/get_conversations/get_logs do blocking socket +
+            # sqlite I/O; run them off the event loop — and concurrently,
+            # they are independent — so a slow probe doesn't stall the push.
+            status_data, conversations_data, logs_data = await asyncio.gather(
+                asyncio.to_thread(get_status),
+                asyncio.to_thread(get_conversations),
+                asyncio.to_thread(get_logs),
+            )
+            await websocket.send_json(
+                {
+                    "status": status_data,
+                    "conversations": conversations_data,
+                    "logs": logs_data,
+                }
+            )
+            last_row_version = version
 
     try:
-        await send_updates()
+        await send_updates(force=True)
     except Exception:
         return
 
@@ -283,7 +317,7 @@ async def ws_dashboard(websocket: WebSocket):
         while True:
             data = await websocket.receive_json()
             if data.get("action") == "refresh":
-                await send_updates()
+                await send_updates(force=True)
     except WebSocketDisconnect:
         pass
     except Exception:

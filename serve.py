@@ -384,7 +384,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         "result": result,
                     }
                     headers = central_hub.create_headers(payload)
-                    await central_hub.handle_request("/report_result", payload, headers)
+                    sc, _, _ = await central_hub.handle_request(
+                        "/report_result", payload, headers
+                    )
+                    if sc != 200:
+                        # The hub refused the report — unknown task, or its
+                        # assignment guard fired (task belongs to another
+                        # worker, e.g. after a re-dispatch reused the id).
+                        # A stale/foreign report must not resolve the current
+                        # attempt's future or flip states here.
+                        continue
 
                     if worker_id in worker_registry.workers:
                         worker_registry.workers[worker_id]["status"] = "idle"

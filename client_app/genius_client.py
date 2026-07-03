@@ -48,13 +48,23 @@ def get_endpoints(port: int) -> tuple[str, str]:
         return "/run", "/status/{task_id}"
 
 
-def verify_response(response: requests.Response) -> None:
+def hmac_checksum(data: bytes, secret: str) -> str:
+    """HMAC-SHA256 over raw bytes — the only checksum production servers
+    accept and emit (checksum_middleware / verify_raw_body_checksum are
+    HMAC-only; plain SHA-256 exists solely in the legacy pytest patch, so a
+    plain-SHA client 400s against every real server)."""
+    return hmac.new(secret.encode("utf-8"), data, hashlib.sha256).hexdigest()
+
+
+def verify_response(response: requests.Response, secret: str) -> None:
     expected_checksum = response.headers.get("X-Payload-SHA256")
     if not expected_checksum:
         raise ChecksumMismatchError("Response is missing X-Payload-SHA256 header")
+    if not secret:
+        raise ChecksumMismatchError("Cannot verify response checksum without a key")
 
-    calculated = hashlib.sha256(response.content).hexdigest()
-    if calculated != expected_checksum:
+    calculated = hmac_checksum(response.content, secret)
+    if not hmac.compare_digest(calculated, expected_checksum):
         raise ChecksumMismatchError(
             f"Response checksum mismatch: expected {expected_checksum}, calculated {calculated}"
         )
@@ -68,6 +78,7 @@ def make_request_with_retry(
     max_retries: int = 5,
     initial_backoff: float = 1.0,
     backoff_factor: float = 2.0,
+    secret: str = "",
 ) -> requests.Response:
     attempt = 0
     backoff = initial_backoff
@@ -102,7 +113,7 @@ def make_request_with_retry(
                 continue
 
             response.raise_for_status()
-            verify_response(response)
+            verify_response(response, secret)
             return response
 
         except (requests.exceptions.RequestException, ChecksumMismatchError) as e:
@@ -148,7 +159,7 @@ def run_client(
 
     payload = {"prompt": prompt}
     payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    post_checksum = hashlib.sha256(payload_bytes).hexdigest()
+    post_checksum = hmac_checksum(payload_bytes, api_key)
 
     post_headers = {
         "X-API-Key": jwt_token,
@@ -166,6 +177,7 @@ def run_client(
         headers=post_headers,
         data=payload_bytes,
         max_retries=max_retries,
+        secret=api_key,
     )
 
     run_data = run_response.json()
@@ -176,7 +188,7 @@ def run_client(
     sys.stderr.write(f"[INFO] Task started successfully. Task ID: {task_id}\n")
     sys.stderr.flush()
 
-    get_checksum = hashlib.sha256(b"").hexdigest()
+    get_checksum = hmac_checksum(b"", api_key)
     get_headers = {
         "X-API-Key": jwt_token,
         "Authorization": f"Bearer {jwt_token}",
@@ -193,7 +205,11 @@ def run_client(
             raise TimeoutError(f"Task polling timed out after {timeout} seconds")
 
         status_response = make_request_with_retry(
-            method="GET", url=status_url, headers=get_headers, max_retries=max_retries
+            method="GET",
+            url=status_url,
+            headers=get_headers,
+            max_retries=max_retries,
+            secret=api_key,
         )
 
         status_data = status_response.json()
@@ -204,16 +220,16 @@ def run_client(
         elif curr_status == "failed":
             error_msg = status_data.get("error", "Unknown error occurred on server.")
             raise TaskFailedError(error_msg)
-        elif curr_status == "processing":
+        else:
+            # Any other status (processing/queued/pending/...) is
+            # non-terminal: keep polling instead of aborting on a status
+            # spelling this client doesn't know. The poll timeout above is
+            # the backstop.
             sys.stderr.write(
-                f"[INFO] Task status: processing... waiting {poll_interval}s\n"
+                f"[INFO] Task status: {curr_status}... waiting {poll_interval}s\n"
             )
             sys.stderr.flush()
             time.sleep(poll_interval)
-        else:
-            raise ValueError(
-                f"Unexpected task status '{curr_status}' returned for task {task_id}"
-            )
 
 
 def main():

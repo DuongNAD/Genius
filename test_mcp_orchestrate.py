@@ -349,6 +349,18 @@ async def test_orchestrate_status_running_hides_artifacts_key():
 # --- MCP resources (genius://artifacts/...) ---------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _isolate_artifact_workspace_map():
+    # resources/read|list consult a module-global artifact->workspace
+    # fallback map (populated by orchestrate_status polls) so URIs advertised
+    # for isolated job workspaces stay readable. Earlier orchestrate tests in
+    # this file populate it as a side effect; the resource tests below assert
+    # cwd-scoped behavior, so keep the map empty around every test.
+    mcp_server._ARTIFACT_WORKSPACES.clear()
+    yield
+    mcp_server._ARTIFACT_WORKSPACES.clear()
+
+
 async def _rpc(method, params=None, req_id=1):
     return await mcp_server.handle_request(
         {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params or {}}

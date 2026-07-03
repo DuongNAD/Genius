@@ -53,10 +53,10 @@ class CodexReviewerAgent(BaseAgent):
 
         # Scan project files (or use provided context_data) and format context
         root_dir = os.getcwd()
-        scanned_files, context = self.scan_context(context_data)
+        scanned_files, context = await self.scan_context_async(context_data)
 
         # Retrieve matching past interactions
-        past_memories = self.retrieve_memory(user_prompt, limit=3)
+        past_memories = await self.retrieve_memory_async(user_prompt, limit=3)
         memory_context = ""
         if past_memories:
             memory_context = "\n--- Relevant Historical Memory Context ---\n"
@@ -80,7 +80,7 @@ class CodexReviewerAgent(BaseAgent):
         self.history.append({"prompt": user_prompt, "response": content})
 
         # Save interaction to memory
-        self.store_memory(
+        await self.store_memory_async(
             text=f"Prompt: {user_prompt}\nResponse: {content}",
             metadata={
                 "type": "agent_run",
@@ -292,19 +292,5 @@ class CodexReviewerAgent(BaseAgent):
         return content
 
     def _write_output_file(self, content: str) -> None:
-        output_file = self.extra_params.get("output_file")
-        if output_file is None:
-            if "output_file" in self.extra_params:
-                output_file = "None"
-            else:
-                output_file = "review.md"
-
-        if output_file != "None":
-            try:
-                dir_name = os.path.dirname(output_file)
-                if dir_name:
-                    os.makedirs(dir_name, exist_ok=True)
-                with open(output_file, "w", encoding="utf-8") as f:
-                    f.write(content)
-            except Exception as e:
-                print(f"Warning: Failed to write output file {output_file}: {e}")
+        # Thin wrapper over the base helpers (same "None" sentinel handling).
+        self.write_output(self.resolve_output_file("review.md"), content)

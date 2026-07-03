@@ -86,17 +86,23 @@ class ProjectScanner:
 
                 abs_path = os.path.join(dirpath, filename)
 
-                # Filter out binary files
-                if is_binary_file(abs_path):
-                    continue
-
-                # Read content safely
+                # One open per file (opens are costly on Windows): probe the
+                # first 1KB for NUL bytes — same binary heuristic as
+                # is_binary_file — then keep reading from the same handle.
                 try:
-                    with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
-                        scanned_files[rel_file] = f.read()
+                    with open(abs_path, "rb") as fh:
+                        head = fh.read(1024)
+                        if b"\x00" in head:
+                            continue
+                        data = head + fh.read()
                 except Exception:
                     # Skip unreadable or locked files
                     continue
+                text = data.decode("utf-8", errors="ignore")
+                # Match the old text-mode read: universal-newline translation.
+                if "\r" in text:
+                    text = text.replace("\r\n", "\n").replace("\r", "\n")
+                scanned_files[rel_file] = text
 
         return scanned_files
 

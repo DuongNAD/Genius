@@ -6,6 +6,63 @@ import os
 from typing import Dict, List, Optional, Any
 from ag_core.utils.jwt import encode_jwt
 
+# accepted role id -> (agent module, agent class, provider-factory role).
+# Provider selection (default fallback chains + explicit
+# GENIUS_PROVIDER_<ROLE> overrides) lives in ag_core.provider_factory — same
+# wiring as skill_app. Legacy role ids ("grok", "grok_researcher") are folded
+# in by canonical_role() at the lookup site; the long aliases
+# ("claude_architect", "codex_reviewer", ...) are accepted directly here.
+# Module-level: execute_task used to rebuild this dict on every task.
+ROLE_AGENT_MAP = {
+    "researcher": (
+        "ag_core.agents.researcher",
+        "ResearcherAgent",
+        "researcher",
+    ),
+    "claude": (
+        "ag_core.agents.claude_architect",
+        "ClaudeArchitectAgent",
+        "claude",
+    ),
+    "claude_architect": (
+        "ag_core.agents.claude_architect",
+        "ClaudeArchitectAgent",
+        "claude",
+    ),
+    "codex": (
+        "ag_core.agents.codex_reviewer",
+        "CodexReviewerAgent",
+        "codex",
+    ),
+    "codex_reviewer": (
+        "ag_core.agents.codex_reviewer",
+        "CodexReviewerAgent",
+        "codex",
+    ),
+    "tester": ("ag_core.agents.tester", "TesterAgent", "tester"),
+    "tester_agent": ("ag_core.agents.tester", "TesterAgent", "tester"),
+    "security": (
+        "ag_core.agents.security_agent",
+        "SecurityAgent",
+        "security",
+    ),
+    "security_agent": (
+        "ag_core.agents.security_agent",
+        "SecurityAgent",
+        "security",
+    ),
+    "devops": (
+        "ag_core.agents.devops_agent",
+        "DevOpsAgent",
+        "devops",
+    ),
+    "devops_agent": (
+        "ag_core.agents.devops_agent",
+        "DevOpsAgent",
+        "devops",
+    ),
+}
+
 
 class ClientWorker:
     def __init__(self, worker_id: str, roles: List[str], api_key: Optional[str] = None):
@@ -170,62 +227,6 @@ class ClientWorker:
                 role = task_data.get("role")
                 prompt = task_data.get("prompt")
                 context = task_data.get("context", {})
-
-                # canonical role -> (agent module, agent class,
-                # provider-factory role). Provider selection (default fallback
-                # chains + explicit GENIUS_PROVIDER_<ROLE> overrides) lives in
-                # ag_core.provider_factory - same wiring as skill_app. Legacy
-                # role ids ("grok", "grok_researcher") are folded in by
-                # canonical_role() below.
-                ROLE_AGENT_MAP = {
-                    "researcher": (
-                        "ag_core.agents.researcher",
-                        "ResearcherAgent",
-                        "researcher",
-                    ),
-                    "claude": (
-                        "ag_core.agents.claude_architect",
-                        "ClaudeArchitectAgent",
-                        "claude",
-                    ),
-                    "claude_architect": (
-                        "ag_core.agents.claude_architect",
-                        "ClaudeArchitectAgent",
-                        "claude",
-                    ),
-                    "codex": (
-                        "ag_core.agents.codex_reviewer",
-                        "CodexReviewerAgent",
-                        "codex",
-                    ),
-                    "codex_reviewer": (
-                        "ag_core.agents.codex_reviewer",
-                        "CodexReviewerAgent",
-                        "codex",
-                    ),
-                    "tester": ("ag_core.agents.tester", "TesterAgent", "tester"),
-                    "tester_agent": ("ag_core.agents.tester", "TesterAgent", "tester"),
-                    "security": (
-                        "ag_core.agents.security_agent",
-                        "SecurityAgent",
-                        "security",
-                    ),
-                    "security_agent": (
-                        "ag_core.agents.security_agent",
-                        "SecurityAgent",
-                        "security",
-                    ),
-                    "devops": (
-                        "ag_core.agents.devops_agent",
-                        "DevOpsAgent",
-                        "devops",
-                    ),
-                    "devops_agent": (
-                        "ag_core.agents.devops_agent",
-                        "DevOpsAgent",
-                        "devops",
-                    ),
-                }
 
                 from ag_core.provider_factory import canonical_role
 
@@ -409,9 +410,25 @@ class ClientWorker:
 
                     async def read_msg_loop():
                         async for message in websocket:
-                            data = json.loads(message)
-                            print(f"[Worker] Received from hub: {data}")
+                            # One malformed frame must not escape the loop:
+                            # an uncaught parse error tears the connection
+                            # down and the reconnect path cancels every
+                            # in-flight task.
+                            try:
+                                data = json.loads(message)
+                            except (ValueError, TypeError):
+                                print("[Worker] Ignoring non-JSON frame from hub")
+                                continue
+                            if not isinstance(data, dict):
+                                print("[Worker] Ignoring non-object frame from hub")
+                                continue
                             msg_type = data.get("type")
+                            # Never log task_data: it carries full prompts and
+                            # context at unbounded volume on the hot path.
+                            print(
+                                f"[Worker] Received from hub: type={msg_type} "
+                                f"task_id={data.get('task_id')}"
+                            )
                             if (
                                 msg_type == "error"
                                 and data.get("error") == "not_registered"

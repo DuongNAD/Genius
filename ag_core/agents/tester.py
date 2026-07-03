@@ -43,7 +43,7 @@ class TesterAgent(BaseAgent):
                 user_prompt = f"Create a performance or stress testing script or scenario to simulate heavy concurrent load, analyzing latency and failure modes:\n\n{query}"
 
         # Scan project files (or use provided context_data) and format context
-        _, context = self.scan_context(context_data)
+        _, context = await self.scan_context_async(context_data)
         history_context = self.format_history()
 
         full_prompt = (
@@ -65,26 +65,14 @@ class TesterAgent(BaseAgent):
         )
 
         # Write to output file
-        output_file = self.extra_params.get("output_file")
-        if output_file is None:
-            if "output_file" in self.extra_params:
-                output_file = "None"
-            else:
-                output_file = "test_generated.py"
+        output_file = self.resolve_output_file("test_generated.py")
 
         test_failures_logs = ""
         if output_file != "None":
             # Self-healing loop
             for attempt in range(1, self.max_retries + 1):
                 code_to_write = extract_code(content)
-                try:
-                    dir_name = os.path.dirname(output_file)
-                    if dir_name:
-                        os.makedirs(dir_name, exist_ok=True)
-                    with open(output_file, "w", encoding="utf-8") as f:
-                        f.write(code_to_write)
-                except Exception as e:
-                    print(f"Warning: Failed to write output file {output_file}: {e}")
+                self.write_output(output_file, code_to_write)
 
                 import sys
                 import asyncio
@@ -146,11 +134,7 @@ class TesterAgent(BaseAgent):
 
             # Make sure the final clean code without evidence remains written in output_file
             code_to_write = extract_code(content)
-            try:
-                with open(output_file, "w", encoding="utf-8") as f:
-                    f.write(code_to_write)
-            except Exception:
-                pass
+            self.write_output(output_file, code_to_write)
 
             # Append the test execution evidence (pytest stdout/stderr) to the returned markdown response
             content = (

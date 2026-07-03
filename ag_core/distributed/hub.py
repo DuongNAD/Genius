@@ -33,21 +33,33 @@ class TaskQueue(list):
 
 
 class BoundedTasks(dict):
+    """Task store bounded at ~MAX_TASKS entries.
+
+    Eviction only ever removes TERMINAL (completed/failed) records: dropping
+    a pending/running record would leak its client future, 404 its
+    /report_result and 404 status polls. Live records are bounded upstream
+    instead — /dispatch refuses new work (503) once MAX_QUEUED_TASKS are
+    already waiting, so an all-live overflow cannot build up.
+    """
+
+    MAX_TASKS = 10000
+
     def __setitem__(self, key, value):
-        if len(self) >= 10000:
+        if len(self) >= self.MAX_TASKS:
             to_evict = []
             for t_id, task in self.items():
                 if task.get("status") in ("completed", "failed"):
                     to_evict.append(t_id)
             for t_id in to_evict:
                 self.pop(t_id, None)
-            while len(self) >= 10000:
-                first_key = next(iter(self))
-                self.pop(first_key, None)
         super().__setitem__(key, value)
 
 
 class CentralHub:
+    # Max tasks allowed to wait in task_queue before /dispatch returns 503
+    # (see BoundedTasks: live records must stay bounded upstream).
+    MAX_QUEUED_TASKS = 1000
+
     def __init__(self, api_key: Optional[str] = None):
         self._api_key_override = api_key
         self.workers: Dict[str, Dict[str, Any]] = {}
@@ -125,6 +137,7 @@ class CentralHub:
         # 1. Prune stale workers (with a 10ms grace margin for scheduling jitter)
         dead_workers = []
         stale_websockets = []
+        cancel_notices = []  # (ws_or_None, worker_id, task_id), sent post-lock
 
         async with self.lock:
             for w_id, w_info in list(self.workers.items()):
@@ -166,31 +179,33 @@ class CentralHub:
                 }
                 if w_id and w_id in self.workers:
                     self.workers[w_id]["status"] = "idle"
-                    ws = self.workers[w_id].get("ws")
-                    if ws:
-                        try:
-                            await ws.send_json({"type": "cancel", "task_id": t_id})
-                        except Exception:
-                            pass
-                    elif self.network:
-                        try:
-                            payload = {"task_id": t_id}
-                            headers = self.create_headers(payload)
-                            await self.network.send_to_worker(
-                                w_id, "/cancel", payload, headers
-                            )
-                        except Exception:
-                            pass
+                    cancel_notices.append((self.workers[w_id].get("ws"), w_id, t_id))
 
             if dead_workers or expired_tasks:
                 await self._process_queue()
 
-        # Close WebSockets outside the lock block
+        # Network I/O strictly outside the lock block: awaiting a send on a
+        # hung/half-open worker socket while holding self.lock would stall
+        # every heartbeat, dispatch, report and registration hub-wide (the
+        # same head-of-line hazard the stale-socket close below avoids).
         for ws in stale_websockets:
             try:
                 await ws.close()
             except Exception:
                 pass
+        for ws, w_id, t_id in cancel_notices:
+            if ws:
+                try:
+                    await ws.send_json({"type": "cancel", "task_id": t_id})
+                except Exception:
+                    pass
+            elif self.network:
+                try:
+                    payload = {"task_id": t_id}
+                    headers = self.create_headers(payload)
+                    await self.network.send_to_worker(w_id, "/cancel", payload, headers)
+                except Exception:
+                    pass
 
     def set_network(self, network):
         self.network = network
@@ -360,9 +375,11 @@ class CentralHub:
                 worker_id = payload.get("worker_id")
                 if worker_id not in self.workers:
                     return 404, {"error": "Worker not found"}, {}
-                self.workers[worker_id]["last_heartbeat"] = max(
-                    time.time(), self.workers[worker_id]["last_heartbeat"] + 0.001
-                )
+                # Clamp to now, never beyond: the old max(now, last + 1ms)
+                # bump let a worker heart-beating faster than 1ms/beat push
+                # its timestamp into the future and outlive the sweeper
+                # long after it actually died.
+                self.workers[worker_id]["last_heartbeat"] = time.time()
                 return 200, {"status": "alive"}, {}
 
             elif endpoint == "/dispatch":
@@ -395,6 +412,16 @@ class CentralHub:
                     )
                     return 202, {"task_id": task_id, "status": "running"}, {}
                 else:
+                    # Bounded backlog: an unbounded queue is how the task
+                    # store could fill with live records until eviction had
+                    # nothing terminal left to drop.
+                    if len(self.task_queue) >= self.MAX_QUEUED_TASKS:
+                        self.tasks.pop(task_id, None)
+                        return (
+                            503,
+                            {"error": "Task queue full; retry later"},
+                            {},
+                        )
                     self.task_queue.append(task_id)
                     return 202, {"task_id": task_id, "status": "pending"}, {}
 
@@ -539,11 +566,29 @@ class CentralHub:
         return None
 
     async def _dispatch_to_worker(self, worker_id: str, task_id: str):
+        # Runs as a detached create_task after the dispatch lock was released:
+        # by the time we get here the task may have been re-queued (its worker
+        # died: worker_id -> None), re-assigned to ANOTHER worker, or evicted.
+        # Read defensively (no KeyError inside a bare create_task) and never
+        # fail an attempt that is no longer ours — a stale failure write would
+        # clobber the re-dispatched attempt. worker_id None is still "ours":
+        # the re-queued-after-our-worker-died form.
+        task = self.tasks.get(task_id)
+        if task is None:
+            return
+
+        def _fail_if_still_ours(error: str) -> None:
+            t = self.tasks.get(task_id)
+            if t is None or t.get("worker_id") not in (worker_id, None):
+                return
+            t["status"] = "failed"
+            t["result"] = {"error": error}
+
         # 1. If worker is a production WS worker, dispatch via WS
         w_info = self.workers.get(worker_id)
         if w_info and w_info.get("ws") is not None:
             ws = w_info["ws"]
-            task_data = self.tasks[task_id]["task_data"]
+            task_data = task["task_data"]
             from ag_core.utils.security import calculate_checksum
 
             checksum = calculate_checksum(task_data, self.api_key)
@@ -558,10 +603,7 @@ class CentralHub:
                 return
             except Exception as e:
                 async with self.lock:
-                    self.tasks[task_id]["status"] = "failed"
-                    self.tasks[task_id]["result"] = {
-                        "error": f"WS Dispatch error: {str(e)}"
-                    }
+                    _fail_if_still_ours(f"WS Dispatch error: {str(e)}")
                     if worker_id in self.workers:
                         self.workers[worker_id]["status"] = "idle"
                     await self._process_queue()
@@ -570,7 +612,7 @@ class CentralHub:
         # 2. Fallback/Test dispatch via network simulator
         if not self.network:
             return
-        payload = {"task_id": task_id, "task_data": self.tasks[task_id]["task_data"]}
+        payload = {"task_id": task_id, "task_data": task["task_data"]}
         headers = self.create_headers(payload)
         try:
             status_code, body = await self.network.send_to_worker(
@@ -578,19 +620,13 @@ class CentralHub:
             )
             if status_code != 200:
                 async with self.lock:
-                    self.tasks[task_id]["status"] = "failed"
-                    self.tasks[task_id]["result"] = {
-                        "error": f"Worker rejected task: {body}"
-                    }
+                    _fail_if_still_ours(f"Worker rejected task: {body}")
                     if worker_id in self.workers:
                         self.workers[worker_id]["status"] = "idle"
                     await self._process_queue()
         except Exception as e:
             async with self.lock:
-                self.tasks[task_id]["status"] = "failed"
-                self.tasks[task_id]["result"] = {
-                    "error": f"Dispatch communication error: {str(e)}"
-                }
+                _fail_if_still_ours(f"Dispatch communication error: {str(e)}")
                 if worker_id in self.workers:
                     self.workers[worker_id]["status"] = "idle"
                 await self._process_queue()

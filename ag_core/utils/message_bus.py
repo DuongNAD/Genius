@@ -107,55 +107,59 @@ class MessageBus:
                     oldest_key = next(iter(self.in_memory_store))
                     self.in_memory_store.pop(oldest_key, None)
 
-                serialized_content = (
-                    json.dumps(artifact.content)
-                    if artifact.content_type == "json"
-                    or isinstance(artifact.content, (dict, list))
-                    else str(artifact.content)
-                )
-                from ag_core.utils.db import enqueue_db_write
+        if self.db_path:
+            serialized_content = (
+                json.dumps(artifact.content)
+                if artifact.content_type == "json"
+                or isinstance(artifact.content, (dict, list))
+                else str(artifact.content)
+            )
+            from ag_core.utils.db import enqueue_db_write
 
-                def _publish_artifact_impl(
-                    conn,
-                    artifact_id,
-                    name,
-                    serialized_content,
-                    content_type,
-                    created_by,
-                    timestamp,
-                    parent_id,
-                    metadata_json,
-                ):
-                    conn.execute(
-                        "INSERT OR REPLACE INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            artifact_id,
-                            name,
-                            serialized_content,
-                            content_type,
-                            created_by,
-                            timestamp,
-                            parent_id,
-                            metadata_json,
-                        ),
-                    )
-                    conn.commit()
-
-                try:
-                    enqueue_db_write(
-                        _publish_artifact_impl,
-                        artifact.artifact_id,
-                        artifact.name,
+            def _publish_artifact_impl(
+                conn,
+                artifact_id,
+                name,
+                serialized_content,
+                content_type,
+                created_by,
+                timestamp,
+                parent_id,
+                metadata_json,
+            ):
+                conn.execute(
+                    "INSERT OR REPLACE INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        artifact_id,
+                        name,
                         serialized_content,
-                        artifact.content_type,
-                        artifact.created_by,
-                        artifact.timestamp,
-                        artifact.parent_id,
-                        json.dumps(artifact.metadata),
-                        db_path=self.db_path,
-                    )
-                except Exception:
-                    raise
+                        content_type,
+                        created_by,
+                        timestamp,
+                        parent_id,
+                        metadata_json,
+                    ),
+                )
+                conn.commit()
+
+            # Deliberately OUTSIDE self.lock: enqueue_db_write blocks on the
+            # single writer thread's commit (task.event.wait()), and holding
+            # the lock across that wait made every concurrent retrieve()/
+            # publish() queue behind an unrelated slow commit. The writer
+            # thread already serializes DB writes; the lock only needs to
+            # cover the in-memory store mutation + eviction above.
+            enqueue_db_write(
+                _publish_artifact_impl,
+                artifact.artifact_id,
+                artifact.name,
+                serialized_content,
+                artifact.content_type,
+                artifact.created_by,
+                artifact.timestamp,
+                artifact.parent_id,
+                json.dumps(artifact.metadata),
+                db_path=self.db_path,
+            )
         return artifact.artifact_id
 
     async def publish_async(self, artifact: Artifact) -> str:

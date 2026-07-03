@@ -1,4 +1,5 @@
 import abc
+import asyncio
 import os
 from typing import Any, List, Dict
 from ag_core.interfaces.base_provider import BaseProvider
@@ -52,10 +53,19 @@ class BaseAgent(abc.ABC):
                 chroma_persist_dir=chroma_persist_dir,
             )
 
-        from ag_core.utils.git import GitManager
-
-        self.git = GitManager()
+        self._git = None
         self.history: List[Dict[str, str]] = []
+
+    @property
+    def git(self):
+        """GitManager, built on first access: no agent touches it on the
+        request path, and eager construction cost a load_config() per
+        instantiation (i.e. per /run on the skill servers)."""
+        if self._git is None:
+            from ag_core.utils.git import GitManager
+
+            self._git = GitManager()
+        return self._git
 
     def clear_history(self) -> None:
         self.history.clear()
@@ -67,6 +77,21 @@ class BaseAgent(abc.ABC):
     def retrieve_memory(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
         if self.memory:
             return self.memory.query(query_text=query, n_results=limit)
+        return []
+
+    async def store_memory_async(self, text: str, metadata: dict | None = None) -> None:
+        """store_memory with the SQLite/embedding work off the event loop."""
+        if self.memory:
+            await asyncio.to_thread(self.memory.add, text=text, metadata=metadata)
+
+    async def retrieve_memory_async(
+        self, query: str, limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """retrieve_memory with the O(rows) embedding decode off the event loop."""
+        if self.memory:
+            return await asyncio.to_thread(
+                self.memory.query, query_text=query, n_results=limit
+            )
         return []
 
     def scan_context(self, context_data: dict | None = None):
@@ -91,6 +116,18 @@ class BaseAgent(abc.ABC):
         for filepath, file_content in scanned_files.items():
             context += f"\n--- File: {filepath} ---\n{file_content}\n"
         return scanned_files, context
+
+    async def scan_context_async(self, context_data: dict | None = None):
+        """scan_context with the full-tree disk read off the event loop.
+
+        Every agent's async run() calls this when no context was supplied;
+        running the scan inline would stall the skill server's loop (and
+        every co-hosted role's /status polls) for the whole walk. With
+        explicit context_data there is no disk work — call straight through.
+        """
+        if context_data is not None:
+            return self.scan_context(context_data)
+        return await asyncio.to_thread(self.scan_context, None)
 
     def format_history(self) -> str:
         """Render self.history as a prompt preamble (empty string if none)."""

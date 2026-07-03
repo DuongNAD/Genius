@@ -1464,14 +1464,11 @@ async def process_single_file(
                 )
                 security_req_prompt = f"/audit Audit the following code for security vulnerabilities in file '{file_path}':\n\n{code_to_write}"
 
-                try:
-                    proj_scanner = ProjectScanner(
-                        root_dir=project_dir,
-                        extra_ignores=config.scanner.exclude_patterns,
-                    )
-                    current_context = await asyncio.to_thread(proj_scanner.scan)
-                except Exception:
-                    current_context = {}
+                # Reuse this attempt's pre-Codex scan instead of a second
+                # full-workspace walk: the only content that changed since is
+                # the file just written, and that entry is overridden right
+                # here. (Sibling files being written concurrently were never
+                # a reliable part of this context — the scan raced them.)
                 current_context["design.md"] = design_plan_content
                 current_context[file_path] = code_to_write
 
@@ -1927,11 +1924,15 @@ async def run_pipeline(
                 # in strict mode the error propagates with the design safely
                 # on disk, and in degraded mode the debate simply stops here.
                 try:
+                    # Empty context: the draft plan and original research are
+                    # already inlined in the prompt; re-sending the whole
+                    # scanned workspace every round is pure token burn (the
+                    # MCP debate has always passed {} for the same reason).
                     critic_content = await call_api(
                         researcher_url,
                         api_key,
                         critic_prompt,
-                        context=scanned_files,
+                        context={},
                         client=client,
                         poll_timeout=poll_timeout,
                     )
@@ -1971,7 +1972,7 @@ async def run_pipeline(
                         claude_url,
                         api_key,
                         claude_refine_prompt,
-                        context=scanned_files,
+                        context={},
                         client=client,
                         poll_timeout=poll_timeout,
                     )
@@ -2661,11 +2662,15 @@ async def run_e2e_pipeline(
                 # Mirror of the sequential pipeline: a debate failure must not
                 # lose the plan already written to disk before the debate.
                 try:
+                    # Empty context: the draft plan and original research are
+                    # already inlined in the prompt; re-sending the whole
+                    # scanned workspace every round is pure token burn (the
+                    # MCP debate has always passed {} for the same reason).
                     critic_content = await call_api(
                         researcher_url,
                         api_key,
                         critic_prompt,
-                        context=scanned_files,
+                        context={},
                         client=client,
                         poll_timeout=poll_timeout,
                     )
@@ -2703,7 +2708,7 @@ async def run_e2e_pipeline(
                         claude_url,
                         api_key,
                         claude_refine_prompt,
-                        context=scanned_files,
+                        context={},
                         client=client,
                         poll_timeout=poll_timeout,
                     )
@@ -2782,6 +2787,18 @@ async def run_e2e_pipeline(
                 codex_success = False
                 codex_error_log = ""
 
+                # One workspace scan per FILE, not per attempt: between
+                # attempts of the same file nothing else changes on disk
+                # (the attempt's own output is inlined in the retry prompt).
+                try:
+                    proj_scanner = ProjectScanner(
+                        root_dir=project_dir,
+                        extra_ignores=config.scanner.exclude_patterns,
+                    )
+                    current_context = await asyncio.to_thread(proj_scanner.scan)
+                except Exception:
+                    current_context = {}
+
                 for attempt in range(1, max_retries + 1):
                     logger.info(
                         f"Codex implementing {file_path} - Attempt {attempt}/{max_retries}"
@@ -2795,15 +2812,6 @@ async def run_e2e_pipeline(
                             "ONLY the complete file content in a single "
                             "```python fenced block."
                         )
-
-                    try:
-                        proj_scanner = ProjectScanner(
-                            root_dir=project_dir,
-                            extra_ignores=config.scanner.exclude_patterns,
-                        )
-                        current_context = await asyncio.to_thread(proj_scanner.scan)
-                    except Exception:
-                        current_context = {}
 
                     # An API/agent failure inside an attempt must not abort the
                     # loop: record it as this attempt's failure log and retry.
@@ -2913,6 +2921,17 @@ async def run_e2e_pipeline(
                 tester_success = False
                 tester_error_log = ""
 
+                # Once per file (see the Codex loop): the freshly implemented
+                # file is the only delta and it is inlined in tester_prompt.
+                try:
+                    proj_scanner = ProjectScanner(
+                        root_dir=project_dir,
+                        extra_ignores=config.scanner.exclude_patterns,
+                    )
+                    current_context = await asyncio.to_thread(proj_scanner.scan)
+                except Exception:
+                    current_context = {}
+
                 for attempt in range(1, max_retries + 1):
                     logger.info(
                         f"Tester generating tests for {file_path} - Attempt {attempt}/{max_retries}"
@@ -2933,15 +2952,6 @@ async def run_e2e_pipeline(
                     )
                     if attempt > 1:
                         tester_prompt += f"\n\nPrevious test generation attempt failed verification.\nErrors/Logs:\n{truncate_log(tester_error_log)}"
-
-                    try:
-                        proj_scanner = ProjectScanner(
-                            root_dir=project_dir,
-                            extra_ignores=config.scanner.exclude_patterns,
-                        )
-                        current_context = await asyncio.to_thread(proj_scanner.scan)
-                    except Exception:
-                        current_context = {}
 
                     try:
                         tester_raw = await call_api(

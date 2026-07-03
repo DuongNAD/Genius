@@ -7,6 +7,17 @@ from typing import Any, Dict
 logger = logging.getLogger("ag_core")
 logger.setLevel(logging.INFO)
 
+# On Windows a redirected/piped stdout defaults to the locale code page
+# (cp1252 & co.), and a log record with non-ASCII text (provider errors,
+# masked git URLs, user prompts) would raise UnicodeEncodeError inside
+# emit() — logging swallows it and the line is lost. Force UTF-8 with a
+# lossless fallback; guarded because some replacement streams (test
+# capture, custom redirects) don't support reconfigure().
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+except Exception:
+    pass
+
 # Prevent duplicate handlers
 if not logger.handlers:
     handler = logging.StreamHandler(sys.stdout)

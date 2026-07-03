@@ -65,40 +65,21 @@ class GitManager:
         return url
 
     async def _get_remote_url(self, cwd: Optional[str]) -> Optional[str]:
+        # Through _run_git for the timeout backstop + prompt hardening
+        # (GIT_TERMINAL_PROMPT=0, closed stdin): a wedged `git remote get-url`
+        # (credential helper, lock file) must not hang the caller forever.
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "git",
-                "remote",
-                "get-url",
-                "origin",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-            )
-            stdout, _ = await proc.communicate()
-            if proc.returncode == 0:
-                return stdout.decode().strip()
-        except Exception:
-            pass
-        return None
+            out = await self._run_git(["remote", "get-url", "origin"], cwd=cwd)
+            return out.strip() or None
+        except GitError:
+            return None
 
     async def _get_current_branch(self, cwd: Optional[str]) -> Optional[str]:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "git",
-                "rev-parse",
-                "--abbrev-ref",
-                "HEAD",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-            )
-            stdout, _ = await proc.communicate()
-            if proc.returncode == 0:
-                return stdout.decode().strip()
-        except Exception:
-            pass
-        return None
+            out = await self._run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
+            return out.strip() or None
+        except GitError:
+            return None
 
     async def _run_git(
         self, args: List[str], cwd: Optional[str] = None, env: Optional[dict] = None

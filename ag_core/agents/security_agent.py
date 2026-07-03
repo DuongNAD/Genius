@@ -39,10 +39,10 @@ class SecurityAgent(BaseAgent):
             elif cmd in ["/audit", "/security-audit"]:
                 user_prompt = f"Perform a comprehensive security audit of the following code and assets:\n\n{query}"
 
-        _, context = self.scan_context(context_data)
+        _, context = await self.scan_context_async(context_data)
 
         # Retrieve matching past interactions
-        past_memories = self.retrieve_memory(user_prompt, limit=3)
+        past_memories = await self.retrieve_memory_async(user_prompt, limit=3)
         memory_context = ""
         if past_memories:
             memory_context = "\n--- Relevant Historical Memory Context ---\n"
@@ -62,7 +62,7 @@ class SecurityAgent(BaseAgent):
 
         self.history.append({"prompt": user_prompt, "response": content})
 
-        self.store_memory(
+        await self.store_memory_async(
             text=f"Prompt: {user_prompt}\nResponse: {content}",
             metadata={
                 "type": "agent_run",

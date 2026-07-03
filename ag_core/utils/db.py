@@ -32,7 +32,9 @@ def init_db():
     conn = sqlite3.connect(db_path, timeout=30.0)
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA auto_vacuum = FULL;")
+        # No auto_vacuum pragma: it only applies before the first table exists
+        # (silent no-op afterwards), and FULL would move pages on every commit.
+        # The pruned tables (seen_jtis) stay bounded by their DELETEs instead.
         cursor = conn.cursor()
         cursor.execute(
             """

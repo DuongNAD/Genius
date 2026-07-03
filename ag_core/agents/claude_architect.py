@@ -1,9 +1,42 @@
+import json
 from typing import Any
 from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
+from ag_core.models import DesignPlan
 from ag_core.utils.logger import log_transaction
 from ag_core.utils.prompt_templates import ARCHITECT_PROMPT
+
+
+def _architect_system_prompt() -> str:
+    """ARCHITECT_PROMPT + the DesignPlan JSON schema + a worked example.
+
+    Entirely static, so it is built once at import — the schema dump and
+    json.dumps used to run on every request.
+    """
+    if hasattr(DesignPlan, "model_json_schema"):
+        schema_dict = DesignPlan.model_json_schema()
+    else:
+        schema_dict = DesignPlan.schema()
+    schema_json = json.dumps(schema_dict, indent=2)
+    return (
+        ARCHITECT_PROMPT
+        + f"\n\nThe single ```json block must conform to this DesignPlan JSON schema:\n{schema_json}"
+        "\n\nExample of a valid response (structure only — adapt to the actual request):\n"
+        "```json\n"
+        "{\n"
+        '  "project_name": "todo_api",\n'
+        '  "description": "A small FastAPI TODO service.",\n'
+        '  "files": [\n'
+        '    {"path": "src/main.py", "specification": "FastAPI app exposing GET/POST /todos backed by an in-memory store. Define a Todo model with id:int and title:str, plus list_todos() and create_todo() handlers."},\n'
+        '    {"path": "tests/test_main.py", "specification": "pytest tests using FastAPI TestClient that cover listing todos and creating a todo, asserting status codes and response bodies."}\n'
+        "  ]\n"
+        "}\n"
+        "```"
+    )
+
+
+ARCHITECT_SYSTEM_PROMPT = _architect_system_prompt()
 
 
 class ClaudeArchitectAgent(BaseAgent):
@@ -40,10 +73,10 @@ class ClaudeArchitectAgent(BaseAgent):
                 user_prompt = f"Analyze the current project architecture, identifying architectural design patterns, coupling issues, and structural improvement areas:\n\n{query}"
 
         # Scan project files (or use provided context_data) and format context
-        _, context = self.scan_context(context_data)
+        _, context = await self.scan_context_async(context_data)
 
         # Retrieve matching past interactions
-        past_memories = self.retrieve_memory(user_prompt, limit=3)
+        past_memories = await self.retrieve_memory_async(user_prompt, limit=3)
         memory_context = ""
         if past_memories:
             memory_context = "\n--- Relevant Historical Memory Context ---\n"
@@ -57,39 +90,17 @@ class ClaudeArchitectAgent(BaseAgent):
             full_prompt += f"{memory_context}\n"
         full_prompt += f"\nProject files context:\n{context}"
 
-        # Invoke provider
-        from ag_core.models import DesignPlan
-        import json
-
-        if hasattr(DesignPlan, "model_json_schema"):
-            schema_dict = DesignPlan.model_json_schema()
-        else:
-            schema_dict = DesignPlan.schema()
-        schema_json = json.dumps(schema_dict, indent=2)
-
-        sys_prompt = (
-            ARCHITECT_PROMPT
-            + f"\n\nThe single ```json block must conform to this DesignPlan JSON schema:\n{schema_json}"
-            "\n\nExample of a valid response (structure only — adapt to the actual request):\n"
-            "```json\n"
-            "{\n"
-            '  "project_name": "todo_api",\n'
-            '  "description": "A small FastAPI TODO service.",\n'
-            '  "files": [\n'
-            '    {"path": "src/main.py", "specification": "FastAPI app exposing GET/POST /todos backed by an in-memory store. Define a Todo model with id:int and title:str, plus list_todos() and create_todo() handlers."},\n'
-            '    {"path": "tests/test_main.py", "specification": "pytest tests using FastAPI TestClient that cover listing todos and creating a todo, asserting status codes and response bodies."}\n'
-            "  ]\n"
-            "}\n"
-            "```"
+        # Invoke provider (system prompt is the static module-level constant)
+        response = await self.provider.send_prompt(
+            full_prompt, system=ARCHITECT_SYSTEM_PROMPT
         )
-        response = await self.provider.send_prompt(full_prompt, system=sys_prompt)
         content = response.get("content", "")
         usage = response.get("usage", {})
 
         self.history.append({"prompt": user_prompt, "response": content})
 
         # Save interaction to memory
-        self.store_memory(
+        await self.store_memory_async(
             text=f"Prompt: {user_prompt}\nResponse: {content}",
             metadata={
                 "type": "agent_run",
