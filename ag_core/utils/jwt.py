@@ -3,6 +3,7 @@ import json
 import hmac
 import hashlib
 import time
+import uuid
 
 
 def base64url_encode(data: bytes) -> str:
@@ -18,11 +19,8 @@ def base64url_decode(data_str: str) -> bytes:
     return base64.urlsafe_b64decode(data_str.encode("utf-8"))
 
 
-import uuid
-import threading
-
-_seen_jtis = {}
-_jtis_lock = threading.Lock()
+# Replay protection state: jtis live in the seen_jtis SQLite table (see
+# decode_jwt); this flag makes the expired-row cleanup run once per process.
 _cleaned_expired_jtis = False
 
 

@@ -1,6 +1,7 @@
+import json
 import logging
 import sys
-from typing import Dict
+from typing import Any, Dict
 
 # Centralized console logger configured to stdout
 logger = logging.getLogger("ag_core")
@@ -45,10 +46,6 @@ def calculate_usage_cost(
     input_cost = (prompt_tokens / 1_000_000) * rates["input"]
     output_cost = (completion_tokens / 1_000_000) * rates["output"]
     return input_cost + output_cost
-
-
-import json
-from typing import Dict, Any
 
 
 def log_structured(

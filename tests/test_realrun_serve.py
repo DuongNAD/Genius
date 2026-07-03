@@ -28,9 +28,15 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _occupy_port() -> socket.socket:
-    """Bind and listen on an OS-assigned port, keeping it occupied."""
+    """Bind and listen on an OS-assigned port, keeping it occupied.
+
+    Bound on loopback: agent servers bind 127.0.0.1 by default now (see
+    serve.bind_host), and on Windows a wildcard-bound blocker would not
+    conflict with a specific-interface bind, so the fallback under test
+    would never trigger.
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("0.0.0.0", 0))
+    sock.bind(("127.0.0.1", 0))
     sock.listen(1)
     return sock
 

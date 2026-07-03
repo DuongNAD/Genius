@@ -945,4 +945,9 @@ if __name__ == "__main__":
     else:
         import uvicorn
 
-        uvicorn.run("mcp_server:app", host="0.0.0.0", port=8000)
+        # Localhost-only by default; expose wider via GENIUS_BIND_HOST.
+        uvicorn.run(
+            "mcp_server:app",
+            host=os.environ.get("GENIUS_BIND_HOST") or "127.0.0.1",
+            port=8000,
+        )

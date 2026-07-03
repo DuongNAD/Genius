@@ -1,17 +1,18 @@
 import os
-import sys
 import asyncio
 import logging
 import tempfile
 from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
-from ag_core.utils.cli_resolver import which_external
+from ag_core.utils.cli_resolver import memoize_cli_path, which_external
 from ag_core.utils.cli_runner import (
     communicate_with_timeout,
     explain_cli_failure,
     extract_json_object,
+    spawn_cli,
     tail_text,
+    wrap_windows_cmd,
     cli_timeout,
     DEFAULT_AUX_TIMEOUT,
 )
@@ -24,6 +25,7 @@ logger = logging.getLogger("ag_core")
 _LOGIN_ATTEMPTED = False
 
 
+@memoize_cli_path
 def resolve_grok_cli() -> str:
     """Resolve the real Grok CLI path, never the bundled repo wrapper.
 
@@ -69,15 +71,9 @@ def resolve_grok_cli() -> str:
 
 
 def _wrap_windows(cmd, cli_path):
-    """Wrap ``.cmd``/``.bat`` shims with ``cmd.exe /c`` on Windows.
-
-    Decided from the already-resolved path - never via a raw ``shutil.which``
-    on a bare name, which searches the cwd first and would re-introduce the
-    repo-wrapper recursion.
-    """
-    if sys.platform == "win32" and cli_path.lower().endswith((".cmd", ".bat")):
-        return ["cmd.exe", "/c"] + cmd
-    return cmd
+    """Compat alias for :func:`ag_core.utils.cli_runner.wrap_windows_cmd`
+    (kept because tests and older callers import it from this module)."""
+    return wrap_windows_cmd(cmd, cli_path)
 
 
 class GrokProvider(BaseProvider):
@@ -105,25 +101,9 @@ class GrokProvider(BaseProvider):
             return
         _LOGIN_ATTEMPTED = True
         try:
-            login_cmd = _wrap_windows([cli_path, "login"], cli_path)
-            try:
-                login_process = await asyncio.create_subprocess_exec(
-                    *login_cmd,
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-            except OSError:
-                if sys.platform == "win32" and login_cmd[0] != "cmd.exe":
-                    login_cmd = ["cmd.exe", "/c"] + login_cmd
-                    login_process = await asyncio.create_subprocess_exec(
-                        *login_cmd,
-                        stdin=asyncio.subprocess.DEVNULL,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                else:
-                    raise
+            login_process = await spawn_cli(
+                [cli_path, "login"], cli_path, stdin=asyncio.subprocess.DEVNULL
+            )
             await communicate_with_timeout(
                 login_process,
                 timeout=min(DEFAULT_AUX_TIMEOUT, cli_timeout()),
@@ -153,11 +133,17 @@ class GrokProvider(BaseProvider):
                 # `-p <prompt>` argument goes through cmd.exe on Windows,
                 # which interprets `&|<>^%` and newlines in LLM-generated
                 # prompt text (garbling/injection) and hits the command-line
-                # length limit.
+                # length limit. The system prompt is embedded into the same
+                # file (marker sections, like the agy provider) instead of a
+                # --system-prompt-override argv element, for the same reason:
+                # model-generated text must never reach cmd.exe parsing.
+                payload = prompt
+                if sys_prompt:
+                    payload = f"[System instructions]\n{sys_prompt}\n\n[Task]\n{prompt}"
                 with tempfile.NamedTemporaryFile(
                     mode="w", suffix=".txt", delete=False, encoding="utf-8"
                 ) as f:
-                    f.write(prompt)
+                    f.write(payload)
                     temp_file_path = f.name
                 cmd = [
                     cli_path,
@@ -167,37 +153,13 @@ class GrokProvider(BaseProvider):
                     "json",
                 ]
 
-                session_id = (
-                    extra.pop("session_id", None)
-                    or kwargs.get("session_id")
-                    or self.extra_params.get("session_id")
-                )
+                session_id = extra.pop("session_id", None)
                 if session_id:
                     cmd.extend(["--session-id", str(session_id)])
 
-                if sys_prompt:
-                    cmd.extend(["--system-prompt-override", sys_prompt])
-
-                actual_cmd = _wrap_windows(cmd, cli_path)
-
-                try:
-                    process = await asyncio.create_subprocess_exec(
-                        *actual_cmd,
-                        stdin=asyncio.subprocess.DEVNULL,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                except OSError:
-                    if sys.platform == "win32" and actual_cmd == cmd:
-                        actual_cmd = ["cmd.exe", "/c"] + cmd
-                        process = await asyncio.create_subprocess_exec(
-                            *actual_cmd,
-                            stdin=asyncio.subprocess.DEVNULL,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                    else:
-                        raise
+                process = await spawn_cli(
+                    cmd, cli_path, stdin=asyncio.subprocess.DEVNULL
+                )
 
                 stdout, stderr = await communicate_with_timeout(
                     process, cli_name="Grok CLI"

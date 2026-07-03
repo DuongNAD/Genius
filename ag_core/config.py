@@ -1,8 +1,12 @@
 import os
+import threading
+import time
 import yaml
 from pydantic import BaseModel, Field
 from typing import List
 from dotenv import load_dotenv
+
+from ag_core.runtime import under_pytest
 
 _original_env = dict(os.environ)
 
@@ -32,9 +36,7 @@ _load_env()
 
 
 def _reload_env_safely():
-    import sys
-
-    if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+    if under_pytest():
         return
     curr_dir = os.path.abspath(os.getcwd())
     env_path = None
@@ -151,8 +153,49 @@ class Config(BaseModel):
     git_token: str = Field(default_factory=lambda: os.getenv("GIT_TOKEN", ""))
 
 
+# load_config() is on several per-request hot paths (checksum middleware, JWT
+# verification, response-checksum checks on every 0.5s status poll), and each
+# uncached call re-walks the directory tree for .env and config.yaml, re-parses
+# the YAML, rebuilds the Pydantic model and re-reads the service registry. A
+# short TTL amortizes that without making config effectively static.
+_CONFIG_CACHE_LOCK = threading.Lock()
+_CONFIG_CACHE: dict = {}  # config_path -> (Config, monotonic expiry)
+_CONFIG_CACHE_DEFAULT_TTL = 5.0
+
+
+def _config_cache_ttl() -> float:
+    """TTL seconds for the load_config cache.
+
+    ``GENIUS_CONFIG_CACHE_TTL`` overrides (blank = unset, ``0`` disables).
+    Always disabled under pytest: conftest re-points SKILL_API_KEY per test
+    file and tests write registry/config files expecting fresh reads.
+    """
+    if under_pytest():
+        return 0.0
+    raw = os.environ.get("GENIUS_CONFIG_CACHE_TTL")
+    if raw:
+        try:
+            return max(float(raw), 0.0)
+        except ValueError:
+            pass
+    return _CONFIG_CACHE_DEFAULT_TTL
+
+
 def load_config(config_path: str = "config.yaml") -> Config:
-    """Reads YAML config and binds it alongside environmental secrets into Pydantic models."""
+    """Reads YAML config and binds it alongside environmental secrets into
+    Pydantic models.
+
+    Results are cached for a few seconds in production (see
+    :func:`_config_cache_ttl`); the returned object is shared across callers
+    within that window and must be treated as read-only.
+    """
+    ttl = _config_cache_ttl()
+    if ttl > 0:
+        with _CONFIG_CACHE_LOCK:
+            cached = _CONFIG_CACHE.get(config_path)
+            if cached and cached[1] > time.monotonic():
+                return cached[0]
+
     _reload_env_safely()
     actual_path = config_path
     if not os.path.isabs(actual_path):
@@ -204,9 +247,8 @@ def load_config(config_path: str = "config.yaml") -> Config:
         services_yaml.setdefault("researcher", services_yaml.pop("grok_researcher"))
 
     config = Config(**yaml_data)
-    import sys
 
-    if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+    if under_pytest():
         config.services.researcher = "http://localhost:8001/researcher"
         config.services.claude_architect = "http://localhost:8002/claude"
         config.services.codex_reviewer = "http://localhost:8003/codex"
@@ -247,12 +289,16 @@ def load_config(config_path: str = "config.yaml") -> Config:
                 field_name = role_to_field.get(role)
                 if field_name and hasattr(config.services, field_name):
                     suffix = ""
-                    if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+                    if under_pytest():
                         suffix = f"/{role}"
                     setattr(
                         config.services, field_name, f"http://localhost:{port}{suffix}"
                     )
         except Exception:
             pass
+
+    if ttl > 0:
+        with _CONFIG_CACHE_LOCK:
+            _CONFIG_CACHE[config_path] = (config, time.monotonic() + ttl)
 
     return config

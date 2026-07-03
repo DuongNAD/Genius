@@ -17,13 +17,43 @@ but discards any match that lives inside the repo root, re-scanning PATH with th
 repo excluded so the genuine vendor CLI wins.
 """
 
+import functools
 import os
 import shutil
+
+from ag_core.runtime import under_pytest
 
 # ag_core/utils/cli_resolver.py -> repo root is three levels up.
 _REPO_ROOT = os.path.normcase(
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 )
+
+# fn qualname -> resolved CLI path, for memoize_cli_path below.
+_CLI_PATH_CACHE: dict = {}
+
+
+def memoize_cli_path(fn):
+    """Cache a ``resolve_*_cli()`` result for the life of the process.
+
+    Without this, every ``send_prompt`` re-walks PATH (and, for codex,
+    re-globs install dirs with per-file mtime checks) — pure blocking disk
+    work on the event loop. Only successful resolutions are cached, so a
+    missing CLI keeps raising and an install mid-process is picked up on the
+    next call. Bypassed under pytest: the resolver tests patch
+    ``shutil.which``/``glob.glob``/``os.path.exists`` and expect every call to
+    re-resolve.
+    """
+
+    @functools.wraps(fn)
+    def wrapper():
+        if under_pytest():
+            return fn()
+        key = f"{fn.__module__}.{fn.__qualname__}"
+        if key not in _CLI_PATH_CACHE:
+            _CLI_PATH_CACHE[key] = fn()
+        return _CLI_PATH_CACHE[key]
+
+    return wrapper
 
 
 def _within(path: str, directory: str) -> bool:

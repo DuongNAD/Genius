@@ -1,18 +1,19 @@
 import os
-import sys
-import asyncio
+import tempfile
 from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
-from ag_core.utils.cli_resolver import which_external
+from ag_core.utils.cli_resolver import memoize_cli_path, which_external
 from ag_core.utils.cli_runner import (
     communicate_with_timeout,
     explain_cli_failure,
     extract_json_object,
+    spawn_cli,
     tail_text,
 )
 
 
+@memoize_cli_path
 def resolve_claude_cli() -> str:
     """Resolve the real Claude CLI path, never the bundled repo wrapper.
 
@@ -117,44 +118,15 @@ class AnthropicProvider(BaseProvider):
                 # pattern as the agy and codex providers).
                 prompt = f"{sys_prompt}\n\n{prompt}"
 
-            # Wrap .cmd/.bat shims with cmd.exe /c, decided from the resolved
-            # path itself - never via a raw shutil.which on a bare name, which
-            # searches the cwd first and would re-introduce the repo-wrapper
-            # recursion.
-            actual_cmd = cmd
-            if sys.platform == "win32" and cli_path.lower().endswith((".cmd", ".bat")):
-                actual_cmd = ["cmd.exe", "/c"] + cmd
-
             # Neutral cwd: without --bare (removed — it breaks OAuth) the CLI
             # loads CLAUDE.md/AGENTS.md from its working directory. Run from
             # the system temp dir so this host repo's project context cannot
             # leak into role-contracted responses (a real run produced a
             # markdown design "consistent with existing flat modules" instead
             # of the required JSON plan because it read Genius's own CLAUDE.md).
-            import tempfile
-
             neutral_cwd = tempfile.gettempdir()
 
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    *actual_cmd,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=neutral_cwd,
-                )
-            except OSError:
-                if sys.platform == "win32" and actual_cmd == cmd:
-                    actual_cmd = ["cmd.exe", "/c"] + cmd
-                    process = await asyncio.create_subprocess_exec(
-                        *actual_cmd,
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        cwd=neutral_cwd,
-                    )
-                else:
-                    raise
+            process = await spawn_cli(cmd, cli_path, cwd=neutral_cwd)
 
             stdout, stderr = await communicate_with_timeout(
                 process, input=prompt.encode("utf-8"), cli_name="Claude CLI"

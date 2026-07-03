@@ -23,16 +23,15 @@ Auth is shared with the Antigravity IDE login - no API key is needed (the
 """
 
 import os
-import sys
-import asyncio
 from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
-from ag_core.utils.cli_resolver import which_external
+from ag_core.utils.cli_resolver import memoize_cli_path, which_external
 from ag_core.utils.cli_runner import (
     cli_timeout,
     communicate_with_timeout,
     explain_cli_failure,
+    spawn_cli,
     tail_text,
 )
 
@@ -42,6 +41,7 @@ _PRINT_TIMEOUT_MARGIN = 10
 _PRINT_TIMEOUT_FLOOR = 30
 
 
+@memoize_cli_path
 def resolve_agy_cli() -> str:
     """Resolve the real agy CLI path, never a bundled repo wrapper.
 
@@ -141,32 +141,7 @@ class AgyProvider(BaseProvider):
             if self.model_name:
                 cmd.extend(["--model", self.model_name])
 
-            # Wrap .cmd/.bat shims with cmd.exe /c, decided from the resolved
-            # path itself - never via a raw shutil.which on a bare name, which
-            # searches the cwd first and would re-introduce the repo-wrapper
-            # recursion.
-            actual_cmd = cmd
-            if sys.platform == "win32" and cli_path.lower().endswith((".cmd", ".bat")):
-                actual_cmd = ["cmd.exe", "/c"] + cmd
-
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    *actual_cmd,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-            except OSError:
-                if sys.platform == "win32" and actual_cmd == cmd:
-                    actual_cmd = ["cmd.exe", "/c"] + cmd
-                    process = await asyncio.create_subprocess_exec(
-                        *actual_cmd,
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                else:
-                    raise
+            process = await spawn_cli(cmd, cli_path)
 
             stdout, stderr = await communicate_with_timeout(
                 process, input=prompt.encode("utf-8"), cli_name="Agy CLI"

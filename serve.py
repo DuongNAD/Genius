@@ -19,6 +19,7 @@ if root_dir not in sys.path:
 from orchestrator import run_pipeline, run_e2e_pipeline
 
 from ag_core.distributed.hub import CentralHub
+from ag_core.runtime import under_pytest
 from fastapi import Request, Response
 import json
 from ag_core.utils.db import init_db
@@ -242,9 +243,7 @@ IS_DISTRIBUTED = False
 
 @app.websocket("/ws/connect")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
-    import sys
-
-    is_pytest = "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST") is not None
+    is_pytest = under_pytest()
     if not IS_DISTRIBUTED and not is_pytest:
         from fastapi import HTTPException
 
@@ -398,9 +397,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             await worker_registry.unregister(registered_worker_id, websocket)
 
 
+def bind_host(default: str = "127.0.0.1") -> str:
+    """Bind address for the servers this process starts.
+
+    Agent skill servers and the dashboard are only ever addressed via the
+    localhost URLs in config.yaml, so they default to loopback; the hub
+    passes default="0.0.0.0" because remote LAN workers must reach it.
+    ``GENIUS_BIND_HOST`` overrides both (blank = unset).
+    """
+    return os.environ.get("GENIUS_BIND_HOST") or default
+
+
 async def start_hub_server(port: int):
     config = uvicorn.Config(
-        app, host="0.0.0.0", port=port, log_level="info", ws="auto"
+        app, host=bind_host("0.0.0.0"), port=port, log_level="info", ws="auto"
     )
     server = uvicorn.Server(config)
     await server.serve()
@@ -424,44 +434,42 @@ ROUTING_TABLE = {
 }
 
 
+# Accepted --roles / menu spellings per canonical role. The "grok"-flavoured
+# tokens are the researcher role's legacy id.
+_ROLE_INPUT_ALIASES = {
+    "researcher": (
+        "1",
+        "researcher",
+        "researcher api",
+        "researcher-api",
+        "grok",
+        "grok_researcher",
+        "grok api",
+        "grok-api",
+    ),
+    "claude": ("2", "claude", "claude_architect", "claude api", "claude-api"),
+    "codex": ("3", "codex", "codex_reviewer", "codex api", "codex-api"),
+    "tester": ("4", "tester", "tester_agent", "tester api", "tester-api"),
+    "orchestrator": ("5", "orchestrator"),
+    "dashboard": (
+        "6",
+        "dashboard",
+        "web dashboard",
+        "web-dashboard",
+        "dashboard api",
+        "dashboard-api",
+    ),
+    "security": ("7", "security", "security_agent", "security api", "security-api"),
+    "devops": ("8", "devops", "devops_agent", "devops api", "devops-api"),
+}
+_ROLE_INPUT_LOOKUP = {
+    alias: role for role, aliases in _ROLE_INPUT_ALIASES.items() for alias in aliases
+}
+
+
 def normalize_roles(roles_str: str) -> list:
     raw_roles = [r.strip().lower() for r in roles_str.split(",") if r.strip()]
-    normalized = []
-    for r in raw_roles:
-        # "grok"-flavoured tokens are the researcher role's legacy id.
-        if r in [
-            "1",
-            "researcher",
-            "researcher api",
-            "researcher-api",
-            "grok",
-            "grok_researcher",
-            "grok api",
-            "grok-api",
-        ]:
-            normalized.append("researcher")
-        elif r in ["2", "claude", "claude_architect", "claude api", "claude-api"]:
-            normalized.append("claude")
-        elif r in ["3", "codex", "codex_reviewer", "codex api", "codex-api"]:
-            normalized.append("codex")
-        elif r in ["4", "tester", "tester_agent", "tester api", "tester-api"]:
-            normalized.append("tester")
-        elif r in ["5", "orchestrator"]:
-            normalized.append("orchestrator")
-        elif r in [
-            "6",
-            "dashboard",
-            "web dashboard",
-            "web-dashboard",
-            "dashboard api",
-            "dashboard-api",
-        ]:
-            normalized.append("dashboard")
-        elif r in ["7", "security", "security_agent", "security api", "security-api"]:
-            normalized.append("security")
-        elif r in ["8", "devops", "devops_agent", "devops api", "devops-api"]:
-            normalized.append("devops")
-    return normalized
+    return [_ROLE_INPUT_LOOKUP[r] for r in raw_roles if r in _ROLE_INPUT_LOOKUP]
 
 
 def interactive_prompt() -> list:
@@ -485,24 +493,29 @@ def interactive_prompt() -> list:
         sys.exit(0)
 
 
+# canonical role -> skill directory under .agents/skills/ (role ids and
+# directory names diverged historically; this map is the single place that
+# records the pairing).
+SKILL_APP_DIRS = {
+    "researcher": "researcher",
+    "claude": "claude_architect",
+    "codex": "codex_reviewer",
+    "tester": "tester_agent",
+    "security": "security_agent",
+    "devops": "devops_agent",
+}
+
+
 def get_api_app(role: str):
     from ag_core.provider_factory import canonical_role
 
     role = canonical_role(role)
-    if role == "researcher":
-        path = os.path.join(root_dir, ".agents", "skills", "researcher", "api.py")
-    elif role == "claude":
-        path = os.path.join(root_dir, ".agents", "skills", "claude_architect", "api.py")
-    elif role == "codex":
-        path = os.path.join(root_dir, ".agents", "skills", "codex_reviewer", "api.py")
-    elif role == "tester":
-        path = os.path.join(root_dir, ".agents", "skills", "tester_agent", "api.py")
-    elif role == "security":
-        path = os.path.join(root_dir, ".agents", "skills", "security_agent", "api.py")
-    elif role == "devops":
-        path = os.path.join(root_dir, ".agents", "skills", "devops_agent", "api.py")
-    elif role == "dashboard":
+    if role == "dashboard":
         path = os.path.join(root_dir, "dashboard.py")
+    elif role in SKILL_APP_DIRS:
+        path = os.path.join(
+            root_dir, ".agents", "skills", SKILL_APP_DIRS[role], "api.py"
+        )
     else:
         raise ValueError(f"Unknown role: {role}")
 
@@ -524,7 +537,7 @@ AGENT_DEFAULT_PORTS = {
 
 
 def _under_pytest() -> bool:
-    return "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST") is not None
+    return under_pytest()
 
 
 def _startup_timeout(default: float = 30.0) -> float:
@@ -657,7 +670,7 @@ async def start_server(role: str, port: int):
     def _make_server(bind_port: int) -> uvicorn.Server:
         config = uvicorn.Config(
             app,
-            host="0.0.0.0",
+            host=bind_host(),
             port=bind_port,
             log_level="info",
             ws="auto",

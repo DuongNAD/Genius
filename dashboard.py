@@ -98,15 +98,23 @@ def get_distributed_workers() -> dict:
                 pass
     try:
         import httpx
-        import hashlib
-        import json
+
+        from ag_core.utils.security import calculate_checksum
+
+        # Authenticate with the real configured secret and an HMAC checksum:
+        # the hub is HMAC-only in production, so the previous hardcoded
+        # "valid-api-key" + plain SHA-256 pair only ever worked under pytest.
+        try:
+            from ag_core.config import load_config
+
+            secret = load_config().skill_api_key or os.getenv("SKILL_API_KEY", "")
+        except Exception:
+            secret = os.getenv("SKILL_API_KEY", "")
 
         payload = {}
-        serialized = json.dumps(payload, sort_keys=True).encode("utf-8")
-        checksum = hashlib.sha256(serialized).hexdigest()
         headers = {
-            "X-API-Key": "valid-api-key",
-            "X-Payload-SHA256": checksum,
+            "X-API-Key": secret,
+            "X-Payload-SHA256": calculate_checksum(payload, secret),
             "Content-Type": "application/json",
         }
         response = httpx.post(
@@ -586,4 +594,11 @@ def get_index():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("dashboard:app", host="0.0.0.0", port=8080, ws="auto")
+    # The dashboard serves unauthenticated prompt/log history: bind localhost
+    # by default and require an explicit GENIUS_BIND_HOST to expose it wider.
+    uvicorn.run(
+        "dashboard:app",
+        host=os.environ.get("GENIUS_BIND_HOST") or "127.0.0.1",
+        port=8080,
+        ws="auto",
+    )

@@ -21,6 +21,7 @@ from tenacity import (
 # tests) keep working after the helper moved to a shared module.
 from ag_core.utils.code_extract import extract_code
 from ag_core.utils.cli_runner import cli_timeout
+from ag_core.runtime import under_pytest
 
 
 def make_http_client() -> httpx.AsyncClient:
@@ -55,9 +56,7 @@ def effective_poll_timeout(poll_timeout: float) -> float:
     Under pytest the clamp only applies when GENIUS_CLI_TIMEOUT is explicitly
     set, so tests exercising short poll timeouts stay fast and deterministic.
     """
-    if os.getenv("GENIUS_CLI_TIMEOUT") is None and (
-        "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST")
-    ):
+    if os.getenv("GENIUS_CLI_TIMEOUT") is None and under_pytest():
         return poll_timeout
     return max(poll_timeout, cli_timeout() + 60.0)
 
@@ -124,8 +123,7 @@ def save_raw_response(project_dir: str, name: str, content: str) -> None:
         raw_dir = os.path.join(project_dir, "logs", "raw")
         os.makedirs(raw_dir, exist_ok=True)
         safe = re.sub(r"[^A-Za-z0-9_.\-]+", "_", name)
-        with open(os.path.join(raw_dir, f"{safe}.md"), "w", encoding="utf-8") as f:
-            f.write(content or "")
+        _write_text(os.path.join(raw_dir, f"{safe}.md"), content or "")
     except Exception as e:
         logger.warning(f"Failed to save raw response {name}: {e}")
 
@@ -137,7 +135,7 @@ def design_selfheal_enabled() -> bool:
     historical tests, whose fixed mock call sequences cannot absorb extra
     design calls — same convention as the debate-rounds default.
     """
-    return not ("pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"))
+    return not under_pytest()
 
 
 def degraded_mode() -> bool:
@@ -178,10 +176,8 @@ def write_progress_md(progress_file_path: str, status_dict: dict) -> None:
     are logged but non-fatal."""
     try:
         os.makedirs(os.path.dirname(progress_file_path), exist_ok=True)
-        with open(progress_file_path, "w", encoding="utf-8") as f:
-            f.write("# Current Progress\n\n")
-            for path, status in status_dict.items():
-                f.write(f"- {path}: {status}\n")
+        lines = [f"- {path}: {status}\n" for path, status in status_dict.items()]
+        _write_text(progress_file_path, "# Current Progress\n\n" + "".join(lines))
     except Exception as e:
         logger.warning(f"Failed to update CURRENT_PROG.md: {e}")
 
@@ -192,10 +188,7 @@ def _resolve_pipeline_setup(prompt, workspace, max_debate_rounds):
     default the workspace to cwd. Returns (project_name, workspace,
     max_debate_rounds). Raises PipelineError on an empty prompt."""
     if max_debate_rounds is None:
-        if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
-            max_debate_rounds = 0
-        else:
-            max_debate_rounds = 2
+        max_debate_rounds = 0 if under_pytest() else 2
 
     if not prompt or not prompt.strip():
         raise PipelineError("Prompt cannot be empty.")
@@ -216,6 +209,35 @@ def _resolve_pipeline_setup(prompt, workspace, max_debate_rounds):
         workspace = os.getcwd()
 
     return project_name, workspace, max_debate_rounds
+
+
+def _write_text(path: str, content: str) -> None:
+    """Write text to ``path`` (UTF-8). Error policy stays with the caller:
+    some stages warn-and-continue on a failed write, others abort the run."""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _iter_json_objects(text: str):
+    """Yield every top-level JSON object decodable from ``text``.
+
+    Brace-aware scan via ``raw_decode`` so a ``}`` inside a string value
+    cannot truncate the object the way a ``\\{.*?\\}`` / find..rfind regex
+    would. Shared by the design-plan and security-verdict parsers.
+    """
+    decoder = json.JSONDecoder()
+    idx = 0
+    while True:
+        start = text.find("{", idx)
+        if start == -1:
+            return
+        try:
+            obj, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        yield obj
+        idx = start + end
 
 
 def parse_design_for_files(design_content: str) -> list:
@@ -239,30 +261,17 @@ def parse_design_for_files(design_content: str) -> list:
         except Exception:
             return None
 
-    # 1. Look for a DesignPlan JSON object. Prefer a ```json fenced block, then the
-    #    whole document. Use a brace-aware JSON decoder (raw_decode) so a '}' inside
-    #    a specification string can't truncate the object the way the old `\{.*?\}`
-    #    / find..rfind regex did.
-    decoder = json.JSONDecoder()
+    # 1. Look for a DesignPlan JSON object. Prefer a ```json fenced block, then
+    #    the whole document.
     candidates = re.findall(
         r"```json\s*(.*?)```", design_content, re.DOTALL | re.IGNORECASE
     )
     candidates.append(design_content)
     for text in candidates:
-        idx = 0
-        while True:
-            start = text.find("{", idx)
-            if start == -1:
-                break
-            try:
-                obj, end = decoder.raw_decode(text[start:])
-            except json.JSONDecodeError:
-                idx = start + 1
-                continue
+        for obj in _iter_json_objects(text):
             result = _validate_obj(obj)
             if result is not None:
                 return result
-            idx = start + end
 
     # 2. Fall back to regex that extracts markdown code blocks with filepath annotations
     code_blocks = re.findall(
@@ -379,13 +388,9 @@ def resolve_claude_cmd():
         special_path = os.path.join(user_profile, ".local", "bin", "claude.exe")
         if os.path.exists(special_path):
             return special_path
-        import shutil
-
         resolved = shutil.which("claude.exe") or shutil.which("claude")
         return resolved or "claude"
     else:
-        import shutil
-
         resolved = shutil.which("claude")
         return resolved or "claude"
 
@@ -412,13 +417,9 @@ def resolve_antigravity_cmd():
         for path in special_paths:
             if os.path.exists(path):
                 return path
-        import shutil
-
         resolved = shutil.which("antigravity.cmd") or shutil.which("antigravity")
         return resolved or "antigravity.cmd"
     else:
-        import shutil
-
         resolved = shutil.which("antigravity")
         return resolved or "antigravity"
 
@@ -575,6 +576,15 @@ async def perform_get_with_retry(client, url, headers):
 
 
 _API_RESPONSE_CACHE = {}
+# FIFO bound so a long-lived process (serve --auto-pilot, MCP server) cannot
+# grow the cache without limit. Dicts preserve insertion order.
+_API_RESPONSE_CACHE_MAX = 256
+
+
+def _cache_response(cache_key: str, result) -> None:
+    _API_RESPONSE_CACHE[cache_key] = result
+    while len(_API_RESPONSE_CACHE) > _API_RESPONSE_CACHE_MAX:
+        _API_RESPONSE_CACHE.pop(next(iter(_API_RESPONSE_CACHE)))
 
 
 async def call_api(
@@ -666,11 +676,12 @@ async def call_api(
                     payload_workers, sort_keys=True, separators=(",", ":")
                 ).encode("utf-8")
 
-                post_payload = {"sub": "orchestrator", "exp": time.time() + 300}
-                post_token = encode_jwt(post_payload, api_key)
+                # The hub authenticates with the RAW shared secret compared
+                # via hmac.compare_digest (CentralHub.verify_auth); it does
+                # not decode JWTs, so sending a token here 401s against a
+                # real hub. Same key the checksums are computed with.
                 headers = {
-                    "X-API-Key": post_token,
-                    "Authorization": f"Bearer {post_token}",
+                    "X-API-Key": secret,
                     "X-Payload-SHA256": workers_checksum,
                     "Content-Type": "application/json",
                 }
@@ -767,7 +778,7 @@ async def call_api(
                     if status == "completed":
                         result = task_info.get("result")
                         if use_cache:
-                            _API_RESPONSE_CACHE[cache_key] = result
+                            _cache_response(cache_key, result)
                         return result
                     elif status == "failed":
                         err = task_info.get("result", {}).get(
@@ -858,7 +869,7 @@ async def call_api(
                 result = await asyncio.wait_for(fut, timeout=poll_timeout)
                 logger.info(f"[Distributed] Task '{task_id}' completed successfully")
                 if use_cache:
-                    _API_RESPONSE_CACHE[cache_key] = result
+                    _cache_response(cache_key, result)
                 return result
             except (asyncio.TimeoutError, TimeoutError) as e:
                 logger.error(f"[Distributed] Task '{task_id}' timed out: {e}")
@@ -1048,7 +1059,7 @@ async def call_api(
             result = await _execute(local_client)
 
     if use_cache:
-        _API_RESPONSE_CACHE[cache_key] = result
+        _cache_response(cache_key, result)
     return result
 
 
@@ -1101,24 +1112,13 @@ def parse_security_verdict(security_report: str):
     """
     if not security_report:
         return None
-    decoder = json.JSONDecoder()
     fenced = re.findall(
         r"```json\s*(.*?)```", security_report, re.DOTALL | re.IGNORECASE
     )
     for text in fenced + [security_report]:
-        idx = 0
-        while True:
-            start = text.find("{", idx)
-            if start == -1:
-                break
-            try:
-                obj, end = decoder.raw_decode(text[start:])
-            except json.JSONDecodeError:
-                idx = start + 1
-                continue
+        for obj in _iter_json_objects(text):
             if isinstance(obj, dict) and "blocking" in obj:
                 return obj
-            idx = start + end
     return None
 
 
@@ -1197,7 +1197,7 @@ async def process_single_file(
                 proj_scanner = ProjectScanner(
                     root_dir=project_dir, extra_ignores=config.scanner.exclude_patterns
                 )
-                current_context = proj_scanner.scan()
+                current_context = await asyncio.to_thread(proj_scanner.scan)
             except Exception:
                 current_context = {}
             current_context["design.md"] = design_plan_content
@@ -1251,8 +1251,7 @@ async def process_single_file(
 
             # 2. Write code to projects/[project_name]/[file_path]
             try:
-                with open(target_file_path, "w", encoding="utf-8") as f:
-                    f.write(code_to_write)
+                _write_text(target_file_path, code_to_write)
                 logger.info(f"Wrote implemented code to {target_file_path}")
             except Exception as e:
                 raise PipelineError(f"Failed to write code to {target_file_path}: {e}")
@@ -1298,8 +1297,7 @@ async def process_single_file(
                     security_report,
                 )
                 try:
-                    with open(audit_log_path, "w", encoding="utf-8") as f:
-                        f.write(security_report)
+                    _write_text(audit_log_path, security_report)
                 except Exception as e:
                     raise PipelineError(
                         f"Failed to write security audit to {audit_log_path}: {e}"
@@ -1320,7 +1318,7 @@ async def process_single_file(
                         root_dir=project_dir,
                         extra_ignores=config.scanner.exclude_patterns,
                     )
-                    current_context = proj_scanner.scan()
+                    current_context = await asyncio.to_thread(proj_scanner.scan)
                 except Exception:
                     current_context = {}
                 current_context["design.md"] = design_plan_content
@@ -1400,8 +1398,7 @@ async def process_single_file(
 
                 # 4. Write debug/log files to disk
                 try:
-                    with open(test_file_path, "w", encoding="utf-8") as f:
-                        f.write(test_code_to_write)
+                    _write_text(test_file_path, test_code_to_write)
                     logger.info(f"Wrote generated tests to {test_file_path}")
                 except Exception as e:
                     raise PipelineError(
@@ -1409,8 +1406,7 @@ async def process_single_file(
                     )
 
                 try:
-                    with open(audit_log_path, "w", encoding="utf-8") as f:
-                        f.write(security_report)
+                    _write_text(audit_log_path, security_report)
                     logger.info(f"Wrote security audit report to {audit_log_path}")
                 except Exception as e:
                     raise PipelineError(
@@ -1453,8 +1449,7 @@ async def process_single_file(
 
             # Save output to projects/[project_name]/logs/test_[file_name].log
             try:
-                with open(test_log_path, "w", encoding="utf-8") as f:
-                    f.write(test_failures_logs)
+                _write_text(test_log_path, test_failures_logs)
             except Exception as e:
                 logger.warning(f"Failed to write test log to {test_log_path}: {e}")
 
@@ -1598,7 +1593,7 @@ async def run_pipeline(
         scanner = ProjectScanner(
             root_dir=project_dir, extra_ignores=config.scanner.exclude_patterns
         )
-        scanned_files = scanner.scan()
+        scanned_files = await asyncio.to_thread(scanner.scan)
     except Exception as e:
         logger.warning(f"Failed to scan workspace: {e}")
         scanned_files = {}
@@ -1641,12 +1636,10 @@ async def run_pipeline(
 
             output_file = os.path.join(workspace, output_name)
             try:
-                with open(output_file, "w", encoding="utf-8") as f:
-                    f.write(result)
+                _write_text(output_file, result)
                 proj_output_file = os.path.join(project_dir, output_name)
                 os.makedirs(project_dir, exist_ok=True)
-                with open(proj_output_file, "w", encoding="utf-8") as f:
-                    f.write(result)
+                _write_text(proj_output_file, result)
             except Exception as e:
                 raise PipelineError(
                     f"Failed to write agent output to {output_file}: {e}"
@@ -1699,11 +1692,9 @@ async def run_pipeline(
         )
 
         try:
-            with open(research_file, "w", encoding="utf-8") as f:
-                f.write(research_content)
+            _write_text(research_file, research_content)
             proj_research_file = os.path.join(project_dir, "research.md")
-            with open(proj_research_file, "w", encoding="utf-8") as f:
-                f.write(research_content)
+            _write_text(proj_research_file, research_content)
         except Exception as e:
             logger.warning(f"Failed to write research debug output: {e}")
         validate_file(research_file, "Research", is_input=False)
@@ -1738,12 +1729,8 @@ async def run_pipeline(
             Claude call (so a later debate failure cannot lose a valid design)
             and again after the debate refines it."""
             try:
-                with open(design_file, "w", encoding="utf-8") as f:
-                    f.write(content)
-                with open(
-                    os.path.join(project_dir, "design.md"), "w", encoding="utf-8"
-                ) as f:
-                    f.write(content)
+                _write_text(design_file, content)
+                _write_text(os.path.join(project_dir, "design.md"), content)
             except Exception as e:
                 logger.warning(f"Failed to write Claude debug output: {e}")
 
@@ -2025,12 +2012,8 @@ async def run_pipeline(
                 )
             )
             try:
-                with open(review_file, "w", encoding="utf-8") as f:
-                    f.write(review_content)
-                with open(
-                    os.path.join(project_dir, "review.md"), "w", encoding="utf-8"
-                ) as f:
-                    f.write(review_content)
+                _write_text(review_file, review_content)
+                _write_text(os.path.join(project_dir, "review.md"), review_content)
             except Exception as e:
                 logger.warning(f"Failed to write review.md: {e}")
 
@@ -2049,12 +2032,8 @@ async def run_pipeline(
                 )
             )
             try:
-                with open(audit_file, "w", encoding="utf-8") as f:
-                    f.write(consolidated_audit)
-                with open(
-                    os.path.join(project_dir, "audit.md"), "w", encoding="utf-8"
-                ) as f:
-                    f.write(consolidated_audit)
+                _write_text(audit_file, consolidated_audit)
+                _write_text(os.path.join(project_dir, "audit.md"), consolidated_audit)
             except Exception as e:
                 logger.warning(f"Failed to write audit.md: {e}")
 
@@ -2073,7 +2052,7 @@ async def run_pipeline(
                 proj_scanner = ProjectScanner(
                     root_dir=project_dir, extra_ignores=config.scanner.exclude_patterns
                 )
-                current_context = proj_scanner.scan()
+                current_context = await asyncio.to_thread(proj_scanner.scan)
             except Exception:
                 current_context = {}
             current_context["audit.md"] = devops_prompt
@@ -2111,12 +2090,8 @@ async def run_pipeline(
                 )
             )
             try:
-                with open(deploy_file, "w", encoding="utf-8") as f:
-                    f.write(devops_content)
-                with open(
-                    os.path.join(project_dir, "deploy.md"), "w", encoding="utf-8"
-                ) as f:
-                    f.write(devops_content)
+                _write_text(deploy_file, devops_content)
+                _write_text(os.path.join(project_dir, "deploy.md"), devops_content)
             except Exception as e:
                 raise PipelineError(
                     f"Failed to write DevOps output to {deploy_file}: {e}"
@@ -2215,8 +2190,7 @@ async def run_pipeline(
                 logger.info(f"Writing captured stdout to output file: {app_file}")
                 os.makedirs(project_dir, exist_ok=True)
                 try:
-                    with open(app_file, "w", encoding="utf-8") as f:
-                        f.write(stdout_str)
+                    _write_text(app_file, stdout_str)
                 except Exception as e:
                     raise PipelineError(
                         f"Failed to write stdout to output file {app_file}: {e}"
@@ -2285,11 +2259,9 @@ async def run_pipeline(
 
         os.makedirs(project_dir, exist_ok=True)
         try:
-            with open(review_file, "w", encoding="utf-8") as f:
-                f.write(codex_content)
+            _write_text(review_file, codex_content)
             proj_review_file = os.path.join(project_dir, "review.md")
-            with open(proj_review_file, "w", encoding="utf-8") as f:
-                f.write(codex_content)
+            _write_text(proj_review_file, codex_content)
         except Exception as e:
             raise PipelineError(f"Failed to write Codex output to {review_file}: {e}")
         validate_file(review_file, "Codex", is_input=False)
@@ -2368,11 +2340,9 @@ async def run_pipeline(
         # Write Tester outputs
         os.makedirs(project_dir, exist_ok=True)
         try:
-            with open(test_generated_file, "w", encoding="utf-8") as f:
-                f.write(tester_content)
+            _write_text(test_generated_file, tester_content)
             proj_test_file = os.path.join(project_dir, "test_generated.py")
-            with open(proj_test_file, "w", encoding="utf-8") as f:
-                f.write(tester_content)
+            _write_text(proj_test_file, tester_content)
         except Exception as e:
             raise PipelineError(
                 f"Failed to write Tester output to {test_generated_file}: {e}"
@@ -2380,21 +2350,17 @@ async def run_pipeline(
 
         # Write Security outputs
         try:
-            with open(audit_file, "w", encoding="utf-8") as f:
-                f.write(security_content)
+            _write_text(audit_file, security_content)
             proj_audit_file = os.path.join(project_dir, "audit.md")
-            with open(proj_audit_file, "w", encoding="utf-8") as f:
-                f.write(security_content)
+            _write_text(proj_audit_file, security_content)
         except Exception as e:
             raise PipelineError(f"Failed to write Security output to {audit_file}: {e}")
 
         # Write DevOps outputs
         try:
-            with open(deploy_file, "w", encoding="utf-8") as f:
-                f.write(devops_content)
+            _write_text(deploy_file, devops_content)
             proj_deploy_file = os.path.join(project_dir, "deploy.md")
-            with open(proj_deploy_file, "w", encoding="utf-8") as f:
-                f.write(devops_content)
+            _write_text(proj_deploy_file, devops_content)
         except Exception as e:
             raise PipelineError(f"Failed to write DevOps output to {deploy_file}: {e}")
 
@@ -2471,7 +2437,7 @@ async def run_e2e_pipeline(
         scanner = ProjectScanner(
             root_dir=project_dir, extra_ignores=config.scanner.exclude_patterns
         )
-        scanned_files = scanner.scan()
+        scanned_files = await asyncio.to_thread(scanner.scan)
     except Exception as e:
         logger.warning(f"Failed to scan workspace: {e}")
         scanned_files = {}
@@ -2496,10 +2462,8 @@ async def run_e2e_pipeline(
             Claude call (so a later debate failure cannot lose a valid plan)
             and again after the debate refines it."""
             try:
-                with open(plan_file, "w", encoding="utf-8") as f:
-                    f.write(content)
-                with open(proj_plan_file, "w", encoding="utf-8") as f:
-                    f.write(content)
+                _write_text(plan_file, content)
+                _write_text(proj_plan_file, content)
             except Exception as e:
                 raise PipelineError(f"Failed to write Claude plan to {plan_file}: {e}")
 
@@ -2655,7 +2619,7 @@ async def run_e2e_pipeline(
                             root_dir=project_dir,
                             extra_ignores=config.scanner.exclude_patterns,
                         )
-                        current_context = proj_scanner.scan()
+                        current_context = await asyncio.to_thread(proj_scanner.scan)
                     except Exception:
                         current_context = {}
 
@@ -2693,8 +2657,7 @@ async def run_e2e_pipeline(
                         continue
 
                     try:
-                        with open(target_file_path, "w", encoding="utf-8") as f:
-                            f.write(code_content)
+                        _write_text(target_file_path, code_content)
                     except Exception as e:
                         raise PipelineError(
                             f"Failed to write code to {target_file_path}: {e}"
@@ -2785,7 +2748,7 @@ async def run_e2e_pipeline(
                             root_dir=project_dir,
                             extra_ignores=config.scanner.exclude_patterns,
                         )
-                        current_context = proj_scanner.scan()
+                        current_context = await asyncio.to_thread(proj_scanner.scan)
                     except Exception:
                         current_context = {}
 
@@ -2821,8 +2784,7 @@ async def run_e2e_pipeline(
                         continue
 
                     try:
-                        with open(test_file_path, "w", encoding="utf-8") as f:
-                            f.write(test_code_content)
+                        _write_text(test_file_path, test_code_content)
                     except Exception as e:
                         raise PipelineError(
                             f"Failed to write test code to {test_file_path}: {e}"
@@ -3008,9 +2970,7 @@ def main():
     parser.add_argument(
         "--max-retries", type=int, default=3, help="Max retries for self-healing loop"
     )
-    default_debate_rounds = (
-        0 if ("pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST")) else 2
-    )
+    default_debate_rounds = 0 if under_pytest() else 2
     parser.add_argument(
         "--max-debate-rounds",
         type=int,

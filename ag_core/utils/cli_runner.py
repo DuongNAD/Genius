@@ -85,6 +85,54 @@ def extract_json_object(text: str):
     return None
 
 
+def wrap_windows_cmd(cmd: list, cli_path: str) -> list:
+    """Wrap ``.cmd``/``.bat`` shims with ``cmd.exe /c`` on Windows.
+
+    Decided from the already-resolved path — never via a raw ``shutil.which``
+    on a bare name, which searches the cwd first and would re-introduce the
+    repo-wrapper recursion.
+    """
+    if sys.platform == "win32" and cli_path.lower().endswith((".cmd", ".bat")):
+        return ["cmd.exe", "/c"] + cmd
+    return cmd
+
+
+async def spawn_cli(
+    cmd: list,
+    cli_path: str,
+    *,
+    stdin=asyncio.subprocess.PIPE,
+    cwd: str | None = None,
+):
+    """Spawn a resolved vendor CLI, absorbing the Windows shim quirks once.
+
+    ``.cmd``/``.bat`` shims are wrapped with ``cmd.exe /c`` up front (from
+    ``cli_path``); if an unwrapped spawn still fails with ``OSError`` on
+    Windows (an extensionless shim CreateProcess cannot launch), it is retried
+    once through ``cmd.exe /c``. stdout/stderr are always PIPEd; callers pick
+    ``stdin`` (PIPE to feed the prompt, DEVNULL for file-fed CLIs).
+    """
+    actual_cmd = wrap_windows_cmd(cmd, cli_path)
+    try:
+        return await asyncio.create_subprocess_exec(
+            *actual_cmd,
+            stdin=stdin,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+    except OSError:
+        if sys.platform == "win32" and actual_cmd[0] != "cmd.exe":
+            return await asyncio.create_subprocess_exec(
+                *(["cmd.exe", "/c"] + cmd),
+                stdin=stdin,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+            )
+        raise
+
+
 async def _terminate(process) -> None:
     """Best-effort kill + reap so a timed-out CLI leaves no zombie.
 

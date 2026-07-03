@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import time
 import json
 import os
@@ -115,7 +116,14 @@ class ClientWorker:
     async def handle_request(
         self, endpoint: str, payload: Any, headers: Dict[str, str]
     ) -> tuple[int, Any, Dict[str, str]]:
-        if headers.get("X-API-Key") != self.api_key:
+        # Timing-safe comparison, fail-closed on a missing key on either side
+        # (mirrors CentralHub.verify_auth).
+        provided = headers.get("X-API-Key")
+        if (
+            not provided
+            or not self.api_key
+            or not hmac.compare_digest(str(provided), str(self.api_key))
+        ):
             return 401, {"error": "Unauthorized"}, {}
 
         # Verify Checksum
