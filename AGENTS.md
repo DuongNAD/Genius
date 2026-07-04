@@ -10,8 +10,10 @@ explicitly says they want to work on the Genius framework itself.
 If your task is to build, research, design, review, test, or audit something,
 do it by **calling the `genius` MCP tools** (`research`, `design`, `code`,
 `unit_test`, `security_audit`, `deploy`, `review`, `debate`, `doctor`,
-`orchestrate`, `orchestrate_status`) and put the results in the user's own
-workspace — not here.
+`code_graph`, `orchestrate`, `orchestrate_status`, `orchestrate_approve`,
+`orchestrate_reject`) and put the results in the user's own workspace — not
+here. `code_graph` answers repo-structure questions (where is a symbol
+defined, who imports a file, ranked repo map) without running any agent.
 
 To start the API servers needed by `orchestrate`: `py serve.py` (Windows `py`
 launcher; port 8080 is taken by another service on this machine, skip the
