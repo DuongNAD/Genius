@@ -7,60 +7,21 @@ from typing import Dict, List, Optional, Any
 from ag_core.utils.jwt import encode_jwt
 
 # accepted role id -> (agent module, agent class, provider-factory role).
-# Provider selection (default fallback chains + explicit
-# GENIUS_PROVIDER_<ROLE> overrides) lives in ag_core.provider_factory — same
-# wiring as skill_app. Legacy role ids ("grok", "grok_researcher") are folded
-# in by canonical_role() at the lookup site; the long aliases
-# ("claude_architect", "codex_reviewer", ...) are accepted directly here.
-# Module-level: execute_task used to rebuild this dict on every task.
+# Derived from the shared factory tables (ag_core.agent_factory) — same shape
+# and exactly the same accepted-id set as the historical hand-written map:
+# canonical ids plus the long service aliases ("claude_architect",
+# "codex_reviewer", ...) that remote hubs may dispatch with. Legacy role ids
+# ("grok", "grok_researcher") are folded in by canonical_role() at the lookup
+# site. Module-level: execute_task used to rebuild this dict on every task.
+from ag_core.agent_factory import AGENT_CLASSES as _AGENT_CLASSES
+from ag_core.agent_factory import LONG_ROLE_ALIASES as _LONG_ROLE_ALIASES
+
 ROLE_AGENT_MAP = {
-    "researcher": (
-        "ag_core.agents.researcher",
-        "ResearcherAgent",
-        "researcher",
-    ),
-    "claude": (
-        "ag_core.agents.claude_architect",
-        "ClaudeArchitectAgent",
-        "claude",
-    ),
-    "claude_architect": (
-        "ag_core.agents.claude_architect",
-        "ClaudeArchitectAgent",
-        "claude",
-    ),
-    "codex": (
-        "ag_core.agents.codex_reviewer",
-        "CodexReviewerAgent",
-        "codex",
-    ),
-    "codex_reviewer": (
-        "ag_core.agents.codex_reviewer",
-        "CodexReviewerAgent",
-        "codex",
-    ),
-    "tester": ("ag_core.agents.tester", "TesterAgent", "tester"),
-    "tester_agent": ("ag_core.agents.tester", "TesterAgent", "tester"),
-    "security": (
-        "ag_core.agents.security_agent",
-        "SecurityAgent",
-        "security",
-    ),
-    "security_agent": (
-        "ag_core.agents.security_agent",
-        "SecurityAgent",
-        "security",
-    ),
-    "devops": (
-        "ag_core.agents.devops_agent",
-        "DevOpsAgent",
-        "devops",
-    ),
-    "devops_agent": (
-        "ag_core.agents.devops_agent",
-        "DevOpsAgent",
-        "devops",
-    ),
+    **{role: (mod, cls, role) for role, (mod, cls) in _AGENT_CLASSES.items()},
+    **{
+        alias: (*_AGENT_CLASSES[role], role)
+        for alias, role in _LONG_ROLE_ALIASES.items()
+    },
 }
 
 
@@ -238,37 +199,19 @@ class ClientWorker:
                     }
                     self.tasks_failed += 1
                 else:
-                    (
-                        agent_mod_name,
-                        agent_cls_name,
-                        factory_role,
-                    ) = ROLE_AGENT_MAP[normalized_role]
+                    _, _, factory_role = ROLE_AGENT_MAP[normalized_role]
                     try:
-                        import importlib
+                        from ag_core.agent_factory import build_agent
 
-                        agent_mod = importlib.import_module(agent_mod_name)
-                        agent_class = getattr(agent_mod, agent_cls_name)
-
-                        from ag_core.config import load_config
-                        from ag_core.provider_factory import make_provider
-
-                        config = load_config()
-
-                        provider = make_provider(factory_role, config)
-                        agent = agent_class(
-                            provider=provider,
-                            config=config,
-                            output_file="None",
-                            # Mirror the skill-server hardening (build_agent):
-                            # no VectorMemory — its lazy sentence-transformers
-                            # model load / O(N) query runs synchronously on this
-                            # worker's event loop and would stall the heartbeat,
-                            # risking hub-side eviction and duplicate dispatch —
-                            # and stateless so a codex task doesn't run the
-                            # host's pytest or write files on the worker.
-                            stateless=True,
-                            use_memory=False,
-                        )
+                        # The stateless bundle mirrors the skill-server
+                        # hardening: no VectorMemory — its lazy
+                        # sentence-transformers model load / O(N) query runs
+                        # synchronously on this worker's event loop and would
+                        # stall the heartbeat, risking hub-side eviction and
+                        # duplicate dispatch — and stateless so a codex task
+                        # doesn't run the host's pytest or write files on the
+                        # worker.
+                        agent = build_agent(factory_role, stateless=True)
 
                         output = await agent.run(prompt=prompt, context_data=context)
                         status = "completed"

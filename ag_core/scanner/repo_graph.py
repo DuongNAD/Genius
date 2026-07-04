@@ -23,6 +23,7 @@ import ast
 import os
 import re
 
+from ag_core.scanner import code_parse
 from ag_core.scanner.project_scanner import ProjectChunker
 
 # Spent per agent call; only kicks in on workspaces bigger than this.
@@ -217,7 +218,7 @@ def _build(scanned_files, seeds, task_text, budget):
         return scanned_files
 
     paths = sorted(scanned_files)
-    # --- graph over the python subset ---------------------------------
+    # --- graph over the python subset (stdlib ast) ---------------------
     infos = {}
     for p in paths:
         if p.endswith(".py"):
@@ -225,6 +226,17 @@ def _build(scanned_files, seeds, task_text, budget):
                 infos[p] = _parse_py(scanned_files[p])
             except (SyntaxError, ValueError):
                 infos[p] = (set(), set(), set())
+
+    # Non-Python files join the graph when the optional tree-sitter layer is
+    # installed; without it code_parse yields empty info and they stay
+    # isolated nodes (the pre-R4 behavior, and the pure-Python test suite is
+    # unaffected either way).
+    ts_infos = {}
+    for p in paths:
+        if not p.endswith(".py"):
+            parsed = code_parse.parse_source(p, scanned_files[p])
+            if parsed["defs"] or parsed["refs"] or parsed["imports"]:
+                ts_infos[p] = parsed
 
     module_index = {}
     for p in sorted(infos):
@@ -234,6 +246,9 @@ def _build(scanned_files, seeds, task_text, budget):
     for p in sorted(infos):
         for d in infos[p][0]:
             def_index.setdefault(d, set()).add(p)
+    for p in sorted(ts_infos):
+        for name, _kind, _line, _sig in ts_infos[p]["defs"]:
+            def_index.setdefault(name, set()).add(p)
 
     edges = {p: set() for p in paths}
     for p, (defs, refs, imports) in infos.items():
@@ -242,6 +257,16 @@ def _build(scanned_files, seeds, task_text, budget):
             if target and target != p:
                 edges[p].add(target)
         for ref in refs:
+            for target in def_index.get(ref, ()):
+                if target != p:
+                    edges[p].add(target)
+    for p in sorted(ts_infos):
+        parsed = ts_infos[p]
+        for spec in parsed["imports"]:
+            for target in code_parse.resolve_import(p, spec, paths):
+                if target != p:
+                    edges[p].add(target)
+        for ref in parsed["refs"]:
             for target in def_index.get(ref, ()):
                 if target != p:
                     edges[p].add(target)

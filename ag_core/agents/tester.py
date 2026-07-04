@@ -3,7 +3,6 @@ from typing import Any
 from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
-from ag_core.utils.logger import log_transaction
 from ag_core.utils.code_extract import extract_code
 from ag_core.utils.cli_runner import communicate_with_timeout, test_timeout
 
@@ -16,6 +15,17 @@ class TesterAgent(BaseAgent):
 
     __test__ = False
 
+    DEFAULT_TASK = (
+        "Generate unit tests and scenarios based on the review output "
+        "and project files."
+    )
+    SLASH_PREFIXES = {
+        "/unit-test": "Generate comprehensive unit tests and test suites using pytest for the project files context, focusing on edge cases and validation:\n\n",
+        "/stress-test": "Create a performance or stress testing script or scenario to simulate heavy concurrent load, analyzing latency and failure modes:\n\n",
+    }
+    USES_MEMORY = False
+    DEFAULT_OUTPUT_FILE = "test_generated.py"
+
     def __init__(
         self, provider: BaseProvider, config: Config = None, **kwargs: Any
     ) -> None:
@@ -26,29 +36,11 @@ class TesterAgent(BaseAgent):
     async def run(
         self, prompt: str | None = None, context_data: dict | None = None
     ) -> str:
-        user_prompt = (
-            prompt
-            or self.extra_params.get("prompt")
-            or "Generate unit tests and scenarios based on the review output and project files."
-        )
-
-        # Parse and wrap specialized slash commands
-        words = user_prompt.strip().split(maxsplit=1)
-        if words and words[0].startswith("/"):
-            cmd = words[0]
-            query = words[1] if len(words) > 1 else ""
-            if cmd == "/unit-test":
-                user_prompt = f"Generate comprehensive unit tests and test suites using pytest for the project files context, focusing on edge cases and validation:\n\n{query}"
-            elif cmd == "/stress-test":
-                user_prompt = f"Create a performance or stress testing script or scenario to simulate heavy concurrent load, analyzing latency and failure modes:\n\n{query}"
+        user_prompt, _ = self._route_slash_command(self._resolve_user_prompt(prompt))
 
         # Scan project files (or use provided context_data) and format context
         _, context = await self.scan_context_async(context_data)
-        history_context = self.format_history()
-
-        full_prompt = (
-            f"{history_context}{user_prompt}\n\nProject files context:\n{context}"
-        )
+        full_prompt = self._compose_full_prompt(user_prompt, "", context)
 
         from ag_core.utils.prompt_templates import TESTER_PROMPT
 
@@ -57,15 +49,10 @@ class TesterAgent(BaseAgent):
         content = response.get("content", "")
         usage = response.get("usage", {})
 
-        # Log transaction
-        log_transaction(
-            model_name=self.provider.model_name,
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-        )
+        self._log_usage(usage)
 
         # Write to output file
-        output_file = self.resolve_output_file("test_generated.py")
+        output_file = self.resolve_output_file(self.DEFAULT_OUTPUT_FILE)
 
         test_failures_logs = ""
         if output_file != "None":
@@ -126,11 +113,7 @@ class TesterAgent(BaseAgent):
                     )
                     content = response.get("content", "")
                     usage = response.get("usage", {})
-                    log_transaction(
-                        model_name=self.provider.model_name,
-                        prompt_tokens=usage.get("prompt_tokens", 0),
-                        completion_tokens=usage.get("completion_tokens", 0),
-                    )
+                    self._log_usage(usage)
 
             # Make sure the final clean code without evidence remains written in output_file
             code_to_write = extract_code(content)

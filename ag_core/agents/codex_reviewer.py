@@ -3,9 +3,13 @@ from typing import Any
 from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
-from ag_core.utils.logger import log_transaction
 from ag_core.utils.code_extract import extract_code
 from ag_core.utils.cli_runner import communicate_with_timeout, test_timeout
+
+# Imported into THIS namespace (not used via BaseAgent._log_usage): tests
+# patch ``ag_core.agents.codex_reviewer.log_transaction`` to silence the
+# usage-logging side effect, so the module-level name must stay.
+from ag_core.utils.logger import log_transaction
 
 
 class CodexReviewerAgent(BaseAgent):
@@ -13,6 +17,25 @@ class CodexReviewerAgent(BaseAgent):
     Codex Reviewer Agent that scans project files, performs code review,
     and reports bugs/vulnerabilities.
     """
+
+    DEFAULT_TASK = (
+        "Perform a code review of the project files, checking for bugs, "
+        "style issues, and security vulnerabilities."
+    )
+    # /code and /refactor are GENERATION requests: the caller (orchestrator /
+    # MCP tool) writes and verifies the produced file itself, so this agent
+    # must return the model output untouched — no lint/test verification
+    # loop, and no log sections appended (a real run poisoned extract_code
+    # downstream: the appended pytest log of this host repo's own suite was
+    # the largest fenced block and got extracted instead of the code).
+    GENERATION_COMMANDS = ("/code", "/refactor")
+    SLASH_PREFIXES = {
+        "/code": "Write clean, robust, and well-documented code for the following request:\n\n",
+        "/refactor": "Refactor the existing code or components to improve readability, performance, and structure, explaining the changes made:\n\n",
+        "/security": "Perform a security code audit, looking for vulnerabilities, insecure practices, data leaks, or potential attack vectors:\n\n",
+    }
+    USES_MEMORY = True
+    DEFAULT_OUTPUT_FILE = "review.md"
 
     def __init__(
         self, provider: BaseProvider, config: Config = None, **kwargs: Any
@@ -24,51 +47,15 @@ class CodexReviewerAgent(BaseAgent):
     async def run(
         self, prompt: str | None = None, context_data: dict | None = None
     ) -> str:
-        user_prompt = (
-            prompt
-            or self.extra_params.get("prompt")
-            or "Perform a code review of the project files, checking for bugs, style issues, and security vulnerabilities."
-        )
-
-        # Parse and wrap specialized slash commands. /code and /refactor are
-        # GENERATION requests: the caller (orchestrator / MCP tool) writes and
-        # verifies the produced file itself, so this agent must return the
-        # model output untouched — no lint/test verification loop, and no log
-        # sections appended (a real run poisoned extract_code downstream: the
-        # appended pytest log of this host repo's own suite was the largest
-        # fenced block and got extracted instead of the code).
-        generation_mode = False
-        words = user_prompt.strip().split(maxsplit=1)
-        if words and words[0].startswith("/"):
-            cmd = words[0]
-            query = words[1] if len(words) > 1 else ""
-            if cmd in ("/code", "/refactor"):
-                generation_mode = True
-            if cmd == "/code":
-                user_prompt = f"Write clean, robust, and well-documented code for the following request:\n\n{query}"
-            elif cmd == "/refactor":
-                user_prompt = f"Refactor the existing code or components to improve readability, performance, and structure, explaining the changes made:\n\n{query}"
-            elif cmd == "/security":
-                user_prompt = f"Perform a security code audit, looking for vulnerabilities, insecure practices, data leaks, or potential attack vectors:\n\n{query}"
+        user_prompt, cmd = self._route_slash_command(self._resolve_user_prompt(prompt))
+        generation_mode = cmd in self.GENERATION_COMMANDS
 
         # Scan project files (or use provided context_data) and format context
         root_dir = os.getcwd()
         scanned_files, context = await self.scan_context_async(context_data)
 
-        # Retrieve matching past interactions
-        past_memories = await self.retrieve_memory_async(user_prompt, limit=3)
-        memory_context = ""
-        if past_memories:
-            memory_context = "\n--- Relevant Historical Memory Context ---\n"
-            for i, mem in enumerate(past_memories, 1):
-                memory_context += f"Interaction #{i}:\n{mem['text']}\n"
-
-        history_context = self.format_history()
-
-        full_prompt = f"{history_context}{user_prompt}\n"
-        if memory_context:
-            full_prompt += f"{memory_context}\n"
-        full_prompt += f"\nProject files context:\n{context}"
+        memory_context = await self._memory_context_block(user_prompt)
+        full_prompt = self._compose_full_prompt(user_prompt, memory_context, context)
 
         from ag_core.utils.prompt_templates import CODER_PROMPT
 
@@ -79,16 +66,7 @@ class CodexReviewerAgent(BaseAgent):
 
         self.history.append({"prompt": user_prompt, "response": content})
 
-        # Save interaction to memory
-        await self.store_memory_async(
-            text=f"Prompt: {user_prompt}\nResponse: {content}",
-            metadata={
-                "type": "agent_run",
-                "task_id": self.extra_params.get("task_id", "unknown"),
-            },
-        )
-
-        # Log transaction
+        await self._store_run_memory(user_prompt, content)
         log_transaction(
             model_name=self.provider.model_name,
             prompt_tokens=usage.get("prompt_tokens", 0),
@@ -96,7 +74,7 @@ class CodexReviewerAgent(BaseAgent):
         )
 
         # Generation requests return the model output untouched — the caller
-        # writes and verifies the file (see the slash-command comment above).
+        # writes and verifies the file (see the GENERATION_COMMANDS comment).
         if generation_mode:
             self._write_output_file(content)
             return content
@@ -293,4 +271,4 @@ class CodexReviewerAgent(BaseAgent):
 
     def _write_output_file(self, content: str) -> None:
         # Thin wrapper over the base helpers (same "None" sentinel handling).
-        self.write_output(self.resolve_output_file("review.md"), content)
+        self.write_output(self.resolve_output_file(self.DEFAULT_OUTPUT_FILE), content)

@@ -4,6 +4,7 @@ import os
 from typing import Any, List, Dict
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.memory.vector_store import VectorMemory
+from ag_core.utils.logger import log_transaction
 
 
 class BaseAgent(abc.ABC):
@@ -162,6 +163,99 @@ class BaseAgent(abc.ABC):
                 f.write(content)
         except Exception as e:
             print(f"Warning: Failed to write output file {output_file}: {e}")
+
+    # ------------------------------------------------------------------
+    # Standard run flow. The six role agents share one request shape:
+    # resolve the task text, rewrite a leading slash command, scan the
+    # workspace, optionally pull vector-memory context, compose the prompt,
+    # call the provider, then record history/memory, log usage and write
+    # the artifact. Concrete agents set the class knobs below and delegate
+    # run() to _run_standard(); agents with extra machinery (codex's
+    # verification loop, tester's self-heal loop) reuse the helpers and
+    # keep their own run(). Prompt composition here must stay byte-identical
+    # to the pre-refactor per-agent code — tests pin the slash rewrites and
+    # the memory-context block.
+    # ------------------------------------------------------------------
+
+    DEFAULT_TASK = ""
+    SLASH_PREFIXES: Dict[str, str] = {}
+    SYSTEM_PROMPT = ""
+    USES_MEMORY = False
+    DEFAULT_OUTPUT_FILE = "output.md"
+
+    def _resolve_user_prompt(self, prompt: str | None) -> str:
+        return prompt or self.extra_params.get("prompt") or self.DEFAULT_TASK
+
+    def _route_slash_command(self, user_prompt: str) -> tuple:
+        """(rewritten_prompt, cmd) — cmd is the leading "/token" if present
+        (known or not, for callers like codex that branch on it); only
+        commands listed in SLASH_PREFIXES are rewritten to prefix + query."""
+        words = user_prompt.strip().split(maxsplit=1)
+        if not words or not words[0].startswith("/"):
+            return user_prompt, None
+        cmd = words[0]
+        query = words[1] if len(words) > 1 else ""
+        prefix = self.SLASH_PREFIXES.get(cmd)
+        if prefix is None:
+            return user_prompt, cmd
+        return prefix + query, cmd
+
+    async def _memory_context_block(self, user_prompt: str) -> str:
+        past_memories = await self.retrieve_memory_async(user_prompt, limit=3)
+        if not past_memories:
+            return ""
+        block = "\n--- Relevant Historical Memory Context ---\n"
+        for i, mem in enumerate(past_memories, 1):
+            block += f"Interaction #{i}:\n{mem['text']}\n"
+        return block
+
+    def _compose_full_prompt(
+        self, user_prompt: str, memory_context: str, context: str
+    ) -> str:
+        full_prompt = f"{self.format_history()}{user_prompt}\n"
+        if memory_context:
+            full_prompt += f"{memory_context}\n"
+        full_prompt += f"\nProject files context:\n{context}"
+        return full_prompt
+
+    def _log_usage(self, usage: dict) -> None:
+        log_transaction(
+            model_name=self.provider.model_name,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+        )
+
+    async def _store_run_memory(self, user_prompt: str, content: str) -> None:
+        await self.store_memory_async(
+            text=f"Prompt: {user_prompt}\nResponse: {content}",
+            metadata={
+                "type": "agent_run",
+                "task_id": self.extra_params.get("task_id", "unknown"),
+            },
+        )
+
+    async def _run_standard(
+        self, prompt: str | None = None, context_data: dict | None = None
+    ) -> str:
+        user_prompt, _ = self._route_slash_command(self._resolve_user_prompt(prompt))
+        _, context = await self.scan_context_async(context_data)
+        memory_context = ""
+        if self.USES_MEMORY:
+            memory_context = await self._memory_context_block(user_prompt)
+        full_prompt = self._compose_full_prompt(user_prompt, memory_context, context)
+
+        response = await self.provider.send_prompt(
+            full_prompt, system=self.SYSTEM_PROMPT
+        )
+        content = response.get("content", "")
+        usage = response.get("usage", {})
+
+        self.history.append({"prompt": user_prompt, "response": content})
+        if self.USES_MEMORY:
+            await self._store_run_memory(user_prompt, content)
+        self._log_usage(usage)
+        self.write_output(self.resolve_output_file(self.DEFAULT_OUTPUT_FILE), content)
+        return content
 
     @abc.abstractmethod
     async def run(self) -> str:

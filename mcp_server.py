@@ -15,8 +15,7 @@ root_dir = os.path.dirname(os.path.abspath(__file__))
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
-from ag_core.config import load_config
-from ag_core.provider_factory import make_provider
+from ag_core import agent_factory
 
 # The agent classes are resolved through module globals at call time (see
 # execute_agent) so tests can patch e.g. ``mcp_server.DevOpsAgent`` - flake8
@@ -64,21 +63,17 @@ async def execute_agent(
         raise ValueError(f"Unknown agent: {agent_name}")
 
     role, agent_cls_name, default_chain = TOOL_AGENTS[agent_name]
-    config = load_config()
-    provider = make_provider(role, config, default_chain=default_chain)
-    agent_class = globals()[agent_cls_name]
-    # stateless=True mirrors the skill-server hardening: the reviewer agent must
-    # NOT fall into its flake8/pytest self-healing loop, which runs the host's
-    # test suite and writes model-generated code into the server's working tree
-    # (a remote-code-execution surface reachable from the MCP `review`/`code`
-    # tools). use_memory=False also avoids a blocking VectorMemory/model load on
-    # the event loop. output_file="None" keeps suppressing the artifact write.
-    agent = agent_class(
-        provider=provider,
-        config=config,
-        output_file="None",
-        stateless=True,
-        use_memory=False,
+    # Shared factory applies the stateless bundle (output_file="None",
+    # use_memory=False, stateless=True): the reviewer agent must NOT fall into
+    # its flake8/pytest self-healing loop, which runs the host's test suite
+    # and writes model-generated code into the server's working tree (a
+    # remote-code-execution surface reachable from the MCP `review`/`code`
+    # tools). The class still resolves through module globals so tests can
+    # patch e.g. ``mcp_server.DevOpsAgent``.
+    agent = agent_factory.build_agent(
+        role,
+        default_chain=default_chain,
+        agent_cls=globals()[agent_cls_name],
     )
 
     if agent_name == "code":
@@ -168,21 +163,12 @@ async def _run_review(code: str, instructions: str) -> str:
     writes thanks to output_file="None").
     """
     role, agent_cls_name, default_chain = TOOL_AGENTS["code"]
-    config = load_config()
-    provider = make_provider(role, config, default_chain=default_chain)
-    agent_class = globals()[agent_cls_name]
-    # stateless=True mirrors the skill-server hardening: the reviewer agent must
-    # NOT fall into its flake8/pytest self-healing loop, which runs the host's
-    # test suite and writes model-generated code into the server's working tree
-    # (a remote-code-execution surface reachable from the MCP `review`/`code`
-    # tools). use_memory=False also avoids a blocking VectorMemory/model load on
-    # the event loop. output_file="None" keeps suppressing the artifact write.
-    agent = agent_class(
-        provider=provider,
-        config=config,
-        output_file="None",
-        stateless=True,
-        use_memory=False,
+    # Same stateless-bundle construction as execute_agent (see the comment
+    # there); the class lookup stays patchable via module globals.
+    agent = agent_factory.build_agent(
+        role,
+        default_chain=default_chain,
+        agent_cls=globals()[agent_cls_name],
     )
 
     prompt = (
@@ -193,6 +179,97 @@ async def _run_review(code: str, instructions: str) -> str:
         prompt += f"\nReviewer instructions: {instructions}"
     prompt += f"\n\nCode to review:\n```\n{code}\n```"
     return await agent.run(prompt=prompt, context_data={"<submitted code>": code})
+
+
+_CODE_GRAPH_OPS = {
+    "map",
+    "definition",
+    "references",
+    "importers",
+    "imports",
+    "skeleton",
+}
+_CODE_GRAPH_MAX_REFS = 50
+
+
+async def _run_code_graph(arguments: Dict[str, Any]) -> str:
+    """Answer one structure query over a workspace's code graph.
+
+    In-process and read-only (CodexGraph-style, no graph DB): scans the
+    workspace, builds ag_core.scanner.graph_index.RepoIndex, and returns a
+    JSON payload. The scan + index build run off the event loop so a large
+    workspace cannot stall concurrent MCP requests. Argument errors come
+    back as JSON {"error": ...} rather than protocol errors, so agent
+    callers can self-correct.
+    """
+    from ag_core.config import load_config
+    from ag_core.scanner.graph_index import RepoIndex
+    from ag_core.scanner.project_scanner import ProjectScanner
+
+    op = (arguments.get("op") or "map").strip().lower()
+    workspace = arguments.get("workspace") or os.getcwd()
+    symbol = (arguments.get("symbol") or "").strip()
+    file_arg = (arguments.get("file") or "").strip()
+
+    if op not in _CODE_GRAPH_OPS:
+        return json.dumps(
+            {"error": f"Unknown op: {op}. Valid ops: {sorted(_CODE_GRAPH_OPS)}"}
+        )
+    if not os.path.isdir(workspace):
+        return json.dumps({"error": f"Workspace directory not found: {workspace}"})
+    if op in ("definition", "references") and not symbol:
+        return json.dumps({"error": f"op={op} requires a 'symbol' argument"})
+    if op in ("importers", "imports", "skeleton") and not file_arg:
+        return json.dumps({"error": f"op={op} requires a 'file' argument"})
+
+    config = load_config()
+    scanner = ProjectScanner(
+        root_dir=workspace, extra_ignores=config.scanner.exclude_patterns
+    )
+    scanned = await asyncio.to_thread(scanner.scan)
+    index = await asyncio.to_thread(RepoIndex, scanned)
+
+    if op == "map":
+        try:
+            budget = int(arguments.get("budget"))
+        except (TypeError, ValueError):
+            budget = None
+        rendered = await asyncio.to_thread(
+            index.repo_map, budget=budget, task_text=arguments.get("task") or ""
+        )
+        return json.dumps(
+            {
+                "op": op,
+                "workspace": workspace,
+                "files_indexed": len(index.contents),
+                "map": rendered,
+            }
+        )
+    if op == "definition":
+        return json.dumps(
+            {"op": op, "symbol": symbol, "definitions": index.find_definition(symbol)}
+        )
+    if op == "references":
+        refs = index.find_references(symbol)
+        return json.dumps(
+            {
+                "op": op,
+                "symbol": symbol,
+                "references": refs[:_CODE_GRAPH_MAX_REFS],
+                "truncated": len(refs) > _CODE_GRAPH_MAX_REFS,
+            }
+        )
+    if op == "importers":
+        return json.dumps(
+            {"op": op, "file": file_arg, "importers": index.importers_of(file_arg)}
+        )
+    if op == "imports":
+        return json.dumps(
+            {"op": op, "file": file_arg, "imports": index.imports_of(file_arg)}
+        )
+    return json.dumps(
+        {"op": op, "file": file_arg, "skeleton": index.file_skeleton(file_arg)}
+    )
 
 
 TOOLS = [
@@ -440,6 +517,58 @@ TOOLS = [
                 },
             },
             "required": ["code"],
+        },
+    },
+    {
+        "name": "code_graph",
+        "description": (
+            "Query the workspace's code graph in-process (CodexGraph-style, "
+            "read-only, no graph DB): where a symbol is defined or "
+            "referenced, what a file imports / what imports it, a file's "
+            "signature skeleton, or an aider-style ranked repo map under a "
+            "token budget. Python is parsed with stdlib ast; JS/TS/Go via "
+            "tree-sitter when installed. Returns JSON."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "op": {
+                    "type": "string",
+                    "enum": [
+                        "map",
+                        "definition",
+                        "references",
+                        "importers",
+                        "imports",
+                        "skeleton",
+                    ],
+                    "description": "Query type (default: map)",
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace directory to index (default: server cwd)",
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "Symbol name (required for definition/references)",
+                },
+                "file": {
+                    "type": "string",
+                    "description": (
+                        "Repo-relative file path (required for "
+                        "importers/imports/skeleton)"
+                    ),
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Optional task text to personalize op=map ranking",
+                },
+                "budget": {
+                    "type": "integer",
+                    "description": "Token budget for op=map (default 32000)",
+                },
+            },
+            "required": [],
         },
     },
 ]
@@ -863,6 +992,9 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             raise ValueError("review requires non-empty 'code'.")
         return await _run_review(code, arguments.get("instructions") or "")
 
+    if name == "code_graph":
+        return await _run_code_graph(arguments)
+
     prompt = arguments.get("prompt", "")
     context = arguments.get("context")
     return await execute_agent(name, prompt, context)
@@ -1008,10 +1140,18 @@ def _redirect_all_logging_to_stderr(stream=None):
         for handler in list(getattr(lg, "handlers", [])):
             if isinstance(handler, logging.StreamHandler) and id(handler) not in seen:
                 seen.add(id(handler))
-                if hasattr(handler, "setStream"):
-                    handler.setStream(target)
-                else:  # pragma: no cover - Python < 3.7
-                    handler.stream = target
+                try:
+                    if hasattr(handler, "setStream"):
+                        handler.setStream(target)
+                    else:  # pragma: no cover - Python < 3.7
+                        handler.stream = target
+                except AttributeError:
+                    # Handlers with a read-only ``stream`` property — e.g.
+                    # logging's lastResort _StderrHandler when some lib/test
+                    # attached it to a logger — resolve their stream at emit
+                    # time (stderr) and can never contaminate stdout. Skip
+                    # them instead of crashing stdio boot.
+                    continue
 
 
 async def run_stdio_mcp():
