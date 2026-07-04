@@ -9,7 +9,6 @@ The agent/provider wiring mirrors ``ag_core.distributed.worker.execute_task``
 (the proven distributed path) so both transports behave identically.
 """
 
-import importlib
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Optional
@@ -17,25 +16,18 @@ from typing import Any, Optional
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-from ag_core.config import load_config
-from ag_core.provider_factory import canonical_role, make_provider
+from ag_core import agent_factory
+from ag_core.provider_factory import canonical_role
 from ag_core.utils.db import init_db
 from ag_core.utils.logger import logger
 from ag_core.utils.rate_limiter import make_rate_limit_dependency
 from ag_core.utils.security import checksum_middleware, verify_api_key
 
-# role -> (agent module, agent class). Provider selection lives in
-# ag_core.provider_factory (role -> backend chain, env-overridable). Keys are
-# CANONICAL role ids; legacy ids ("grok", "grok_researcher") are folded in by
-# canonical_role() before lookup.
-ROLE_MAP = {
-    "researcher": ("ag_core.agents.researcher", "ResearcherAgent"),
-    "claude": ("ag_core.agents.claude_architect", "ClaudeArchitectAgent"),
-    "codex": ("ag_core.agents.codex_reviewer", "CodexReviewerAgent"),
-    "tester": ("ag_core.agents.tester", "TesterAgent"),
-    "security": ("ag_core.agents.security_agent", "SecurityAgent"),
-    "devops": ("ag_core.agents.devops_agent", "DevOpsAgent"),
-}
+# role -> (agent module, agent class). Derived from the shared factory table
+# (ag_core.agent_factory.AGENT_CLASSES) — same shape as the historical
+# hand-written map. Keys are CANONICAL role ids; legacy ids ("grok",
+# "grok_researcher") are folded in by canonical_role() before lookup.
+ROLE_MAP = dict(agent_factory.AGENT_CLASSES)
 
 
 class RunRequest(BaseModel):
@@ -79,25 +71,7 @@ def build_agent(role: str, stateless: bool = True):
     output files nor touches the vector memory DB, so a request leaves no trace
     on the server's working directory.
     """
-    role = canonical_role(role)
-    if role not in ROLE_MAP:
-        raise ValueError(f"Unknown role: {role}")
-
-    agent_mod, agent_cls = ROLE_MAP[role]
-    agent_class = getattr(importlib.import_module(agent_mod), agent_cls)
-
-    config = load_config()
-    provider = make_provider(role, config)
-
-    agent_kwargs = {"provider": provider, "config": config}
-    if stateless:
-        agent_kwargs["output_file"] = "None"
-        agent_kwargs["use_memory"] = False
-        # Signal side-effect-free mode to agents that would otherwise execute
-        # the host's test suite / write files (e.g. CodexReviewerAgent's
-        # self-healing loop).
-        agent_kwargs["stateless"] = True
-    return agent_class(**agent_kwargs)
+    return agent_factory.build_agent(role, stateless=stateless)
 
 
 def create_skill_app(role: str) -> FastAPI:

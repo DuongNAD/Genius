@@ -19,3 +19,14 @@ pytest-asyncio==1.4.0
 # Per-test hang backstop (see pytest.ini `timeout`): a wedged WS/subprocess
 # test must fail with stack dumps instead of hanging CI forever.
 pytest-timeout==2.4.0
+# Multi-language code-graph parsing (repo_graph edges, graph_index, the MCP
+# code_graph tool): official tree-sitter core + per-grammar wheels. Optional
+# at RUNTIME — ag_core.scanner.code_parse probes them with find_spec and
+# falls back to Python-only ast parsing when absent — but pinned here so all
+# three machines and CI exercise the same multi-language path. Deliberately
+# NOT tree-sitter-language-pack: its 1.x line swapped in an undocumented
+# PyO3 binding with a different node API.
+tree-sitter==0.25.2
+tree-sitter-javascript==0.25.0
+tree-sitter-typescript==0.23.2
+tree-sitter-go==0.25.0

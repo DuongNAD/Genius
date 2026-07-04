@@ -4,7 +4,7 @@ Drives the JSON-RPC handshake over real OS pipes (initialize ->
 notifications/initialized -> tools/list -> BOM-prefixed ping ->
 resources/list -> resources/read) and asserts the stdout stream is pure
 JSON-RPC: exactly one parseable response line per request, correct ids, all
-11 documented tools, artifact resources served from the server cwd, and no
+documented tools, artifact resources served from the server cwd, and no
 log noise corrupting the stream. PYTEST_CURRENT_TEST is scrubbed from the
 child env so it runs the production code paths. The server runs in a tmp
 workspace dir so the artifact resource list is deterministic.
@@ -35,6 +35,7 @@ EXPECTED_TOOLS = {
     "doctor",
     "debate",
     "review",
+    "code_graph",
 }
 
 READ_TIMEOUT = 30.0
