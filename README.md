@@ -26,6 +26,17 @@ Genius là một hệ thống siêu tác tử (Agentic Framework) tự trị chu
    - Áp dụng thuật toán TokenBucketRateLimiter có lock-safety cho asyncio loop, giới hạn tốc độ call mô hình và chống spam.
    - Hỗ trợ ký điện tử JWT & HMAC-SHA256 Payload Validation giữa Orchestrator và Skill Server.
 
+7. **Ngữ cảnh theo đồ thị code + ngân sách token (R3):**
+   - Thay vì đổ nguyên workspace vào mọi call agent, `ag_core/scanner/repo_graph.py` xếp hạng file bằng **personalized PageRank** trên đồ thị import/tham chiếu (hệ số kiểu aider repo-map: file được task nhắc tên ×50, file định nghĩa identifier trong đề bài ×10) rồi tiêu **ngân sách token** theo thứ hạng: file seed giữ nguyên văn → file khác nguyên văn khi còn chỗ → rút gọn thành skeleton chữ ký → bỏ.
+   - Cấu hình qua `GENIUS_CONTEXT_TOKEN_BUDGET` (mặc định 32000; `0` = tắt). Workspace nhỏ hơn ngân sách đi qua **nguyên trạng** — project nhỏ không đổi hành vi.
+
+8. **Code graph truy vấn được + đa ngôn ngữ (R4, kiểu CodexGraph):**
+   - `ag_core/scanner/graph_index.py` (`RepoIndex`) trả lời các câu hỏi cấu trúc mà không cần graph DB: symbol định nghĩa ở đâu, ai tham chiếu, file import ai / bị ai import, skeleton chữ ký của file, và **repo map xếp hạng theo ngân sách token**.
+   - Python parse bằng `ast` chuẩn; **JS/TS/TSX/Go parse bằng tree-sitter** (grammar chính chủ, đã pin trong `requirements.txt`; thiếu dep thì tự lùi về Python-only, không lỗi). Được expose ra ngoài qua tool MCP `code_graph` (xem bảng dưới).
+
+9. **cAST chunking (opt-in):**
+   - `ProjectChunker.split_file` chia file quá khổ theo ranh giới AST (split-then-merge, cắt theo dòng nên ghép lại đúng từng byte); bật trong `chunk_files(..., split_oversized=True)`.
+
 ## 🤖 Đội hình Tác tử (Agents)
 
 Hệ thống có 6 Tác tử cốt lõi, mỗi tác tử chạy trên một API Port độc lập:
@@ -47,6 +58,8 @@ Cài đặt thư viện:
 ```bash
 pip install -r requirements.txt
 ```
+
+> `requirements.txt` được **pin đầy đủ** (3 máy + CI cài y hệt nhau), bao gồm cả tree-sitter + grammar JS/TS/Go cho code graph (wheel có sẵn cho Windows/macOS, Python 3.10+). Các dep này là *optional lúc chạy* — thiếu chúng hệ thống tự lùi về parse Python-only.
 
 ### 2. Khởi chạy Hệ thống
 
@@ -87,16 +100,18 @@ python mcp_server.py stdio      # chế độ MCP stdio cho Antigravity
 python mcp_server.py            # (tuỳ chọn) chế độ HTTP, cổng 8000
 ```
 
-Server hỗ trợ đầy đủ handshake MCP (`initialize` / `notifications/initialized` / `ping`) và expose **11 tool** cùng **MCP resources**:
+Server hỗ trợ đầy đủ handshake MCP (`initialize` / `notifications/initialized` / `ping`) và expose **14 tool** cùng **MCP resources**:
 
 | Tool | Chức năng |
 |------|-----------|
-| `research`, `design`, `code`, `unit_test`, `security_audit`, `deploy` | Gọi từng tác tử đơn lẻ (in-process) |
-| `orchestrate` | **Chạy TOÀN BỘ pipeline** (research → design → code → test + security + deploy). Trả về `job_id` ngay lập tức |
-| `orchestrate_status` | Poll trạng thái job (`running` / `completed` / `failed`), kèm `elapsed_seconds`, tiến độ từng giai đoạn (`stages`: done/pending suy ra từ artifact trên đĩa) và `artifacts_ready` (các URI đọc được ngay) |
+| `research`, `design`, `code`, `unit_test`, `security_audit`, `deploy` | Gọi từng tác tử đơn lẻ (in-process, dựng qua `ag_core/agent_factory.py`) |
+| `orchestrate` | **Chạy TOÀN BỘ pipeline** (research → design → code → test + security + deploy). Trả về `job_id` ngay lập tức. Truyền `require_approval: true` để pipeline **tạm dừng chờ duyệt** (`awaiting_approval`) sau các giai đoạn research/design/code |
+| `orchestrate_status` | Poll trạng thái job (`running` / `awaiting_approval` / `completed` / `failed`), kèm `elapsed_seconds`, tiến độ từng giai đoạn (`stages`: done/pending suy ra từ artifact trên đĩa), `artifacts_ready` (các URI đọc được ngay) và `awaiting_stage` khi đang chờ duyệt |
+| `orchestrate_approve` / `orchestrate_reject` | Duyệt tiếp hoặc huỷ một job đang `awaiting_approval` (trạng thái được lật đồng bộ — poll không bao giờ thấy pause cũ) |
 | `doctor` | Kiểm tra sẵn sàng (preflight): CLI agy/claude/codex (grok tuỳ chọn), `SKILL_API_KEY`, chuỗi fallback provider. **Nên gọi trước `orchestrate`** — trả về báo cáo READY / NOT READY, không có side effect |
 | `debate` | Tinh chỉnh bản thiết kế theo kiểu phản biện: critic role Researcher (mặc định agy/Gemini) phê bình ↔ Claude chỉnh sửa (tối đa 3 vòng, dừng sớm khi critic trả lời `[APPROVED]`). Chạy in-process, không cần Skill Server |
 | `review` | Review một đoạn code bất kỳ bằng tác tử Codex (in-process, **không ghi file**) |
+| `code_graph` | **Truy vấn đồ thị code** của một workspace (read-only, in-process, kiểu CodexGraph — không cần graph DB): `op` ∈ `map` (repo map xếp hạng theo ngân sách token) / `definition` / `references` / `importers` / `imports` / `skeleton`. Python qua `ast`, JS/TS/Go qua tree-sitter. Trả JSON |
 
 Ngoài tool, server còn expose **MCP resources**: các artifact của pipeline (`research.md`, `design.md`, `review.md`, `audit.md`, `deploy.md`, `plan.md` và bản lưu `.bak` của chúng) dưới dạng URI `genius://artifacts/<tên-file>` (mimeType `text/markdown`). Antigravity có thể `resources/list` / `resources/read` để đọc trực tiếp kết quả từng giai đoạn — chỉ đúng danh sách artifact trên (whitelist cứng, không bao giờ lộ file khác của workspace); URI sai hoặc file chưa tồn tại trả về lỗi `-32002`.
 
@@ -124,9 +139,9 @@ Thêm Genius vào file cấu hình MCP của Antigravity tại `~/.gemini/antigr
 
 **Bước 0 — Bật Skill Server (một lần, giữ chạy nền):**
 ```bash
-py serve.py --roles grok,claude,codex,tester,security,devops
+py serve.py --roles researcher,claude,codex,tester,security,devops
 ```
-Chờ tới khi cả 6 server báo sẵn sàng (có thể tự kiểm tra: `GET http://localhost:8001/health` … `8006/health`). Tool đơn lẻ (`research`, `design`, `debate`, `review`, `doctor`) chạy **in-process**, không cần bước này — chỉ `orchestrate` mới cần.
+(Id cũ `grok`/`grok_researcher` vẫn được chấp nhận như alias của `researcher`.) Chờ tới khi cả 6 server báo sẵn sàng (có thể tự kiểm tra: `GET http://localhost:8001/health` … `8006/health`). Tool đơn lẻ (`research`, `design`, `debate`, `review`, `doctor`, `code_graph`) chạy **in-process**, không cần bước này — chỉ `orchestrate` mới cần.
 
 **Bước 1 — Kiểm tra sẵn sàng:** gọi tool `doctor` (không side effect). Kết quả phải là `READY`, kèm bảng chuỗi provider từng role. Nếu `NOT READY`, thông báo sẽ chỉ rõ CLI nào thiếu.
 
@@ -143,6 +158,7 @@ Chờ tới khi cả 6 server báo sẵn sàng (có thể tự kiểm tra: `GET 
 - `research` / `design` / `code` / `unit_test` / `security_audit` / `deploy` — gọi một tác tử duy nhất.
 - `debate` — đưa bản thiết kế vào để phản biện (critic role Researcher ↔ refiner Claude, tối đa 3 vòng, dừng sớm khi `[APPROVED]`).
 - `review` — dán code vào để review nhanh, không ghi file.
+- `code_graph` — hỏi cấu trúc repo: `{"op": "definition", "workspace": "...", "symbol": "helper"}`, `{"op": "importers", "file": "src/util.py"}`, hay `{"op": "map", "task": "fix login bug"}` để lấy repo map xếp hạng.
 
 **Xử lý sự cố nhanh:**
 - Grok/backr nào đó chết giữa chừng → tự fall-through theo chuỗi mặc định (`agy → claude → codex` cho Researcher), xem cảnh báo `[provider-fallback]` trên stderr của server.

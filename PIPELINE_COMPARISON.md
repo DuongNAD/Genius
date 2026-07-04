@@ -6,13 +6,13 @@ function.** They are two different products that share only scaffolding; the
 divergent parts encode genuinely different behavior and merging them risks
 silent regressions (several of which the test suite cannot catch — see below).
 
-- `run_pipeline` — full 7-agent sequential build (Grok → Claude → Antigravity →
-  Codex → Tester → Security → DevOps), with MessageBus, slash-command routing,
-  an interactive feedback loop, and a multi-file fan-out plus a single-file
-  fallback.
-- `run_e2e_pipeline` — lightweight 4-agent E2E flow (Claude plan → Grok critique
-  → Codex implement+self-heal → Tester tests+self-heal). No MessageBus, no
-  Security/DevOps, no interactive loop, no fallback.
+- `run_pipeline` — full 7-agent sequential build (Researcher — legacy "Grok"
+  stage name — → Claude → Antigravity → Codex → Tester → Security → DevOps),
+  with MessageBus, slash-command routing, an interactive feedback loop, and a
+  multi-file fan-out plus a single-file fallback.
+- `run_e2e_pipeline` — lightweight 4-agent E2E flow (Claude plan → Researcher
+  critique → Codex implement+self-heal → Tester tests+self-heal). No
+  MessageBus, no Security/DevOps, no interactive loop, no fallback.
 
 ## Signatures
 
