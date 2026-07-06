@@ -23,6 +23,7 @@ from ag_core.providers.agy_provider import resolve_agy_cli
 from ag_core.providers.grok_provider import resolve_grok_cli
 from ag_core.providers.anthropic_provider import resolve_claude_cli
 from ag_core.providers.openai_provider import resolve_codex_cli
+from ag_core.providers.notebooklm_provider import resolve_notebooklm_cli
 from ag_core.utils.cli_runner import communicate_with_timeout, DEFAULT_AUX_TIMEOUT
 
 # (display name, resolver, agents that depend on this CLI)
@@ -39,14 +40,22 @@ CLI_CHECKS = [
         ["Codex Reviewer", "Tester", "Security", "DevOps"],
     ),
     ("agy", resolve_agy_cli, ["Researcher (default primary, Antigravity 2.0)"]),
+    (
+        # Named for the backend ("notebooklm"), not the executable ("nlm"), so
+        # the status aligns with the chain entries provider_chain_lines /
+        # _dead_roles reason about. The resolver locates the `nlm` binary.
+        "notebooklm",
+        resolve_notebooklm_cli,
+        ["optional NotebookLM backend + MCP notebooklm_* tools (needs nlm login)"],
+    ),
 ]
 
-# Backends whose absence never makes the doctor NOT READY. grok is opt-in
-# only (no default chain contains it), and every default chain also contains
-# claude + codex, so agy going missing only degrades the researcher chain.
-# When a missing optional backend sits in an effective chain, a [warn] line
-# is emitted instead (see provider_chain_lines).
-OPTIONAL_CLIS = {"agy", "grok"}
+# Backends whose absence never makes the doctor NOT READY. grok and notebooklm
+# are opt-in only (no default chain contains them), and every default chain
+# also contains claude + codex, so agy going missing only degrades the
+# researcher chain. When a missing optional backend sits in an effective chain,
+# a [warn] line is emitted instead (see provider_chain_lines).
+OPTIONAL_CLIS = {"agy", "grok", "notebooklm"}
 
 
 def _is_located(path: str) -> bool:

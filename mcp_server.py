@@ -272,6 +272,56 @@ async def _run_code_graph(arguments: Dict[str, Any]) -> str:
     )
 
 
+_NOTEBOOKLM_TOOLS = {"notebooklm_query", "notebooklm_list", "notebooklm_research"}
+
+
+async def _run_notebooklm(name: str, arguments: Dict[str, Any]) -> str:
+    """Dispatch a notebooklm_* tool to the shared ``nlm`` CLI helpers.
+
+    Integrates NotebookLM into Genius workflows (query a curated notebook, or
+    deep-research a topic into one). The ``nlm`` helpers are already async
+    subprocess calls, so they never block the event loop. Failures from that
+    layer (missing CLI, expired ``nlm login``, empty result) propagate as the
+    tool's JSON-RPC / HTTP error through dispatch_tool's normal handling.
+    ``notebooklm_research`` intentionally MUTATES: it creates a notebook and
+    imports discovered sources - that is the tool's purpose, not a side effect.
+    """
+    from ag_core.providers import notebooklm_provider as nlm
+
+    if name == "notebooklm_list":
+        notebooks = await nlm.nlm_list_notebooks()
+        return json.dumps({"count": len(notebooks), "notebooks": notebooks})
+
+    if name == "notebooklm_query":
+        notebook = (arguments.get("notebook") or "").strip()
+        query = (arguments.get("query") or "").strip()
+        if not notebook:
+            raise ValueError("notebooklm_query requires a non-empty 'notebook'.")
+        if not query:
+            raise ValueError("notebooklm_query requires a non-empty 'query'.")
+        data = await nlm.nlm_query(
+            notebook,
+            query,
+            source_ids=(arguments.get("source_ids") or None),
+            conversation_id=(arguments.get("conversation_id") or None),
+        )
+        return json.dumps(data)
+
+    # notebooklm_research
+    query = (arguments.get("query") or "").strip()
+    if not query:
+        raise ValueError("notebooklm_research requires a non-empty 'query'.")
+    result = await nlm.nlm_research(
+        query,
+        mode=(arguments.get("mode") or "fast"),
+        source=(arguments.get("source") or "web"),
+        notebook=(arguments.get("notebook") or None),
+        title=(arguments.get("title") or None),
+        question=(arguments.get("question") or None),
+    )
+    return json.dumps(result)
+
+
 TOOLS = [
     {
         "name": "research",
@@ -569,6 +619,90 @@ TOOLS = [
                 },
             },
             "required": [],
+        },
+    },
+    {
+        "name": "notebooklm_list",
+        "description": (
+            "List the NotebookLM notebooks on the authenticated account "
+            "(id + title + source_count), via the local `nlm` CLI. Read-only. "
+            "Use it to discover a notebook id to pass to notebooklm_query. "
+            "Requires a one-time `nlm login` and GENIUS_NLM_PATH set."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "notebooklm_query",
+        "description": (
+            "Ask a question against an EXISTING NotebookLM notebook and get a "
+            "grounded, cited answer (the model answers only from that "
+            "notebook's sources). Returns JSON with 'answer', 'citations' and "
+            "'references'. Read-only; needs `nlm login`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "notebook": {
+                    "type": "string",
+                    "description": "Notebook id or alias (see notebooklm_list)",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "The question to ask the notebook's sources",
+                },
+                "source_ids": {
+                    "type": "string",
+                    "description": "Optional comma-separated source ids to restrict to",
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Optional conversation id for follow-up questions",
+                },
+            },
+            "required": ["notebook", "query"],
+        },
+    },
+    {
+        "name": "notebooklm_research",
+        "description": (
+            "Deep-research a topic with NotebookLM and answer from the sources "
+            "it finds. MUTATES: discovers web/Drive sources, imports them into "
+            "a notebook (a new one unless 'notebook' is given), then queries "
+            "it. Returns JSON with 'notebook_id' and a cited 'answer'. Runs "
+            "synchronously - mode 'fast' ~30s, 'deep' ~5min (raise "
+            "GENIUS_NLM_RESEARCH_TIMEOUT for deep). Needs `nlm login`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The research topic to search for",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["fast", "deep"],
+                    "description": "fast (~30s, ~10 sources) or deep (~5min, ~40, web only); default fast",
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["web", "drive"],
+                    "description": "Where to search for new sources (default web)",
+                },
+                "notebook": {
+                    "type": "string",
+                    "description": "Optional existing notebook id to enrich (default: create a new one)",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Optional title for the new notebook (when none is given)",
+                },
+                "question": {
+                    "type": "string",
+                    "description": "Optional final question to ask (defaults to the research query)",
+                },
+            },
+            "required": ["query"],
         },
     },
 ]
@@ -994,6 +1128,9 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
 
     if name == "code_graph":
         return await _run_code_graph(arguments)
+
+    if name in _NOTEBOOKLM_TOOLS:
+        return await _run_notebooklm(name, arguments)
 
     prompt = arguments.get("prompt", "")
     context = arguments.get("context")

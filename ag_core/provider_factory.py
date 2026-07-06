@@ -8,7 +8,9 @@ one place and can be redirected without code changes:
 * No env knobs set - every role gets its :data:`DEFAULT_CHAINS` fallback
   chain (a :class:`FallbackProvider`): a backend that dies at runtime is
   retried on the next backend. The default chains do NOT include the grok
-  backend (the grok CLI is opt-in only; its account is out of credits).
+  or notebooklm backends (both are opt-in only: grok's account is out of
+  credits; NotebookLM answers only from a curated notebook's sources so it
+  is a deliberate, per-role choice rather than a general LLM fallback).
 * ``GENIUS_PROVIDER_<ROLE>`` (e.g. ``GENIUS_PROVIDER_RESEARCHER=grok,claude``)
   - explicit comma-separated backend chain for one role; overrides everything,
   including bringing the grok backend back. The researcher role also honors
@@ -57,6 +59,16 @@ BACKENDS = {
         "ag_core.providers.agy_provider",
         "AgyProvider",
         "agy",
+        None,
+    ),
+    # NotebookLM via the local `nlm` CLI. Keyless: auth is a one-time
+    # `nlm login`. Opt-in only (like grok): no DEFAULT_CHAINS entry, so it is
+    # never invoked unless GENIUS_PROVIDER_<ROLE> names it. Its `models`
+    # attribute holds the default notebook id/alias, not an LLM model name.
+    "notebooklm": (
+        "ag_core.providers.notebooklm_provider",
+        "NotebookLMProvider",
+        "notebooklm",
         None,
     ),
 }
