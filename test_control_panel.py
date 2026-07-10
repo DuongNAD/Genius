@@ -69,3 +69,49 @@ def test_orchestrate_requires_prompt():
 def test_unknown_job_is_404():
     r = client.get("/api/jobs/does-not-exist")
     assert r.status_code == 404
+
+
+# --- Optional GENIUS_PANEL_TOKEN auth (mirrors the dashboard) ---------------
+
+
+def test_endpoints_open_without_token(monkeypatch):
+    monkeypatch.delenv("GENIUS_PANEL_TOKEN", raising=False)
+    assert client.get("/api/status").status_code == 200
+    assert client.get("/api/doctor").status_code == 200
+
+
+def test_endpoints_require_token_when_configured(monkeypatch):
+    monkeypatch.setenv("GENIUS_PANEL_TOKEN", "s3cret")
+    assert client.get("/api/status").status_code == 401
+    assert client.get("/api/doctor").status_code == 401
+    assert client.get("/api/jobs/whatever").status_code == 401
+    # A state-changing job start is refused too — and auth runs before the
+    # handler, so no pipeline job is ever spawned.
+    assert client.post("/api/orchestrate", json={"prompt": "x"}).status_code == 401
+
+
+def test_valid_token_via_header_or_query(monkeypatch):
+    monkeypatch.setenv("GENIUS_PANEL_TOKEN", "s3cret")
+    assert (
+        client.get("/api/status", headers={"X-Panel-Token": "s3cret"}).status_code
+        == 200
+    )
+    assert client.get("/api/status", params={"token": "s3cret"}).status_code == 200
+
+
+def test_wrong_token_rejected(monkeypatch):
+    monkeypatch.setenv("GENIUS_PANEL_TOKEN", "s3cret")
+    r = client.get("/api/status", headers={"X-Panel-Token": "nope"})
+    assert r.status_code == 401
+
+
+def test_orchestrate_auth_precedes_validation(monkeypatch):
+    # Valid token but empty prompt: auth passes, validation fails (400), and no
+    # background job is started.
+    monkeypatch.setenv("GENIUS_PANEL_TOKEN", "s3cret")
+    r = client.post(
+        "/api/orchestrate",
+        json={"prompt": "   "},
+        headers={"X-Panel-Token": "s3cret"},
+    )
+    assert r.status_code == 400

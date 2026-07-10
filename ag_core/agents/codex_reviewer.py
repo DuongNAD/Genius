@@ -33,6 +33,33 @@ def _surgical_edits_enabled() -> bool:
     return os.getenv("GENIUS_SURGICAL_EDITS", "").lower() in ("1", "true", "yes")
 
 
+def _safe_write_back(abs_target_path: str, code_to_write: str) -> bool:
+    """Write model-regenerated code back to the reviewed file during the
+    self-heal loop — but NEVER let a code-less retry destroy it.
+
+    A retry can return no extractable code: prose, a refusal, or an empty
+    result from a partially-failed FallbackProvider all make ``extract_code``
+    return ``""``. Writing that would truncate the user's source file to zero
+    bytes (or overwrite it with prose). Guard against it: skip the write when
+    there is nothing to write, leaving the original file intact so the loop can
+    retry. Returns True iff the file was actually written.
+    """
+    if not code_to_write.strip():
+        print(
+            f"Warning: skipping write-back to {abs_target_path}: "
+            "model returned no extractable code."
+        )
+        return False
+    try:
+        os.makedirs(os.path.dirname(abs_target_path), exist_ok=True)
+        with open(abs_target_path, "w", encoding="utf-8") as f:
+            f.write(code_to_write)
+        return True
+    except Exception as e:
+        print(f"Warning: Failed to write back fixed code to {abs_target_path}: {e}")
+        return False
+
+
 class CodexReviewerAgent(BaseAgent):
     """
     Codex Reviewer Agent that scans project files, performs code review,
@@ -237,14 +264,7 @@ class CodexReviewerAgent(BaseAgent):
                             )
                     except ValueError as e:
                         raise ValueError(f"Path traversal detected: {e}")
-                    try:
-                        os.makedirs(os.path.dirname(abs_target_path), exist_ok=True)
-                        with open(abs_target_path, "w", encoding="utf-8") as f:
-                            f.write(code_to_write)
-                    except Exception as e:
-                        print(
-                            f"Warning: Failed to write back fixed code to {abs_target_path}: {e}"
-                        )
+                    _safe_write_back(abs_target_path, code_to_write)
 
                 # Verify again
                 try:

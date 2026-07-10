@@ -17,18 +17,24 @@ What it can do:
   task and polls status. This DOES need the agent skill servers running
   (start them with ``python serve.py`` first); errors surface in the UI.
 
-Loopback-bound by default (unauthenticated, like the dashboard). Override the
-host with ``GENIUS_PANEL_HOST`` and the port with ``GENIUS_PANEL_PORT``.
+Loopback-bound by default. The API/control endpoints are unauthenticated for
+the trusted single-user localhost case, but — like the dashboard — accept an
+optional shared secret: set ``GENIUS_PANEL_TOKEN`` and every ``/api/*`` call is
+then required to present it (``X-Panel-Token`` header or ``?token=``). Override
+the host with ``GENIUS_PANEL_HOST`` and the port with ``GENIUS_PANEL_PORT``; if
+you expose a non-loopback host, set ``GENIUS_PANEL_TOKEN`` and open
+``/?token=<token>``.
 """
 
 import asyncio
+import hmac
 import os
 import sys
 import time
 import uuid
 from typing import Any, Dict
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
 root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -44,6 +50,29 @@ from ag_core.provider_factory import (  # noqa: E402
 )
 
 app = FastAPI(title="Genius Control Panel")
+
+
+def _panel_token() -> str:
+    return (os.environ.get("GENIUS_PANEL_TOKEN") or "").strip()
+
+
+def require_panel_auth(
+    x_panel_token: str = Header(default="", alias="X-Panel-Token"),
+    token: str = Query(default=""),
+) -> None:
+    """Guard the panel's data and control endpoints. The panel can start
+    pipeline jobs (which shell out to local CLIs and write files) and exposes
+    the effective backend/model/CLI wiring, so an off-loopback instance must
+    not be open. Enforced only when GENIUS_PANEL_TOKEN is set (the default
+    localhost bind keeps it optional for the trusted single-user case), and
+    checked in constant time to match the dashboard's auth model."""
+    expected = _panel_token()
+    if not expected:
+        return
+    provided = (x_panel_token or token or "").strip()
+    if not (provided and hmac.compare_digest(provided, expected)):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 # Pipeline stage label -> canonical role that runs it. The panel reads the
 # LIVE config (env + config.yaml), so it reflects whatever role->backend
@@ -118,12 +147,12 @@ async def _build_status() -> Dict[str, Any]:
     return {"stages": stages, "clis": clis, "generated_at": time.time()}
 
 
-@app.get("/api/status")
+@app.get("/api/status", dependencies=[Depends(require_panel_auth)])
 async def api_status() -> JSONResponse:
     return JSONResponse(await _build_status())
 
 
-@app.get("/api/doctor")
+@app.get("/api/doctor", dependencies=[Depends(require_panel_auth)])
 async def api_doctor() -> JSONResponse:
     return JSONResponse({"clis": await run_doctor_async()})
 
@@ -154,7 +183,7 @@ async def _run_job(job_id: str, prompt: str, pipeline: str, workspace: str) -> N
         job["finished_at"] = time.time()
 
 
-@app.post("/api/orchestrate")
+@app.post("/api/orchestrate", dependencies=[Depends(require_panel_auth)])
 async def api_orchestrate(body: Dict[str, Any]) -> JSONResponse:
     prompt = (body.get("prompt") or "").strip()
     if not prompt:
@@ -183,7 +212,7 @@ async def api_orchestrate(body: Dict[str, Any]) -> JSONResponse:
     return JSONResponse({"job_id": job_id, "status": "running"})
 
 
-@app.get("/api/jobs/{job_id}")
+@app.get("/api/jobs/{job_id}", dependencies=[Depends(require_panel_auth)])
 async def api_job(job_id: str) -> JSONResponse:
     job = PANEL_JOBS.get(job_id)
     if job is None:
@@ -300,6 +329,14 @@ textarea{min-height:64px;resize:vertical}
 
 <script>
 const $ = s => document.querySelector(s);
+// When the panel is token-protected (GENIUS_PANEL_TOKEN set), open
+// /?token=<token>; the page forwards it as X-Panel-Token on every call.
+const PANEL_TOKEN = new URLSearchParams(window.location.search).get('token') || '';
+function authHeaders(extra){
+  const h = extra ? Object.assign({}, extra) : {};
+  if(PANEL_TOKEN) h['X-Panel-Token'] = PANEL_TOKEN;
+  return h;
+}
 function effChip(e){
   if(!e) return '<span class="chip">—</span>';
   return `<span class="chip eff ${e}">${e}</span>`;
@@ -333,13 +370,13 @@ function render(d){
     </div>`).join('');
 }
 async function load(){
-  try{ render(await (await fetch('/api/status')).json()); }
+  try{ render(await (await fetch('/api/status', {headers: authHeaders()})).json()); }
   catch(e){ $('#ts').textContent = 'status error: '+e; }
 }
 $('#refresh').onclick = load;
 $('#doctor').onclick = async () => {
   $('#doctor').disabled = true; $('#doctor').textContent='Running…';
-  try{ await fetch('/api/doctor'); await load(); }
+  try{ await fetch('/api/doctor', {headers: authHeaders()}); await load(); }
   finally{ $('#doctor').disabled=false; $('#doctor').textContent='Run doctor'; }
 };
 $('#run').onclick = async () => {
@@ -349,7 +386,7 @@ $('#run').onclick = async () => {
   $('#runout').textContent = 'Starting…';
   try{
     const r = await (await fetch('/api/orchestrate',{method:'POST',
-      headers:{'content-type':'application/json'},
+      headers:authHeaders({'content-type':'application/json'}),
       body:JSON.stringify({prompt, pipeline:$('#pipeline').value})})).json();
     if(r.error){ $('#runout').textContent='Error: '+r.error; return; }
     poll(r.job_id);
@@ -357,7 +394,7 @@ $('#run').onclick = async () => {
 };
 async function poll(id){
   try{
-    const j = await (await fetch('/api/jobs/'+id)).json();
+    const j = await (await fetch('/api/jobs/'+id, {headers: authHeaders()})).json();
     $('#runout').textContent = `job ${id.slice(0,8)} · ${j.status} · `
       + `${j.elapsed_seconds||0}s`
       + (j.error ? `\n${j.error}` : '')
@@ -378,6 +415,13 @@ def main() -> None:
 
     host = os.getenv("GENIUS_PANEL_HOST") or "127.0.0.1"
     port = int(os.getenv("GENIUS_PANEL_PORT") or "8090")
+    if host not in ("127.0.0.1", "localhost", "::1") and not _panel_token():
+        print(
+            f"WARNING: binding the control panel to a non-loopback host ({host}) "
+            "without GENIUS_PANEL_TOKEN set — anyone who can reach this port can "
+            "start pipeline jobs and read your config. Set GENIUS_PANEL_TOKEN and "
+            "open /?token=<token>."
+        )
     print(f"Genius Control Panel -> http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning")
 

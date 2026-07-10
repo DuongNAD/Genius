@@ -793,142 +793,152 @@ async def call_api(
             pass
 
         if not has_in_memory_workers:
-            # `or` so a blank GENIUS_HUB_URL from .env.example is treated as unset.
-            hub_url = os.environ.get("GENIUS_HUB_URL") or "http://127.0.0.1:8000"
-            config = load_config()
-            secret = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
+            try:
+                # `or` so a blank GENIUS_HUB_URL from .env.example is treated as unset.
+                hub_url = os.environ.get("GENIUS_HUB_URL") or "http://127.0.0.1:8000"
+                config = load_config()
+                secret = config.skill_api_key or os.getenv("SKILL_API_KEY", "")
 
-            async with httpx.AsyncClient() as http_client:
-                from ag_core.utils.security import calculate_checksum
+                async with httpx.AsyncClient() as http_client:
+                    from ag_core.utils.security import calculate_checksum
 
-                payload_workers = {}
-                workers_checksum = calculate_checksum(payload_workers, secret)
-                payload_bytes = json.dumps(
-                    payload_workers, sort_keys=True, separators=(",", ":")
-                ).encode("utf-8")
+                    payload_workers = {}
+                    workers_checksum = calculate_checksum(payload_workers, secret)
+                    payload_bytes = json.dumps(
+                        payload_workers, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
 
-                # The hub's HTTP endpoints authenticate the RAW shared secret:
-                # CentralHub.verify_auth constant-time-compares X-API-Key against
-                # SKILL_API_KEY, and the hub's own create_headers sends the raw
-                # key. A JWT never equals the raw key, so sending one (as this
-                # used to) 401'd every hub request and made distributed mode
-                # dead-on-arrival. Sending the raw key matches the hub contract
-                # and also avoids the one-time-jti replay rejection when this
-                # same header dict is re-posted in the poll loops below.
-                headers = {
-                    "X-API-Key": secret,
-                    "X-Payload-SHA256": workers_checksum,
-                    "Content-Type": "application/json",
-                }
+                    # The hub's HTTP endpoints authenticate the RAW shared secret:
+                    # CentralHub.verify_auth constant-time-compares X-API-Key against
+                    # SKILL_API_KEY, and the hub's own create_headers sends the raw
+                    # key. A JWT never equals the raw key, so sending one (as this
+                    # used to) 401'd every hub request and made distributed mode
+                    # dead-on-arrival. Sending the raw key matches the hub contract
+                    # and also avoids the one-time-jti replay rejection when this
+                    # same header dict is re-posted in the poll loops below.
+                    headers = {
+                        "X-API-Key": secret,
+                        "X-Payload-SHA256": workers_checksum,
+                        "Content-Type": "application/json",
+                    }
 
-                resp = await http_client.post(
-                    f"{hub_url}/workers", content=payload_bytes, headers=headers
-                )
-                resp.raise_for_status()
-                workers_dict = resp.json()
-
-                # Alias-tolerant role matching: workers may still advertise
-                # the legacy "grok"/"grok_researcher" ids for the researcher.
-                from ag_core.provider_factory import canonical_role
-
-                def _eligible(w_info):
-                    registered = (canonical_role(r) for r in w_info.get("roles", []))
-                    return (
-                        canonical_role(role) in registered
-                        and w_info.get("status") == "idle"
-                    )
-
-                idle_worker_ids = [
-                    w_id for w_id, w_info in workers_dict.items() if _eligible(w_info)
-                ]
-                poll_start = time.time()
-                while not idle_worker_ids:
-                    if time.time() - poll_start > poll_timeout:
-                        raise PipelineError(
-                            f"No idle worker available for role '{role}' within {poll_timeout} seconds."
-                        )
-                    await asyncio.sleep(0.5)
                     resp = await http_client.post(
                         f"{hub_url}/workers", content=payload_bytes, headers=headers
                     )
                     resp.raise_for_status()
                     workers_dict = resp.json()
-                    idle_worker_ids = [
-                        w_id
-                        for w_id, w_info in workers_dict.items()
-                        if _eligible(w_info)
-                    ]
 
-                worker_id = idle_worker_ids[0]
+                    # Alias-tolerant role matching: workers may still advertise
+                    # the legacy "grok"/"grok_researcher" ids for the researcher.
+                    from ag_core.provider_factory import canonical_role
 
-                dispatch_payload = {
-                    "role": role,
-                    "task_data": {
-                        "role": role,
-                        "prompt": prompt,
-                        "context": context or {},
-                    },
-                }
-                dispatch_checksum = calculate_checksum(dispatch_payload, secret)
-                dispatch_bytes = json.dumps(
-                    dispatch_payload, sort_keys=True, separators=(",", ":")
-                ).encode("utf-8")
-
-                headers["X-Payload-SHA256"] = dispatch_checksum
-                resp = await http_client.post(
-                    f"{hub_url}/dispatch", content=dispatch_bytes, headers=headers
-                )
-                resp.raise_for_status()
-                dispatch_res = resp.json()
-                task_id = dispatch_res["task_id"]
-
-                task_completed = False
-                poll_start = time.time()
-                while not task_completed:
-                    if time.time() - poll_start > poll_timeout:
-                        raise PipelineError(
-                            f"Task '{task_id}' timed out after {poll_timeout} seconds."
+                    def _eligible(w_info):
+                        registered = (canonical_role(r) for r in w_info.get("roles", []))
+                        return (
+                            canonical_role(role) in registered
+                            and w_info.get("status") == "idle"
                         )
 
-                    tasks_payload = {}
-                    tasks_checksum = calculate_checksum(tasks_payload, secret)
-                    tasks_bytes = json.dumps(
-                        tasks_payload, sort_keys=True, separators=(",", ":")
-                    ).encode("utf-8")
-                    headers["X-Payload-SHA256"] = tasks_checksum
+                    idle_worker_ids = [
+                        w_id for w_id, w_info in workers_dict.items() if _eligible(w_info)
+                    ]
+                    poll_start = time.time()
+                    while not idle_worker_ids:
+                        if time.time() - poll_start > poll_timeout:
+                            raise PipelineError(
+                                f"No idle worker available for role '{role}' within {poll_timeout} seconds."
+                            )
+                        await asyncio.sleep(0.5)
+                        resp = await http_client.post(
+                            f"{hub_url}/workers", content=payload_bytes, headers=headers
+                        )
+                        resp.raise_for_status()
+                        workers_dict = resp.json()
+                        idle_worker_ids = [
+                            w_id
+                            for w_id, w_info in workers_dict.items()
+                            if _eligible(w_info)
+                        ]
 
+                    worker_id = idle_worker_ids[0]
+
+                    dispatch_payload = {
+                        "role": role,
+                        "task_data": {
+                            "role": role,
+                            "prompt": prompt,
+                            "context": context or {},
+                        },
+                    }
+                    dispatch_checksum = calculate_checksum(dispatch_payload, secret)
+                    dispatch_bytes = json.dumps(
+                        dispatch_payload, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
+
+                    headers["X-Payload-SHA256"] = dispatch_checksum
                     resp = await http_client.post(
-                        f"{hub_url}/tasks", content=tasks_bytes, headers=headers
+                        f"{hub_url}/dispatch", content=dispatch_bytes, headers=headers
                     )
                     resp.raise_for_status()
-                    all_tasks = resp.json()
+                    dispatch_res = resp.json()
+                    task_id = dispatch_res["task_id"]
 
-                    task_info = all_tasks.get(task_id)
-                    if not task_info:
-                        raise PipelineError(
-                            f"Task '{task_id}' not found in tasks list."
+                    task_completed = False
+                    poll_start = time.time()
+                    while not task_completed:
+                        if time.time() - poll_start > poll_timeout:
+                            raise PipelineError(
+                                f"Task '{task_id}' timed out after {poll_timeout} seconds."
+                            )
+
+                        tasks_payload = {}
+                        tasks_checksum = calculate_checksum(tasks_payload, secret)
+                        tasks_bytes = json.dumps(
+                            tasks_payload, sort_keys=True, separators=(",", ":")
+                        ).encode("utf-8")
+                        headers["X-Payload-SHA256"] = tasks_checksum
+
+                        resp = await http_client.post(
+                            f"{hub_url}/tasks", content=tasks_bytes, headers=headers
                         )
+                        resp.raise_for_status()
+                        all_tasks = resp.json()
 
-                    status = task_info.get("status")
-                    if status == "completed":
-                        result = task_info.get("result")
-                        # The worker wraps its output as {"output": <content>};
-                        # unwrap to the content string (the in-memory WS path
-                        # does the same in serve.py). Returning the raw dict made
-                        # every stage write a dict to its artifact file, which
-                        # failed and left research.md/design.md/... empty.
-                        if isinstance(result, dict):
-                            result = result.get("output", result)
-                        if use_cache:
-                            _cache_store(cache_key, result)
-                        return result
-                    elif status == "failed":
-                        err = task_info.get("result", {}).get(
-                            "error", "Unknown task failure"
-                        )
-                        raise PipelineError(f"Task failed: {err}")
+                        task_info = all_tasks.get(task_id)
+                        if not task_info:
+                            raise PipelineError(
+                                f"Task '{task_id}' not found in tasks list."
+                            )
 
-                    await asyncio.sleep(0.5)
+                        status = task_info.get("status")
+                        if status == "completed":
+                            result = task_info.get("result")
+                            # The worker wraps its output as {"output": <content>};
+                            # unwrap to the content string (the in-memory WS path
+                            # does the same in serve.py). Returning the raw dict made
+                            # every stage write a dict to its artifact file, which
+                            # failed and left research.md/design.md/... empty.
+                            if isinstance(result, dict):
+                                result = result.get("output", result)
+                            if use_cache:
+                                _cache_store(cache_key, result)
+                            return result
+                        elif status == "failed":
+                            err = task_info.get("result", {}).get(
+                                "error", "Unknown task failure"
+                            )
+                            raise PipelineError(f"Task failed: {err}")
+
+                        await asyncio.sleep(0.5)
+            except (PipelineError, WorkerDisconnectedError):
+                raise
+            except Exception as e:
+                # Normalize hub transport failures (httpx timeouts / 5xx /
+                # connection errors) to PipelineError so the self-heal loops'
+                # `except PipelineError` retry them just like a local call.
+                raise PipelineError(
+                    f"Distributed hub request to {url} failed: {e}"
+                ) from e
         else:
             # Dispatch to an idle worker over the in-memory WS registry, with
             # RE-DISPATCH on worker loss: if the chosen worker disconnects (or
@@ -1051,7 +1061,7 @@ async def call_api(
                                     )
                                 except Exception:
                                     pass
-                    raise asyncio.TimeoutError(
+                    raise PipelineError(
                         f"Task timed out after {poll_timeout} seconds"
                     )
                 except WorkerDisconnectedError as e:
