@@ -1073,6 +1073,117 @@ def _approval_timeout() -> float:
         return 3600.0
 
 
+_SKILL_ROLES = "researcher,claude,codex,tester,security,devops"
+_skill_autostart_lock = None  # created lazily on the running loop
+
+
+def _skill_health_urls():
+    """Health URLs for the six skill servers (from config.services, else the
+    frozen default ports)."""
+    defaults = {
+        "researcher": "http://localhost:8001",
+        "claude_architect": "http://localhost:8002",
+        "codex_reviewer": "http://localhost:8003",
+        "tester_agent": "http://localhost:8004",
+        "security_agent": "http://localhost:8005",
+        "devops_agent": "http://localhost:8006",
+    }
+    services = {}
+    try:
+        from ag_core.config import load_config
+
+        cfg = load_config()
+        if isinstance(cfg, dict):
+            services = cfg.get("services") or {}
+    except Exception:
+        pass
+    urls = []
+    for key, fallback in defaults.items():
+        base = str(services.get(key) or fallback).rstrip("/")
+        urls.append(base + "/health")
+    return urls
+
+
+async def _skill_servers_healthy(timeout: float = 2.0) -> bool:
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for url in _skill_health_urls():
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    return False
+    except Exception:
+        return False
+    return True
+
+
+async def _ensure_skill_servers(wait_seconds: float = 45.0) -> None:
+    """Ensure the six skill servers are up — ``genius_orchestrate`` routes to
+    them over HTTP. If any is down, spawn ``serve.py`` detached and wait for
+    health. No-op under pytest and when GENIUS_ORCHESTRATE_AUTOSTART=0 (then you
+    manage the servers). Raises with an actionable message if they never boot.
+    """
+    import subprocess
+
+    from ag_core.runtime import under_pytest
+
+    if under_pytest():
+        return
+    if os.environ.get("GENIUS_ORCHESTRATE_AUTOSTART", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+    ):
+        return
+    if await _skill_servers_healthy():
+        return
+
+    global _skill_autostart_lock
+    if _skill_autostart_lock is None:
+        _skill_autostart_lock = asyncio.Lock()
+    async with _skill_autostart_lock:
+        # Another concurrent job may have started them while we waited.
+        if await _skill_servers_healthy():
+            return
+        root = os.path.dirname(os.path.abspath(__file__))
+        serve_py = os.path.join(root, "serve.py")
+        log_path = os.path.join(_jobs_root(), "serve_autostart.log")
+        try:
+            os.makedirs(_jobs_root(), exist_ok=True)
+            log_fh = open(log_path, "ab")
+        except Exception:
+            log_fh = subprocess.DEVNULL
+        popen_kwargs = {}
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000008  # DETACHED_PROCESS
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
+        subprocess.Popen(
+            [sys.executable, serve_py, "--roles", _SKILL_ROLES],
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=log_fh,
+            env=os.environ.copy(),
+            **popen_kwargs,
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_seconds
+        while loop.time() < deadline:
+            await asyncio.sleep(2)
+            if await _skill_servers_healthy():
+                return
+        raise RuntimeError(
+            f"genius_orchestrate: skill servers did not come up within "
+            f"{wait_seconds:.0f}s (see {log_path}). Start them manually with "
+            f"`python serve.py --roles {_SKILL_ROLES}`, or set "
+            f"GENIUS_ORCHESTRATE_AUTOSTART=0 to manage them yourself."
+        )
+
+
 async def _run_orchestration(
     job_id: str,
     prompt: str,
@@ -1085,6 +1196,10 @@ async def _run_orchestration(
         # Imported lazily so the MCP server boots fast (initialize/tools-list
         # must respond before Antigravity's connect timeout).
         from orchestrator import run_pipeline, run_e2e_pipeline
+
+        # The pipeline routes through the six FastAPI skill servers; bring them
+        # up if the caller (e.g. Antigravity) hasn't started serve.py.
+        await _ensure_skill_servers()
 
         stage_gate = None
         if require_approval:
