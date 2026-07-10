@@ -146,18 +146,19 @@ def test_agy_provider_success_invocation_shape(monkeypatch):
             args, kwargs = mock_exec.call_args
             assert args[0] == "/usr/local/bin/agy"
             # No --model (empty model_name = account default); sandbox is on
-            # by default; --print-timeout is GENIUS_CLI_TIMEOUT - 10.
+            # by default; --print-timeout is GENIUS_CLI_TIMEOUT - 10. The
+            # prompt is the VALUE of --print (agy ignores stdin), passed last
+            # in the =-joined form.
             assert args[1:] == (
-                "--print",
                 "--dangerously-skip-permissions",
                 "--print-timeout",
                 "110s",
                 "--sandbox",
+                "--print=Test prompt",
             )
-            # The prompt never appears in argv (WinError 206 above ~32KB);
-            # it is piped via stdin.
+            # Prompt travels in argv as the --print value; stdin is sent empty.
             assert kwargs["stdin"] == asyncio.subprocess.PIPE
-            mock_process.communicate.assert_called_once_with(input=b"Test prompt")
+            mock_process.communicate.assert_called_once_with(input=b"")
 
     asyncio.run(run_test())
 
@@ -177,7 +178,10 @@ def test_agy_provider_model_flag_only_when_set():
             await provider.send_prompt("Test prompt")
 
             args, _ = mock_exec.call_args
-            assert args[-2:] == ("--model", "gemini-3-pro")
+            assert "--model" in args
+            assert args[args.index("--model") + 1] == "gemini-3-pro"
+            # The prompt is always the last arg, as the --print value.
+            assert args[-1] == "--print=Test prompt"
 
     asyncio.run(run_test())
 
@@ -205,7 +209,7 @@ def test_agy_provider_sandbox_opt_out(monkeypatch):
 
 def test_agy_provider_system_prompt_is_prepended():
     # agy has no system-prompt flag: the system text is prepended into the
-    # stdin payload with explicit section markers.
+    # prompt (the --print value) with explicit section markers.
     async def run_test():
         provider = AgyProvider()
         mock_process = _mock_process(stdout=b"ok")
@@ -220,10 +224,11 @@ def test_agy_provider_system_prompt_is_prepended():
             await provider.send_prompt("Test prompt", system="Be terse")
 
             args, _ = mock_exec.call_args
-            assert "Be terse" not in args  # never in argv
-            mock_process.communicate.assert_called_once_with(
-                input=b"[System instructions]\nBe terse\n\n[Task]\nTest prompt"
+            assert args[-1] == (
+                "--print=[System instructions]\nBe terse\n\n[Task]\nTest prompt"
             )
+            # The prompt travels in argv now, not stdin.
+            mock_process.communicate.assert_called_once_with(input=b"")
 
     asyncio.run(run_test())
 
@@ -310,10 +315,14 @@ def _install_shim(shim_dir, name, py_body):
 
 
 # Echo shim: plain text on stdout (agy's real output shape), plus the argv it
-# received so the flag plumbing through cmd.exe is verifiable end-to-end.
+# received so the flag plumbing through cmd.exe is verifiable end-to-end. The
+# prompt arrives as the --print=<value> argv element (agy ignores stdin).
 AGY_ECHO = r"""
 import sys
-prompt = sys.stdin.buffer.read().decode("utf-8")
+prompt = ""
+for a in sys.argv[1:]:
+    if a.startswith("--print="):
+        prompt = a[len("--print="):]
 out = "AGY: " + prompt + "\nARGS: " + " ".join(sys.argv[1:])
 sys.stdout.buffer.write(out.encode("utf-8"))
 """
@@ -334,7 +343,7 @@ async def test_agy_shim_roundtrip_unicode_and_flags(shim_dir):
 
     res = await provider.send_prompt("Xin chào Antigravity ✓")
 
-    # The prompt went CLI-ward over real stdin pipes and came back
+    # The prompt went CLI-ward as the --print= argv value and came back
     # byte-identical (UTF-8 both ways, through the cmd.exe /c wrapping).
     assert res["content"].startswith("AGY: Xin chào Antigravity ✓")
     assert "--print" in res["content"]

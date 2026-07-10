@@ -3,11 +3,14 @@
 The agy CLI is the Antigravity IDE's bundled Gemini agent binary
 (``%LOCALAPPDATA%\\agy\\bin\\agy.exe`` on Windows, native .exe - no cmd.exe
 wrapping needed, though the resolved-path .cmd/.bat wrapping convention is
-kept for test shims). Verified invocation shape (agy 1.0.15):
+kept for test shims). Verified invocation shape (agy 1.1.1):
 
-* ``--print`` non-interactive mode, prompt piped via **stdin** (UTF-8). The
-  prompt must never go through argv: a ~40KB argv fails with WinError 206
-  ("filename or extension is too long").
+* ``--print`` / ``-p`` is a STRING flag whose VALUE is the prompt — agy does
+  NOT read the prompt from stdin. A bare ``--print`` silently consumes the
+  next token as its value, so the prompt is passed as ``--print=<prompt>``
+  (the ``=`` form protects a prompt that begins with ``-``). This puts the
+  prompt in argv, so a >~32KB prompt can hit the Windows CreateProcess limit;
+  stdin, however, never reaches agy, so argv is the only working channel.
 * ``--dangerously-skip-permissions`` is REQUIRED in script mode - without it
   agy hangs forever on an invisible permission prompt.
 * ``--sandbox`` keeps terminal restrictions enabled (verified to work with
@@ -126,12 +129,19 @@ class AgyProvider(BaseProvider):
             if sys_prompt:
                 prompt = f"[System instructions]\n{sys_prompt}\n\n[Task]\n{prompt}"
 
-            # The prompt is ALWAYS fed via stdin: passing it as argv fails
-            # with WinError 206 above ~32KB, and would go through cmd.exe
-            # metacharacter parsing when the path is a .cmd shim.
+            # agy's ``--print`` / ``-p`` is a STRING flag whose VALUE is the
+            # prompt — it does NOT read the prompt from stdin. A bare
+            # ``--print`` consumes the NEXT token as its value (so the old
+            # stdin form made agy treat ``--dangerously-skip-permissions`` as
+            # the prompt and ignore the real request). Pass the prompt as the
+            # flag value, using the ``--print=<value>`` form so a prompt that
+            # begins with ``-`` is never mistaken for another flag. Keep it
+            # LAST so the earlier bool/value flags parse cleanly.
+            # Trade-off: this reintroduces the argv size limit that stdin
+            # avoided (Windows CreateProcess ~32KB) — but stdin simply does not
+            # reach agy, so argv is the only channel that works.
             cmd = [
                 cli_path,
-                "--print",
                 "--dangerously-skip-permissions",
                 "--print-timeout",
                 f"{_print_timeout_seconds()}s",
@@ -140,11 +150,13 @@ class AgyProvider(BaseProvider):
                 cmd.append("--sandbox")
             if self.model_name:
                 cmd.extend(["--model", self.model_name])
+            cmd.append(f"--print={prompt}")
 
             process = await spawn_cli(cmd, cli_path)
 
+            # Prompt travels in argv (above); stdin is intentionally empty.
             stdout, stderr = await communicate_with_timeout(
-                process, input=prompt.encode("utf-8"), cli_name="Agy CLI"
+                process, input=b"", cli_name="Agy CLI"
             )
 
             stdout_str = stdout.decode("utf-8", errors="replace").strip()
