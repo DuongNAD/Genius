@@ -272,6 +272,95 @@ async def _run_code_graph(arguments: Dict[str, Any]) -> str:
     )
 
 
+_EVAL_OPS = {"grade", "compare", "list_metrics"}
+
+
+async def _run_eval(arguments: Dict[str, Any]) -> str:
+    """Grade a finished pipeline workspace against eval metrics (R5).
+
+    Read-only, in-process, JSON out (like ``code_graph``/``review``): it
+    never writes files, so a grade cannot mutate the workspace it scores.
+
+    Ops:
+    * ``grade`` - collect a workspace's artifacts/traces and score them.
+      Defaults to the deterministic metrics only (offline, no judge/token
+      spend); LLM-judge metrics are opt-in via ``metrics``. The blocking
+      file read runs off the event loop.
+    * ``compare`` - diff two grade results (``baseline`` + ``current``) and
+      flag regressions - the gate primitive.
+    * ``list_metrics`` - the built-in metric catalog (name/kind/description).
+
+    Argument errors come back as JSON ``{"error": ...}`` so agent callers
+    can self-correct, matching ``_run_code_graph``.
+    """
+    from ag_core.eval import grader
+    from ag_core.eval.compare import compare as compare_grades
+    from ag_core.eval.metrics import BUILTIN_METRICS, DEFAULT_METRICS
+
+    op = (arguments.get("op") or "grade").strip().lower()
+    if op not in _EVAL_OPS:
+        return json.dumps(
+            {"error": f"Unknown op: {op}. Valid ops: {sorted(_EVAL_OPS)}"}
+        )
+
+    if op == "list_metrics":
+        return json.dumps(
+            {
+                "op": op,
+                "metrics": [
+                    {"name": m.name, "kind": m.kind, "description": m.description}
+                    for m in BUILTIN_METRICS.values()
+                ],
+            }
+        )
+
+    if op == "compare":
+        baseline = arguments.get("baseline")
+        current = arguments.get("current")
+        if not isinstance(baseline, dict) or not isinstance(current, dict):
+            return json.dumps(
+                {
+                    "error": (
+                        "compare requires 'baseline' and 'current' grade "
+                        "objects (from a prior eval grade)."
+                    )
+                }
+            )
+        return json.dumps({"op": op, **compare_grades(baseline, current)})
+
+    # op == "grade"
+    workspace = arguments.get("workspace") or os.getcwd()
+    if not os.path.isdir(workspace):
+        return json.dumps({"error": f"Workspace directory not found: {workspace}"})
+
+    metrics = arguments.get("metrics") or list(DEFAULT_METRICS)
+    if isinstance(metrics, str):
+        metrics = [m.strip() for m in metrics.split(",") if m.strip()]
+    unknown = [m for m in metrics if m not in BUILTIN_METRICS]
+    if unknown:
+        return json.dumps(
+            {
+                "error": (
+                    f"Unknown metric(s): {unknown}. "
+                    f"Valid metrics: {sorted(BUILTIN_METRICS)}"
+                )
+            }
+        )
+
+    prompt = arguments.get("prompt") or ""
+    case = await asyncio.to_thread(grader.collect_case, workspace, prompt)
+    needs_judge = any(BUILTIN_METRICS[m].kind == "llm" for m in metrics)
+    judge = None
+    if needs_judge:
+        from ag_core.eval.judge import default_judge
+
+        judge = default_judge()
+    result = await grader.grade_case(case, metrics, judge=judge)
+    result["op"] = op
+    result["workspace"] = workspace
+    return json.dumps(result)
+
+
 _NOTEBOOKLM_TOOLS = {"notebooklm_query", "notebooklm_list", "notebooklm_research"}
 
 
@@ -616,6 +705,60 @@ TOOLS = [
                 "budget": {
                     "type": "integer",
                     "description": "Token budget for op=map (default 32000)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "eval",
+        "description": (
+            "Grade a finished pipeline workspace against eval metrics "
+            "(R5 eval flywheel), in-process and read-only (JSON out, never "
+            "writes files). op=grade scores a workspace's artifacts/traces; "
+            "op=compare diffs two grades and flags regressions; "
+            "op=list_metrics lists the built-in metrics. grade defaults to "
+            "the deterministic metrics (artifacts_present, design_wellformed, "
+            "code_syntax_valid) which run offline; LLM-as-judge metrics "
+            "(task_success, grounding, design_quality, final_response_quality) "
+            "are opt-in via 'metrics' and call a provider."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "op": {
+                    "type": "string",
+                    "enum": ["grade", "compare", "list_metrics"],
+                    "description": "Operation (default: grade)",
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": (
+                        "Workspace to grade for op=grade (default: server cwd)"
+                    ),
+                },
+                "metrics": {
+                    "type": "string",
+                    "description": (
+                        "op=grade: comma-separated metric names "
+                        "(default: the deterministic set). Use op=list_metrics "
+                        "to see all names."
+                    ),
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "op=grade: the original user request, used by the "
+                        "task_success/grounding judge metrics"
+                    ),
+                },
+                "baseline": {
+                    "type": "object",
+                    "description": "op=compare: the baseline grade result",
+                },
+                "current": {
+                    "type": "object",
+                    "description": "op=compare: the current grade result",
                 },
             },
             "required": [],
@@ -1128,6 +1271,9 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
 
     if name == "code_graph":
         return await _run_code_graph(arguments)
+
+    if name == "eval":
+        return await _run_eval(arguments)
 
     if name in _NOTEBOOKLM_TOOLS:
         return await _run_notebooklm(name, arguments)

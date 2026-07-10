@@ -157,6 +157,54 @@ def degraded_mode() -> bool:
     return os.getenv("GENIUS_DEGRADED_MODE", "").lower() in ("1", "true", "yes")
 
 
+def eval_gate_enabled() -> bool:
+    """Whether the R5 post-run eval gate runs at the end of a pipeline.
+
+    Opt-in via ``GENIUS_EVAL_GATE`` and always OFF under pytest (like the
+    debate / design-self-heal knobs): it grades the finished workspace with
+    the deterministic metric set (offline, no judge) and writes a score
+    under ``logs/eval/`` — behavior the fixed-mock pipeline tests must not
+    see. A grade failure is swallowed at the call site; it never fails a run.
+    """
+    if under_pytest():
+        return False
+    return os.getenv("GENIUS_EVAL_GATE", "").lower() in ("1", "true", "yes")
+
+
+async def _maybe_run_eval_gate(project_dir: str, prompt: str) -> None:
+    """Grade the finished workspace and log any quality regression.
+
+    A no-op unless :func:`eval_gate_enabled`. Fully non-fatal: a grading
+    failure is logged and swallowed so it can never turn a successful run
+    into a failed one.
+    """
+    if not eval_gate_enabled():
+        return
+    try:
+        from ag_core.eval.gate import run_eval_gate
+
+        result = await run_eval_gate(project_dir, prompt=prompt)
+        diff = result.get("compare")
+        overall = result["grade"].get("overall", 0.0)
+        if diff and diff.get("regressed"):
+            logger.warning(
+                "[eval-gate] quality regressed vs last run on %s "
+                "(overall %s -> %s); score saved to %s",
+                diff.get("regressions"),
+                diff.get("overall_baseline"),
+                diff.get("overall_current"),
+                result.get("score_path"),
+            )
+        else:
+            logger.info(
+                "[eval-gate] overall score %.2f; saved to %s",
+                overall,
+                result.get("score_path"),
+            )
+    except Exception as e:  # noqa: BLE001 - the gate must never fail a run.
+        logger.warning("[eval-gate] skipped (non-fatal): %s", e)
+
+
 def resolve_degraded_outcome(paths, results, label):
     """Decide a degraded fan-out outcome from ``gather(return_exceptions=True)``.
 
@@ -2291,6 +2339,7 @@ async def run_pipeline(
                 "Pipeline executed successfully and all files implemented, verified, and deployed."
             )
             await log_conversation_async(prompt, devops_content)
+            await _maybe_run_eval_gate(project_dir, prompt)
             return devops_content
 
         # LEGACY single-file fallback — PYTEST-ONLY compatibility path. In

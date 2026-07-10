@@ -36,6 +36,7 @@ EXPECTED_TOOLS = {
     "debate",
     "review",
     "code_graph",
+    "eval",
     "notebooklm_list",
     "notebooklm_query",
     "notebooklm_research",
