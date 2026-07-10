@@ -1,3 +1,4 @@
+import logging
 import os
 import tempfile
 from typing import Any, Dict
@@ -11,6 +12,14 @@ from ag_core.utils.cli_runner import (
     spawn_cli,
     tail_text,
 )
+
+logger = logging.getLogger("ag_core")
+
+# Claude Code's reasoning-effort scale (its `--effort` flag). There is NO
+# "ultra" tier — that is a codex/OpenAI concept; `max` is Claude's ceiling.
+# GENIUS_CLAUDE_EFFORT sets it; an out-of-set value (e.g. a carried-over
+# "ultra") is ignored with a warning rather than passed through to fail.
+_CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 @memoize_cli_path
@@ -107,6 +116,39 @@ class AnthropicProvider(BaseProvider):
 
             if self.model_name:
                 cmd.extend(["--model", self.model_name])
+
+            # Opt-in reasoning effort + model fallback (Claude Code CLI flags),
+            # both default off so argv is unchanged unless set. Effort is
+            # resolved PER ROLE: GENIUS_CLAUDE_EFFORT_<ROLE> (e.g. _TESTER) wins
+            # over the base GENIUS_CLAUDE_EFFORT, so the plan (architect) and
+            # test (tester) stages can run at different efforts despite sharing
+            # the claude backend. Scale is low|medium|high|xhigh|max ("ultra" is
+            # not a Claude tier — ignored with a warning). GENIUS_CLAUDE_FALLBACK
+            # _MODEL adds --fallback-model so an unavailable/declined primary
+            # (e.g. Opus 4.8) falls back to another model (e.g. Fable 5).
+            role = str(self.extra_params.get("role") or "").strip().lower()
+            effort = ""
+            if role:
+                effort = (
+                    os.getenv(f"GENIUS_CLAUDE_EFFORT_{role.upper()}", "")
+                    .strip()
+                    .lower()
+                )
+            if not effort:
+                effort = os.getenv("GENIUS_CLAUDE_EFFORT", "").strip().lower()
+            if effort:
+                if effort in _CLAUDE_EFFORT_LEVELS:
+                    cmd.extend(["--effort", effort])
+                else:
+                    logger.warning(
+                        "Ignoring GENIUS_CLAUDE_EFFORT=%r: valid levels are %s "
+                        "(Claude has no 'ultra' tier — 'max' is the ceiling).",
+                        effort,
+                        list(_CLAUDE_EFFORT_LEVELS),
+                    )
+            fallback_model = os.getenv("GENIUS_CLAUDE_FALLBACK_MODEL", "").strip()
+            if fallback_model:
+                cmd.extend(["--fallback-model", fallback_model])
 
             if sys_prompt:
                 # Never pass the system prompt as an argv element: the

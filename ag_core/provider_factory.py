@@ -162,12 +162,18 @@ def chain_source(role: str) -> Optional[str]:
     return None
 
 
-def build_backend(backend: str, config):
+def build_backend(backend: str, config, role: Optional[str] = None):
     """Instantiate the provider for one backend from ``config``.
 
     Model precedence: ``GENIUS_MODEL_<BACKEND>`` env (blank = unset) >
     ``config.models.<backend>``. An empty final value means "the CLI's own
     default model" — every provider only passes a model flag when non-empty.
+
+    ``role`` (the canonical role this provider serves) is forwarded to the
+    provider as an ``extra_params`` entry so a backend can resolve per-role
+    knobs — e.g. the claude backend reads ``GENIUS_CLAUDE_EFFORT_<ROLE>`` so
+    the plan (architect) and test (tester) stages can run at different
+    reasoning efforts despite sharing the claude backend.
     """
     mod_name, cls_name, model_attr, key_attr = BACKENDS[backend]
     provider_class = getattr(importlib.import_module(mod_name), cls_name)
@@ -177,7 +183,10 @@ def build_backend(backend: str, config):
     model_name = os.environ.get(f"GENIUS_MODEL_{backend.upper()}") or getattr(
         config.models, model_attr
     )
-    return provider_class(api_key=api_key, model_name=model_name)
+    kwargs = {"api_key": api_key, "model_name": model_name}
+    if role:
+        kwargs["role"] = role
+    return provider_class(**kwargs)
 
 
 class FallbackProvider:
@@ -297,8 +306,11 @@ def make_provider(role: str, config, default_chain: Optional[List[str]] = None):
             )
         chain = [name.lower() for name in default_chain]
     if len(chain) == 1:
-        return build_backend(chain[0], config)
+        return build_backend(chain[0], config, role=role)
     return FallbackProvider(
         role,
-        [(name, (lambda n=name: build_backend(n, config))) for name in chain],
+        [
+            (name, (lambda n=name: build_backend(n, config, role=role)))
+            for name in chain
+        ],
     )

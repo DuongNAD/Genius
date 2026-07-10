@@ -127,6 +127,7 @@ async def spawn_cli(
     *,
     stdin=asyncio.subprocess.PIPE,
     cwd: str | None = None,
+    env: dict | None = None,
 ):
     """Spawn a resolved vendor CLI, absorbing the Windows shim quirks once.
 
@@ -135,6 +136,11 @@ async def spawn_cli(
     Windows (an extensionless shim CreateProcess cannot launch), it is retried
     once through ``cmd.exe /c``. stdout/stderr are always PIPEd; callers pick
     ``stdin`` (PIPE to feed the prompt, DEVNULL for file-fed CLIs).
+
+    ``env`` overrides the child's environment (``None`` = inherit the parent's
+    unchanged, the default for every CLI); callers pass a scoped dict to hide
+    specific vars from one subprocess (e.g. codex login mode strips the proxy
+    OPENAI_* vars) without touching the process-wide environment.
     """
     actual_cmd = wrap_windows_cmd(cmd, cli_path)
     try:
@@ -144,6 +150,7 @@ async def spawn_cli(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=env,
         )
     except OSError:
         if sys.platform == "win32" and actual_cmd[0] != "cmd.exe":
@@ -153,6 +160,7 @@ async def spawn_cli(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                env=env,
             )
         raise
 

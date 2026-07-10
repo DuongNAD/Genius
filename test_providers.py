@@ -35,7 +35,11 @@ def test_newest_picks_most_recent_codex_and_tolerates_missing(tmp_path):
     assert _newest([missing]) == missing
 
 
-def test_openai_provider_success():
+def test_openai_provider_success(monkeypatch):
+    # No-knobs default argv: clear the opt-in effort override (a real .env may
+    # set GENIUS_CODEX_EFFORT) so this stays independent of ambient config.
+    monkeypatch.delenv("GENIUS_CODEX_EFFORT", raising=False)
+
     async def run_test():
         provider = OpenAIProvider()
 
@@ -131,7 +135,9 @@ def test_openai_provider_codex_cli_format():
     asyncio.run(run_test())
 
 
-def test_openai_provider_fallback_path():
+def test_openai_provider_fallback_path(monkeypatch):
+    monkeypatch.delenv("GENIUS_CODEX_EFFORT", raising=False)
+
     async def run_test():
         provider = OpenAIProvider()
 
@@ -298,7 +304,12 @@ def test_openai_provider_invalid_json():
     asyncio.run(run_test())
 
 
-def test_anthropic_provider_success():
+def test_anthropic_provider_success(monkeypatch):
+    # Assert the no-knobs default argv: clear the opt-in effort/fallback env
+    # (a real .env may set them) so this stays independent of ambient config.
+    monkeypatch.delenv("GENIUS_CLAUDE_EFFORT", raising=False)
+    monkeypatch.delenv("GENIUS_CLAUDE_FALLBACK_MODEL", raising=False)
+
     async def run_test():
         provider = AnthropicProvider()
 
