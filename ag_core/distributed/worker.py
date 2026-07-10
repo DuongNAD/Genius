@@ -336,7 +336,13 @@ class ClientWorker:
                 print(f"[Worker] Connecting to {safe_uri} ...")
                 async with websockets.connect(uri) as websocket:
                     self.ws = websocket
-                    backoff = 1.0  # Reset backoff
+                    # NB: do NOT reset the reconnect backoff here. A socket that
+                    # merely opened is not a stable session — a hub that accepts
+                    # the connection but then rejects registration (e.g.
+                    # max-workers) would otherwise reset backoff to 1s every
+                    # cycle and produce a ~1-2s reconnect storm. Backoff is reset
+                    # only once registration is CONFIRMED (see the "registered"
+                    # frame handler below).
                     print(f"[Worker] Connected! Registering roles: {self.roles}")
 
                     # Register
@@ -352,6 +358,7 @@ class ClientWorker:
                     hb_task = asyncio.create_task(self._heartbeat_loop())
 
                     async def read_msg_loop():
+                        nonlocal backoff
                         async for message in websocket:
                             # One malformed frame must not escape the loop:
                             # an uncaught parse error tears the connection
@@ -372,6 +379,18 @@ class ClientWorker:
                                 f"[Worker] Received from hub: type={msg_type} "
                                 f"task_id={data.get('task_id')}"
                             )
+                            if (
+                                msg_type == "registered"
+                                and data.get("status") == "success"
+                            ):
+                                # Registration confirmed: this is a stable
+                                # session, so it is finally safe to reset the
+                                # reconnect backoff. A hub that accepts the
+                                # socket but rejects registration never sends
+                                # this frame, so it keeps backing off.
+                                backoff = 1.0
+                                continue
+
                             if (
                                 msg_type == "error"
                                 and data.get("error") == "not_registered"

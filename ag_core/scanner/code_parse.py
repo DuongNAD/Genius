@@ -275,7 +275,10 @@ def resolve_import(importer: str, spec: str, known_paths) -> list:
     if spec.startswith("."):
         base = os.path.dirname(importer.replace("\\", "/"))
         target = os.path.normpath(os.path.join(base, spec)).replace("\\", "/")
-        target = target.lstrip("./")
+        # Strip a leading "./" PREFIX only; `str.lstrip("./")` strips every
+        # leading '.'/'/' and mangles paths under a dotfile directory.
+        if target.startswith("./"):
+            target = target[2:]
         for suffix in _JS_RESOLVE_SUFFIXES:
             cand = target + suffix
             if cand in known:

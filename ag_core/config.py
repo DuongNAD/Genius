@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 import time
@@ -317,8 +318,13 @@ def load_config(config_path: str = "config.yaml") -> Config:
                     setattr(
                         config.services, field_name, f"http://localhost:{port}{suffix}"
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            # A malformed registry must not silently revert every service URL to
+            # the config.yaml defaults with no trace — name the file and the
+            # error so the misconfiguration is diagnosable.
+            logging.getLogger(__name__).warning(
+                "Ignoring malformed service registry %s: %s", registry_path, exc
+            )
 
     if ttl > 0:
         with _CONFIG_CACHE_LOCK:

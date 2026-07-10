@@ -95,7 +95,9 @@ class WorkerRegistry:
                         return worker_id
             return None
 
-    async def register(self, worker_id: str, roles: list, ws, status: str = "idle"):
+    async def register(
+        self, worker_id: str, roles: list, ws, status: str = "idle"
+    ) -> bool:
         current_status = status
         if worker_id in central_hub.workers:
             if central_hub.workers[worker_id].get("status") == "busy":
@@ -110,10 +112,14 @@ class WorkerRegistry:
 
         payload = {"worker_id": worker_id, "roles": roles}
         headers = central_hub.create_headers(payload)
-        await central_hub.handle_request("/register", payload, headers)
-        if worker_id in central_hub.workers:
+        status_code, _body, _headers = await central_hub.handle_request(
+            "/register", payload, headers
+        )
+        registered = 200 <= status_code < 300 and worker_id in central_hub.workers
+        if registered:
             central_hub.workers[worker_id]["ws"] = ws
             central_hub.workers[worker_id]["status"] = current_status
+        return registered
 
     async def unregister(self, worker_id: str, ws=None):
         worker = await self.get_worker(worker_id)
@@ -223,16 +229,24 @@ async def hub_http_route(path: str, request: Request):
     if payload.get("stream") or request.query_params.get("stream") == "true":
         from fastapi.responses import StreamingResponse
 
-        async def stream_generator():
-            status_code, body, resp_headers = await central_hub.handle_request(
-                "/" + path, payload, headers
-            )
-            if isinstance(body, dict):
-                yield json.dumps(body)
-            else:
-                yield str(body)
+        # Resolve the request BEFORE building the streaming response so the real
+        # status code and headers propagate. Computing them inside the generator
+        # meant a streamed reply always went out as HTTP 200 — an auth,
+        # validation, or backpressure (503) failure was reported as success.
+        status_code, body, resp_headers = await central_hub.handle_request(
+            "/" + path, payload, headers
+        )
+        body_text = json.dumps(body) if isinstance(body, dict) else str(body)
 
-        return StreamingResponse(stream_generator(), media_type="application/json")
+        async def stream_generator():
+            yield body_text
+
+        return StreamingResponse(
+            stream_generator(),
+            status_code=status_code,
+            media_type="application/json",
+            headers=resp_headers,
+        )
 
     status_code, body, resp_headers = await central_hub.handle_request(
         "/" + path, payload, headers
@@ -306,10 +320,19 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 if isinstance(roles, str):
                     roles = [r.strip() for r in roles.split(",") if r.strip()]
 
-                registered_worker_id = worker_id
-                await worker_registry.register(
+                ok = await worker_registry.register(
                     worker_id, roles, websocket, status="idle"
                 )
+                if not ok:
+                    # The hub refused the registration (e.g. max-workers). Tell
+                    # the worker the truth and close, instead of reporting
+                    # success for a registration that never happened.
+                    await websocket.send_json(
+                        {"type": "error", "error": "registration_rejected"}
+                    )
+                    await websocket.close(code=4004)
+                    return
+                registered_worker_id = worker_id
                 await websocket.send_json({"type": "registered", "status": "success"})
 
             elif msg_type == "heartbeat":

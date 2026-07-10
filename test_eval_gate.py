@@ -65,6 +65,28 @@ async def test_gate_detects_regression_and_preserves_baseline(tmp_path):
     assert os.path.exists(_eval_file(ws, "score-2000.json"))
 
 
+@pytest.mark.asyncio
+async def test_gate_preserves_corrupt_baseline(tmp_path):
+    # A baseline file that exists but won't parse must NOT be silently
+    # overwritten by the current run — that would reset the quality bar and
+    # hide any regression.
+    ws = _workspace(tmp_path)
+    os.makedirs(os.path.join(ws, "logs", "eval"), exist_ok=True)
+    baseline_path = _eval_file(ws, "baseline.json")
+    corrupt = "{ not valid json "
+    with open(baseline_path, "w", encoding="utf-8") as f:
+        f.write(corrupt)
+
+    res = await run_eval_gate(ws, now=3000)
+
+    assert res["compare"] is None  # can't compare against a corrupt baseline
+    # The corrupt baseline is preserved verbatim, not reset.
+    with open(baseline_path, encoding="utf-8") as f:
+        assert f.read() == corrupt
+    # The score snapshot for this run is still written.
+    assert os.path.exists(_eval_file(ws, "score-3000.json"))
+
+
 def test_eval_gate_off_under_pytest(monkeypatch):
     # Even with the opt-in env set, the gate stays OFF under pytest so the
     # fixed-mock pipeline tests never see it.

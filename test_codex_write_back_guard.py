@@ -7,8 +7,20 @@ would truncate the user's source file to zero bytes. ``_safe_write_back`` must
 skip the write in that case and leave the original file intact.
 """
 
-from ag_core.agents.codex_reviewer import _safe_write_back
+from ag_core.agents.codex_reviewer import _pytest_review_passed, _safe_write_back
 from ag_core.utils.code_extract import extract_code
+
+
+def test_pytest_exit_zero_and_five_are_review_passes():
+    # 0 = all passed, 5 = no tests collected. Reviewing a workspace with no
+    # tests must not be treated as a failure that drives the self-heal loop.
+    assert _pytest_review_passed(0) is True
+    assert _pytest_review_passed(5) is True
+
+
+def test_pytest_real_failures_are_not_review_passes():
+    for code in (1, 2, 3, 4, -999):
+        assert _pytest_review_passed(code) is False
 
 
 def test_empty_content_does_not_truncate_file(tmp_path):

@@ -60,7 +60,13 @@ def _budget_from_env() -> int:
 
 
 def _norm(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
+    # Strip a leading "./" PREFIX only. `str.lstrip("./")` strips every leading
+    # '.'/'/' character, which mangles any path under a dotfile directory
+    # (".github/x" -> "github/x") and silently drops that file from the graph.
+    p = path.replace("\\", "/")
+    if p.startswith("./"):
+        p = p[2:]
+    return p
 
 
 def _module_names(path: str) -> set:

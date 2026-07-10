@@ -90,9 +90,10 @@ async def test_network_drop_exponential_backoff():
 
 @pytest.mark.asyncio
 async def test_network_drop_backoff_reset():
-    """
-    Verify backoff is reset to 1.0s after a successful connection.
-    """
+    """Backoff resets only after registration is CONFIRMED, not on mere socket
+    open. A connection that opens and delivers a ``registered: success`` frame is
+    a stable session and resets the backoff; a socket that opens but is never
+    confirmed does not (see test_backoff_not_reset_without_registration)."""
     sleep_times = []
     connect_count = 0
 
@@ -106,18 +107,51 @@ async def test_network_drop_backoff_reset():
         async def __aexit__(self, exc_type, exc_val, exc_tb):
             pass
 
+    class RegisteredThenClosed:
+        """Delivers a single confirmed-registration frame, then drops."""
+
+        def __init__(self):
+            self.sent_messages = []
+            self.closed = False
+            self._frames = [
+                json.dumps({"type": "registered", "status": "success"})
+            ]
+
+        async def send(self, message):
+            self.sent_messages.append(message)
+
+        async def recv(self):
+            if self._frames:
+                return self._frames.pop(0)
+            raise ConnectionClosed(None, None)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return await self.recv()
+            except ConnectionClosed:
+                raise StopAsyncIteration
+
+        async def close(self):
+            self.closed = True
+
     def mock_connect(uri):
         nonlocal connect_count
         connect_count += 1
         if connect_count == 2:
-            # Succeed on the second attempt, but ws is immediately closed to trigger reconnect
-            ws = MockWebSocket()
-            ws.closed = True
-            return MockContextManager(ws)
-        # Fail otherwise
+            # 2nd attempt: connect succeeds AND registration is confirmed, then
+            # the socket drops — a genuinely stable session that resets backoff.
+            return MockContextManager(RegisteredThenClosed())
         raise Exception("Connection refused")
 
     async def mock_sleep(delay):
+        # The heartbeat loop also sleeps (heartbeat_interval == 10.0); only the
+        # reconnect backoff sleeps count here.
+        if delay == 10.0:
+            await original_sleep(0.001)
+            return
         sleep_times.append(delay)
         if len(sleep_times) >= 3:
             raise StopTestException()
@@ -131,13 +165,60 @@ async def test_network_drop_backoff_reset():
             await run_worker("127.0.0.1", 8000, ["grok"], "test-worker-reset")
 
     # 1st attempt: fails -> sleeps backoff=1.0 -> backoff doubles to 2.0
-    # 2nd attempt: succeeds -> resets backoff to 1.0 -> exits -> sleeps backoff=1.0 -> backoff doubles to 2.0
+    # 2nd attempt: CONFIRMED registration -> resets backoff to 1.0 -> drops ->
+    #              sleeps backoff=1.0 -> backoff doubles to 2.0
     # 3rd attempt: fails -> sleeps backoff=2.0 -> raises StopTestException
     # (each sleep has a random jitter between 0.0 and 1.0s added)
     assert len(sleep_times) == 3
     assert 1.0 <= sleep_times[0] <= 2.0
     assert 1.0 <= sleep_times[1] <= 2.0
     assert 2.0 <= sleep_times[2] <= 3.0
+
+
+@pytest.mark.asyncio
+async def test_backoff_not_reset_without_registration():
+    """A socket that opens but is closed before registration is confirmed is NOT
+    a stable session: backoff must keep growing exponentially instead of
+    resetting to ~1s every cycle (which would be a reconnect storm)."""
+    sleep_times = []
+
+    class MockContextManager:
+        def __init__(self, ws):
+            self.ws = ws
+
+        async def __aenter__(self):
+            return self.ws
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    def mock_connect(uri):
+        # Every attempt: the socket opens but is immediately closed, so the
+        # worker never receives a "registered: success" frame.
+        ws = MockWebSocket()
+        ws.closed = True
+        return MockContextManager(ws)
+
+    async def mock_sleep(delay):
+        if delay == 10.0:  # heartbeat interval, ignore
+            await original_sleep(0.001)
+            return
+        sleep_times.append(delay)
+        if len(sleep_times) >= 3:
+            raise StopTestException()
+        await original_sleep(0.001)
+
+    with patch("websockets.connect", mock_connect), patch(
+        "ag_core.distributed.worker.asyncio.sleep", mock_sleep
+    ):
+        with pytest.raises(StopTestException):
+            await run_worker("127.0.0.1", 8000, ["grok"], "test-worker-noreg")
+
+    # No confirmed registration ever -> pure exponential growth: 1 -> 2 -> 4.
+    assert len(sleep_times) == 3
+    assert 1.0 <= sleep_times[0] <= 2.0
+    assert 2.0 <= sleep_times[1] <= 3.0
+    assert 4.0 <= sleep_times[2] <= 5.0
 
 
 @pytest.mark.asyncio

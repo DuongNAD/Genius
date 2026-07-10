@@ -33,6 +33,17 @@ def _surgical_edits_enabled() -> bool:
     return os.getenv("GENIUS_SURGICAL_EDITS", "").lower() in ("1", "true", "yes")
 
 
+# pytest exit codes: 0 = all passed, 5 = no tests were collected. Reviewing a
+# workspace that simply has no tests must NOT be treated as a test failure —
+# doing so drives the self-heal loop (and used to rewrite the reviewed file)
+# for no reason. Treat both as "review passed".
+_PYTEST_REVIEW_OK_EXIT_CODES = (0, 5)
+
+
+def _pytest_review_passed(exit_code: int) -> bool:
+    return exit_code in _PYTEST_REVIEW_OK_EXIT_CODES
+
+
 def _safe_write_back(abs_target_path: str, code_to_write: str) -> bool:
     """Write model-regenerated code back to the reviewed file during the
     self-heal loop — but NEVER let a code-less retry destroy it.
@@ -225,7 +236,7 @@ class CodexReviewerAgent(BaseAgent):
                 pytest_logs = f"Failed to run pytest: {e}"
 
         # 3. If tests fail, run a self-healing loop to let Codex fix the bugs, write back to file, and verify.
-        if pytest_exit_code != 0:
+        if not _pytest_review_passed(pytest_exit_code):
             for attempt in range(1, self.max_retries + 1):
                 target_file = _detect_target_file(
                     user_prompt, content, scanned_files.keys()
@@ -305,7 +316,7 @@ class CodexReviewerAgent(BaseAgent):
                     except Exception as e:
                         linter_findings = f"Failed to run flake8: {e}"
 
-                if pytest_exit_code == 0:
+                if _pytest_review_passed(pytest_exit_code):
                     break
 
         # Append linter findings and test logs to the final returned review output

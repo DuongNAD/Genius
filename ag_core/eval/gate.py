@@ -13,6 +13,7 @@ regression keeps showing until it is fixed.
 """
 
 import json
+import logging
 import os
 import time
 from typing import List, Optional
@@ -68,12 +69,23 @@ async def run_eval_gate(
     baseline_path = os.path.join(eval_dir, _BASELINE)
     diff = None
     baseline = _read_json(baseline_path)
+    # A baseline file that exists but won't parse is NOT the same as "no
+    # baseline yet": overwriting it would silently reset the quality bar and
+    # hide a regression. Detect that case and preserve the file instead.
+    baseline_corrupt = baseline is None and os.path.exists(baseline_path)
     if baseline is not None:
         diff = compare(baseline, result)
 
-    # Keep the previous baseline when this run regressed, so the regression
-    # stays visible on the next comparison until it is actually fixed.
-    if diff is None or not diff.get("regressed"):
+    if baseline_corrupt:
+        logging.getLogger(__name__).warning(
+            "Eval baseline %s is unreadable/corrupt; skipping the regression "
+            "comparison and preserving it (not resetting the quality bar).",
+            baseline_path,
+        )
+    elif diff is None or not diff.get("regressed"):
+        # No baseline yet, or a non-regressed run: (re)write the baseline. Keep
+        # the previous baseline when this run regressed, so the regression stays
+        # visible on the next comparison until it is actually fixed.
         _write_json(baseline_path, result)
 
     return {
