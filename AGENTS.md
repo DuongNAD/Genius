@@ -9,6 +9,14 @@ explicitly says they want to work on the Genius framework itself. For any normal
 task, USE the `genius` tools below and write results into the user's own
 workspace — never here.
 
+## Language
+
+Talk to the **user in Vietnamese** — progress updates, technical explanations,
+debugging, questions, summaries. The **autonomous pipeline works in English**:
+research briefs, the design plan, code, and agent-to-agent artifacts are all
+English (that is baked into the Genius agent prompts). So: English inside the
+machine, Vietnamese when you speak to the user.
+
 ## The `genius_*` tools (namespaced on the wire)
 
 Tools are exposed as `genius_<name>`. Pick by task:
