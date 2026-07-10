@@ -36,6 +36,10 @@ EXPECTED_TOOLS = {
     "debate",
     "review",
     "code_graph",
+    "eval",
+    "notebooklm_list",
+    "notebooklm_query",
+    "notebooklm_research",
 }
 
 READ_TIMEOUT = 30.0
@@ -161,7 +165,7 @@ def test_mcp_stdio_handshake_tools_list_and_stream_purity(mcp):
     mcp.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
     mcp.assert_stream_quiet()
 
-    # --- tools/list -> the 13 documented tools ---
+    # --- tools/list -> the 17 documented tools ---
     mcp.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     tools_resp = mcp.read_response()
     assert tools_resp["id"] == 2

@@ -8,7 +8,9 @@ one place and can be redirected without code changes:
 * No env knobs set - every role gets its :data:`DEFAULT_CHAINS` fallback
   chain (a :class:`FallbackProvider`): a backend that dies at runtime is
   retried on the next backend. The default chains do NOT include the grok
-  backend (the grok CLI is opt-in only; its account is out of credits).
+  or notebooklm backends (both are opt-in only: grok's account is out of
+  credits; NotebookLM answers only from a curated notebook's sources so it
+  is a deliberate, per-role choice rather than a general LLM fallback).
 * ``GENIUS_PROVIDER_<ROLE>`` (e.g. ``GENIUS_PROVIDER_RESEARCHER=grok,claude``)
   - explicit comma-separated backend chain for one role; overrides everything,
   including bringing the grok backend back. The researcher role also honors
@@ -57,6 +59,16 @@ BACKENDS = {
         "ag_core.providers.agy_provider",
         "AgyProvider",
         "agy",
+        None,
+    ),
+    # NotebookLM via the local `nlm` CLI. Keyless: auth is a one-time
+    # `nlm login`. Opt-in only (like grok): no DEFAULT_CHAINS entry, so it is
+    # never invoked unless GENIUS_PROVIDER_<ROLE> names it. Its `models`
+    # attribute holds the default notebook id/alias, not an LLM model name.
+    "notebooklm": (
+        "ag_core.providers.notebooklm_provider",
+        "NotebookLMProvider",
+        "notebooklm",
         None,
     ),
 }
@@ -150,12 +162,18 @@ def chain_source(role: str) -> Optional[str]:
     return None
 
 
-def build_backend(backend: str, config):
+def build_backend(backend: str, config, role: Optional[str] = None):
     """Instantiate the provider for one backend from ``config``.
 
     Model precedence: ``GENIUS_MODEL_<BACKEND>`` env (blank = unset) >
     ``config.models.<backend>``. An empty final value means "the CLI's own
     default model" — every provider only passes a model flag when non-empty.
+
+    ``role`` (the canonical role this provider serves) is forwarded to the
+    provider as an ``extra_params`` entry so a backend can resolve per-role
+    knobs — e.g. the claude backend reads ``GENIUS_CLAUDE_EFFORT_<ROLE>`` so
+    the plan (architect) and test (tester) stages can run at different
+    reasoning efforts despite sharing the claude backend.
     """
     mod_name, cls_name, model_attr, key_attr = BACKENDS[backend]
     provider_class = getattr(importlib.import_module(mod_name), cls_name)
@@ -165,7 +183,10 @@ def build_backend(backend: str, config):
     model_name = os.environ.get(f"GENIUS_MODEL_{backend.upper()}") or getattr(
         config.models, model_attr
     )
-    return provider_class(api_key=api_key, model_name=model_name)
+    kwargs = {"api_key": api_key, "model_name": model_name}
+    if role:
+        kwargs["role"] = role
+    return provider_class(**kwargs)
 
 
 class FallbackProvider:
@@ -285,8 +306,11 @@ def make_provider(role: str, config, default_chain: Optional[List[str]] = None):
             )
         chain = [name.lower() for name in default_chain]
     if len(chain) == 1:
-        return build_backend(chain[0], config)
+        return build_backend(chain[0], config, role=role)
     return FallbackProvider(
         role,
-        [(name, (lambda n=name: build_backend(n, config))) for name in chain],
+        [
+            (name, (lambda n=name: build_backend(n, config, role=role)))
+            for name in chain
+        ],
     )

@@ -12,6 +12,27 @@ from ag_core.utils.cli_runner import communicate_with_timeout, test_timeout
 from ag_core.utils.logger import log_transaction
 
 
+# R5 Wave 5: opt-in code-preservation discipline appended to the coder
+# system prompt for generation requests. Off by default (env unset), so the
+# system prompt stays byte-identical to the pre-R5 behavior tests pin.
+SURGICAL_EDIT_GUIDANCE = (
+    "\n\n## Code preservation (surgical edits)\n"
+    "When modifying existing code, change ONLY what the request requires:\n"
+    "- Identify the exact lines/expressions to change; leave everything else "
+    "byte-for-byte identical, including comments, formatting, and unrelated "
+    "configuration values.\n"
+    "- NEVER change model names, API keys, version pins, or unrelated config "
+    "unless explicitly asked to.\n"
+    "- Prefer the smallest correct diff over a rewrite; before finishing, "
+    "verify the surrounding code is untouched.\n"
+)
+
+
+def _surgical_edits_enabled() -> bool:
+    """Whether opt-in surgical-edit guidance augments the coder prompt."""
+    return os.getenv("GENIUS_SURGICAL_EDITS", "").lower() in ("1", "true", "yes")
+
+
 class CodexReviewerAgent(BaseAgent):
     """
     Codex Reviewer Agent that scans project files, performs code review,
@@ -59,8 +80,16 @@ class CodexReviewerAgent(BaseAgent):
 
         from ag_core.utils.prompt_templates import CODER_PROMPT
 
+        # Opt-in surgical-edit mode (GENIUS_SURGICAL_EDITS): for generation
+        # requests, ask for minimal, targeted diffs and forbid touching model
+        # names / API keys / unrelated config. Off by default, so the system
+        # prompt is byte-identical to before unless explicitly enabled.
+        system_prompt = CODER_PROMPT
+        if generation_mode and _surgical_edits_enabled():
+            system_prompt = CODER_PROMPT + SURGICAL_EDIT_GUIDANCE
+
         # Invoke provider
-        response = await self.provider.send_prompt(full_prompt, system=CODER_PROMPT)
+        response = await self.provider.send_prompt(full_prompt, system=system_prompt)
         content = response.get("content", "")
         usage = response.get("usage", {})
 

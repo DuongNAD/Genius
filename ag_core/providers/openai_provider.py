@@ -13,6 +13,38 @@ from ag_core.utils.cli_runner import (
     tail_text,
 )
 
+# Codex is a login-based desktop CLI (ChatGPT auth). If a machine also exports
+# OPENAI_API_KEY / OPENAI_BASE_URL (e.g. a LiteLLM or other OpenAI-compatible
+# proxy on localhost), codex silently routes through that proxy in API-key
+# mode instead of the ChatGPT login. In login mode (the default) those two
+# vars are stripped from the codex subprocess ONLY, so the machine-wide proxy
+# env is left intact for every other tool. Set GENIUS_CODEX_LOGIN_MODE to a
+# falsy value (0/false/no/off) to inherit them (i.e. keep proxy/API-key mode).
+_CODEX_LOGIN_STRIP = ("OPENAI_API_KEY", "OPENAI_BASE_URL")
+
+
+def _codex_subprocess_env():
+    """Environment for the codex subprocess.
+
+    Returns ``None`` (inherit the parent env unchanged) when login mode is
+    off, or when none of the proxy vars are set so there is nothing to hide.
+    Otherwise returns a copy of ``os.environ`` with the proxy OPENAI_* vars
+    removed, so codex falls back to its ChatGPT login.
+    """
+    if os.getenv("GENIUS_CODEX_LOGIN_MODE", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        return None
+    if not any(k in os.environ for k in _CODEX_LOGIN_STRIP):
+        return None
+    env = os.environ.copy()
+    for k in _CODEX_LOGIN_STRIP:
+        env.pop(k, None)
+    return env
+
 
 def _newest(paths):
     """Return the most recently modified path, tolerating ones that don't exist.
@@ -366,6 +398,14 @@ class OpenAIProvider(BaseProvider):
             cmd = [cli_path, "exec", "-", *sandbox_flags]
             if self.model_name:
                 cmd += ["-m", self.model_name]
+            # Opt-in reasoning-effort override (default off). Genius-scoped:
+            # `-c model_reasoning_effort=<v>` overrides ~/.codex/config.toml for
+            # THIS call only, so a globally-configured "ultra" can be dialed to
+            # a cheaper "high" for the pipeline without editing the user's codex
+            # config. Passed through verbatim (codex validates the value).
+            codex_effort = os.getenv("GENIUS_CODEX_EFFORT", "").strip().lower()
+            if codex_effort:
+                cmd += ["-c", f"model_reasoning_effort={codex_effort}"]
             if workdir:
                 # Point Codex's working root at a caller-provided directory so
                 # even a writable sandbox can only touch that tree.
@@ -373,7 +413,7 @@ class OpenAIProvider(BaseProvider):
             cmd.append("--json")
 
             prompt_bytes = prompt.encode("utf-8")
-            process = await spawn_cli(cmd, cli_path)
+            process = await spawn_cli(cmd, cli_path, env=_codex_subprocess_env())
             stdout, stderr = await communicate_with_timeout(
                 process, input=prompt_bytes, cli_name="Codex CLI"
             )

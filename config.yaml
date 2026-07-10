@@ -19,6 +19,12 @@ models:
   # primary. Alternative (2026-07): gemini-3.1-pro-preview (deeper research,
   # slower). Empty = account default.
   agy: "gemini-3.5-flash"
+  # nlm CLI (NotebookLM). OPT-IN backend only (no default chain uses it);
+  # enable per role with GENIUS_PROVIDER_<ROLE>=notebooklm,... This is NOT a
+  # model name: it is the default notebook id/alias to query (empty = require
+  # GENIUS_NOTEBOOKLM_NOTEBOOK at runtime). Needs a one-time `nlm login` and
+  # GENIUS_NLM_PATH pointing at the nlm executable.
+  notebooklm: ""
 scanner:
   chunk_size_limit: 8000
   exclude_patterns:

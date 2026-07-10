@@ -272,6 +272,145 @@ async def _run_code_graph(arguments: Dict[str, Any]) -> str:
     )
 
 
+_EVAL_OPS = {"grade", "compare", "list_metrics"}
+
+
+async def _run_eval(arguments: Dict[str, Any]) -> str:
+    """Grade a finished pipeline workspace against eval metrics (R5).
+
+    Read-only, in-process, JSON out (like ``code_graph``/``review``): it
+    never writes files, so a grade cannot mutate the workspace it scores.
+
+    Ops:
+    * ``grade`` - collect a workspace's artifacts/traces and score them.
+      Defaults to the deterministic metrics only (offline, no judge/token
+      spend); LLM-judge metrics are opt-in via ``metrics``. The blocking
+      file read runs off the event loop.
+    * ``compare`` - diff two grade results (``baseline`` + ``current``) and
+      flag regressions - the gate primitive.
+    * ``list_metrics`` - the built-in metric catalog (name/kind/description).
+
+    Argument errors come back as JSON ``{"error": ...}`` so agent callers
+    can self-correct, matching ``_run_code_graph``.
+    """
+    from ag_core.eval import grader
+    from ag_core.eval.compare import compare as compare_grades
+    from ag_core.eval.metrics import BUILTIN_METRICS, DEFAULT_METRICS
+
+    op = (arguments.get("op") or "grade").strip().lower()
+    if op not in _EVAL_OPS:
+        return json.dumps(
+            {"error": f"Unknown op: {op}. Valid ops: {sorted(_EVAL_OPS)}"}
+        )
+
+    if op == "list_metrics":
+        return json.dumps(
+            {
+                "op": op,
+                "metrics": [
+                    {"name": m.name, "kind": m.kind, "description": m.description}
+                    for m in BUILTIN_METRICS.values()
+                ],
+            }
+        )
+
+    if op == "compare":
+        baseline = arguments.get("baseline")
+        current = arguments.get("current")
+        if not isinstance(baseline, dict) or not isinstance(current, dict):
+            return json.dumps(
+                {
+                    "error": (
+                        "compare requires 'baseline' and 'current' grade "
+                        "objects (from a prior eval grade)."
+                    )
+                }
+            )
+        return json.dumps({"op": op, **compare_grades(baseline, current)})
+
+    # op == "grade"
+    workspace = arguments.get("workspace") or os.getcwd()
+    if not os.path.isdir(workspace):
+        return json.dumps({"error": f"Workspace directory not found: {workspace}"})
+
+    metrics = arguments.get("metrics") or list(DEFAULT_METRICS)
+    if isinstance(metrics, str):
+        metrics = [m.strip() for m in metrics.split(",") if m.strip()]
+    unknown = [m for m in metrics if m not in BUILTIN_METRICS]
+    if unknown:
+        return json.dumps(
+            {
+                "error": (
+                    f"Unknown metric(s): {unknown}. "
+                    f"Valid metrics: {sorted(BUILTIN_METRICS)}"
+                )
+            }
+        )
+
+    prompt = arguments.get("prompt") or ""
+    case = await asyncio.to_thread(grader.collect_case, workspace, prompt)
+    needs_judge = any(BUILTIN_METRICS[m].kind == "llm" for m in metrics)
+    judge = None
+    if needs_judge:
+        from ag_core.eval.judge import default_judge
+
+        judge = default_judge()
+    result = await grader.grade_case(case, metrics, judge=judge)
+    result["op"] = op
+    result["workspace"] = workspace
+    return json.dumps(result)
+
+
+_NOTEBOOKLM_TOOLS = {"notebooklm_query", "notebooklm_list", "notebooklm_research"}
+
+
+async def _run_notebooklm(name: str, arguments: Dict[str, Any]) -> str:
+    """Dispatch a notebooklm_* tool to the shared ``nlm`` CLI helpers.
+
+    Integrates NotebookLM into Genius workflows (query a curated notebook, or
+    deep-research a topic into one). The ``nlm`` helpers are already async
+    subprocess calls, so they never block the event loop. Failures from that
+    layer (missing CLI, expired ``nlm login``, empty result) propagate as the
+    tool's JSON-RPC / HTTP error through dispatch_tool's normal handling.
+    ``notebooklm_research`` intentionally MUTATES: it creates a notebook and
+    imports discovered sources - that is the tool's purpose, not a side effect.
+    """
+    from ag_core.providers import notebooklm_provider as nlm
+
+    if name == "notebooklm_list":
+        notebooks = await nlm.nlm_list_notebooks()
+        return json.dumps({"count": len(notebooks), "notebooks": notebooks})
+
+    if name == "notebooklm_query":
+        notebook = (arguments.get("notebook") or "").strip()
+        query = (arguments.get("query") or "").strip()
+        if not notebook:
+            raise ValueError("notebooklm_query requires a non-empty 'notebook'.")
+        if not query:
+            raise ValueError("notebooklm_query requires a non-empty 'query'.")
+        data = await nlm.nlm_query(
+            notebook,
+            query,
+            source_ids=(arguments.get("source_ids") or None),
+            conversation_id=(arguments.get("conversation_id") or None),
+        )
+        return json.dumps(data)
+
+    # notebooklm_research
+    query = (arguments.get("query") or "").strip()
+    if not query:
+        raise ValueError("notebooklm_research requires a non-empty 'query'.")
+    result = await nlm.nlm_research(
+        query,
+        mode=(arguments.get("mode") or "fast"),
+        source=(arguments.get("source") or "web"),
+        notebook=(arguments.get("notebook") or None),
+        title=(arguments.get("title") or None),
+        question=(arguments.get("question") or None),
+    )
+    return json.dumps(result)
+
+
 TOOLS = [
     {
         "name": "research",
@@ -569,6 +708,144 @@ TOOLS = [
                 },
             },
             "required": [],
+        },
+    },
+    {
+        "name": "eval",
+        "description": (
+            "Grade a finished pipeline workspace against eval metrics "
+            "(R5 eval flywheel), in-process and read-only (JSON out, never "
+            "writes files). op=grade scores a workspace's artifacts/traces; "
+            "op=compare diffs two grades and flags regressions; "
+            "op=list_metrics lists the built-in metrics. grade defaults to "
+            "the deterministic metrics (artifacts_present, design_wellformed, "
+            "code_syntax_valid) which run offline; LLM-as-judge metrics "
+            "(task_success, grounding, design_quality, final_response_quality) "
+            "are opt-in via 'metrics' and call a provider."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "op": {
+                    "type": "string",
+                    "enum": ["grade", "compare", "list_metrics"],
+                    "description": "Operation (default: grade)",
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": (
+                        "Workspace to grade for op=grade (default: server cwd)"
+                    ),
+                },
+                "metrics": {
+                    "type": "string",
+                    "description": (
+                        "op=grade: comma-separated metric names "
+                        "(default: the deterministic set). Use op=list_metrics "
+                        "to see all names."
+                    ),
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "op=grade: the original user request, used by the "
+                        "task_success/grounding judge metrics"
+                    ),
+                },
+                "baseline": {
+                    "type": "object",
+                    "description": "op=compare: the baseline grade result",
+                },
+                "current": {
+                    "type": "object",
+                    "description": "op=compare: the current grade result",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "notebooklm_list",
+        "description": (
+            "List the NotebookLM notebooks on the authenticated account "
+            "(id + title + source_count), via the local `nlm` CLI. Read-only. "
+            "Use it to discover a notebook id to pass to notebooklm_query. "
+            "Requires a one-time `nlm login` and GENIUS_NLM_PATH set."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "notebooklm_query",
+        "description": (
+            "Ask a question against an EXISTING NotebookLM notebook and get a "
+            "grounded, cited answer (the model answers only from that "
+            "notebook's sources). Returns JSON with 'answer', 'citations' and "
+            "'references'. Read-only; needs `nlm login`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "notebook": {
+                    "type": "string",
+                    "description": "Notebook id or alias (see notebooklm_list)",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "The question to ask the notebook's sources",
+                },
+                "source_ids": {
+                    "type": "string",
+                    "description": "Optional comma-separated source ids to restrict to",
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Optional conversation id for follow-up questions",
+                },
+            },
+            "required": ["notebook", "query"],
+        },
+    },
+    {
+        "name": "notebooklm_research",
+        "description": (
+            "Deep-research a topic with NotebookLM and answer from the sources "
+            "it finds. MUTATES: discovers web/Drive sources, imports them into "
+            "a notebook (a new one unless 'notebook' is given), then queries "
+            "it. Returns JSON with 'notebook_id' and a cited 'answer'. Runs "
+            "synchronously - mode 'fast' ~30s, 'deep' ~5min (raise "
+            "GENIUS_NLM_RESEARCH_TIMEOUT for deep). Needs `nlm login`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The research topic to search for",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["fast", "deep"],
+                    "description": "fast (~30s, ~10 sources) or deep (~5min, ~40, web only); default fast",
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["web", "drive"],
+                    "description": "Where to search for new sources (default web)",
+                },
+                "notebook": {
+                    "type": "string",
+                    "description": "Optional existing notebook id to enrich (default: create a new one)",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Optional title for the new notebook (when none is given)",
+                },
+                "question": {
+                    "type": "string",
+                    "description": "Optional final question to ask (defaults to the research query)",
+                },
+            },
+            "required": ["query"],
         },
     },
 ]
@@ -994,6 +1271,12 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
 
     if name == "code_graph":
         return await _run_code_graph(arguments)
+
+    if name == "eval":
+        return await _run_eval(arguments)
+
+    if name in _NOTEBOOKLM_TOOLS:
+        return await _run_notebooklm(name, arguments)
 
     prompt = arguments.get("prompt", "")
     context = arguments.get("context")

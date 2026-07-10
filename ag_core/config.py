@@ -88,6 +88,10 @@ class ModelsConfig(BaseModel):
     grok: str = "grok-2"
     # Antigravity 2.0 (agy CLI / Gemini), the default Researcher primary.
     agy: str = ""
+    # NotebookLM (nlm CLI). Opt-in backend only. This is NOT an LLM model name:
+    # it holds the default notebook id/alias the provider queries (override at
+    # runtime with GENIUS_NOTEBOOKLM_NOTEBOOK or GENIUS_MODEL_NOTEBOOKLM).
+    notebooklm: str = ""
 
 
 class ScannerConfig(BaseModel):

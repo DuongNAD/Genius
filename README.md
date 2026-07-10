@@ -100,7 +100,7 @@ python mcp_server.py stdio      # chế độ MCP stdio cho Antigravity
 python mcp_server.py            # (tuỳ chọn) chế độ HTTP, cổng 8000
 ```
 
-Server hỗ trợ đầy đủ handshake MCP (`initialize` / `notifications/initialized` / `ping`) và expose **14 tool** cùng **MCP resources**:
+Server hỗ trợ đầy đủ handshake MCP (`initialize` / `notifications/initialized` / `ping`) và expose **17 tool** cùng **MCP resources**:
 
 | Tool | Chức năng |
 |------|-----------|
@@ -112,6 +112,7 @@ Server hỗ trợ đầy đủ handshake MCP (`initialize` / `notifications/init
 | `debate` | Tinh chỉnh bản thiết kế theo kiểu phản biện: critic role Researcher (mặc định agy/Gemini) phê bình ↔ Claude chỉnh sửa (tối đa 3 vòng, dừng sớm khi critic trả lời `[APPROVED]`). Chạy in-process, không cần Skill Server |
 | `review` | Review một đoạn code bất kỳ bằng tác tử Codex (in-process, **không ghi file**) |
 | `code_graph` | **Truy vấn đồ thị code** của một workspace (read-only, in-process, kiểu CodexGraph — không cần graph DB): `op` ∈ `map` (repo map xếp hạng theo ngân sách token) / `definition` / `references` / `importers` / `imports` / `skeleton`. Python qua `ast`, JS/TS/Go qua tree-sitter. Trả JSON |
+| `notebooklm_list`, `notebooklm_query`, `notebooklm_research` | **NotebookLM** (opt-in, shell ra CLI `nlm`): liệt kê notebook / hỏi-đáp **có trích dẫn** từ nguồn của một notebook có sẵn / **deep-research** web→notebook rồi truy vấn (**MUTATES**: `notebooklm_research` tạo notebook + import nguồn; `fast`≈30s, `deep`≈5min). Cần `nlm login` một lần + `GENIUS_NLM_PATH`. Trả JSON |
 
 Ngoài tool, server còn expose **MCP resources**: các artifact của pipeline (`research.md`, `design.md`, `review.md`, `audit.md`, `deploy.md`, `plan.md` và bản lưu `.bak` của chúng) dưới dạng URI `genius://artifacts/<tên-file>` (mimeType `text/markdown`). Antigravity có thể `resources/list` / `resources/read` để đọc trực tiếp kết quả từng giai đoạn — chỉ đúng danh sách artifact trên (whitelist cứng, không bao giờ lộ file khác của workspace); URI sai hoặc file chưa tồn tại trả về lỗi `-32002`.
 
@@ -185,7 +186,7 @@ Genius **mặc định** chạy mọi role trên một chuỗi backend dự phò
 set GENIUS_PROVIDER_RESEARCHER=grok,agy
 ```
 
-- `GENIUS_PROVIDER_<ROLE>` (comma-separated: `grok`, `agy`, `claude`, `codex`) ghi đè chuỗi mặc định của từng role (role Researcher vẫn nhận biến legacy `GENIUS_PROVIDER_GROK`). Biến `GENIUS_PROVIDER_FALLBACK` cũ đã **deprecated**: chuỗi dự phòng giờ là mặc định nên biến này được chấp nhận nhưng không còn tác dụng.
+- `GENIUS_PROVIDER_<ROLE>` (comma-separated: `grok`, `agy`, `claude`, `codex`, `notebooklm`) ghi đè chuỗi mặc định của từng role (role Researcher vẫn nhận biến legacy `GENIUS_PROVIDER_GROK`). Backend `notebooklm` (opt-in) trả lời từ nguồn của một notebook NotebookLM đã cấu hình — cần `nlm login` một lần + `GENIUS_NLM_PATH`, và `GENIUS_NOTEBOOKLM_NOTEBOOK`/`config.models.notebooklm` chỉ notebook id. Biến `GENIUS_PROVIDER_FALLBACK` cũ đã **deprecated**: chuỗi dự phòng giờ là mặc định nên biến này được chấp nhận nhưng không còn tác dụng.
 - Các biến này áp dụng cho **cả ba đường gọi**: Skill Server (`serve.py`), **MCP/Antigravity** (`mcp_server.py`) và distributed worker — chỉ cần set trong `.env` hoặc trong khối `env` của `mcp_config.json`.
 - Kiểm tra chuỗi hiệu lực của từng role (và đường dẫn `agy` được resolve): `python serve.py --doctor`.
 

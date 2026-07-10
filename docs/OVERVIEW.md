@@ -13,11 +13,11 @@
 **Genius** (tên nội bộ *Antigravity 2.0*) là một **framework đa tác tử (multi-agent) phân tán** dùng để **tự động hoá lập trình, refactor và kiểm thử phần mềm**. Hệ thống mô phỏng một đội kỹ sư phần mềm: sáu tác tử AI chuyên biệt (Nghiên cứu → Kiến trúc → Lập trình → Kiểm thử → Bảo mật → DevOps), mỗi tác tử chạy như một **microservice FastAPI độc lập**, được điều phối bởi một **orchestrator bất đồng bộ (asyncio)**.
 
 Điểm đặc trưng:
-- **Local-CLI-first:** các tác tử gọi CLI cục bộ (`agy` — Antigravity/Gemini, `claude`, `codex`; `grok` opt-in) qua chuỗi fallback per-role, thay vì gọi thẳng API đám mây; API key chỉ là phương án dự phòng.
+- **Local-CLI-first:** các tác tử gọi CLI cục bộ (`agy` — Antigravity/Gemini, `claude`, `codex`; `grok` và `nlm`/NotebookLM opt-in) qua chuỗi fallback per-role, thay vì gọi thẳng API đám mây; API key chỉ là phương án dự phòng.
 - **Hai chế độ vận hành:** HTTP trực tiếp tới từng server vai trò, hoặc **phân tán** qua một Central Hub điều phối worker qua WebSocket (đang chạy thật: hub trên máy Mac + worker grok trên máy thứ hai).
 - **Vòng lặp tự chữa (self-healing):** code sinh ra được chạy `pytest`/`flake8` thật, log lỗi được đưa ngược lại cho tác tử Codex để tự vá.
 - **Ngữ cảnh theo đồ thị code:** mỗi call agent nhận workspace đã được xếp hạng PageRank + cắt theo ngân sách token (`GENIUS_CONTEXT_TOKEN_BUDGET`, kiểu aider repo-map/CodexGraph) thay vì nguyên cả repo.
-- **Tích hợp MCP:** cắm trực tiếp vào Google Antigravity 2.0 như một bộ điều phối (14 tool + resources), gồm cả tool `code_graph` để agent tự truy vấn cấu trúc repo.
+- **Tích hợp MCP:** cắm trực tiếp vào Google Antigravity 2.0 như một bộ điều phối (17 tool + resources), gồm cả tool `code_graph` để agent tự truy vấn cấu trúc repo và bộ tool `notebooklm_*` để nghiên cứu có nguồn qua NotebookLM.
 
 **Quy mô & sức khỏe hiện tại (2026-07-04, commit `c8e1ea4`):**
 
@@ -27,7 +27,7 @@
 | Số file `.py` (không tính scratch) | 128 |
 | Module trong `ag_core/` | 45 |
 | File test (root + `tests/`) | 70 |
-| Tổng số test thu thập | **786 (784 pass, 2 skip)** |
+| Tổng số test thu thập | **823 (821 pass, 2 skip)** |
 | Lint `flake8` | ✅ 0 lỗi |
 | Format `black 24.4.2` | ✅ sạch |
 | Số commit | 113 (khởi tạo 2026-06-27) |
@@ -79,7 +79,7 @@ Chuỗi provider ghi đè được per-role qua `GENIUS_PROVIDER_<ROLE>`; backen
 
 - **`serve.py`** — menu tương tác/CLI khởi chạy các server vai trò. Cờ: `--roles`, `--prompt`, `--auto-pilot`, `--distributed`, `--pipeline {sequential,e2e}`, `--hub-port`, `--doctor`. Ghi cổng thực đã bind vào `.agents/service_registry.json` để phát hiện động.
 - **`orchestrator.py`** — bộ điều phối pipeline bất đồng bộ (gọi service qua `httpx`, poll `/status`, retry bằng `tenacity`).
-- **`mcp_server.py`** — MCP server (stdio/HTTP) expose 14 tool + MCP resources cho Antigravity (xem §11).
+- **`mcp_server.py`** — MCP server (stdio/HTTP) expose 17 tool + MCP resources cho Antigravity (xem §11).
 - **`dashboard.py`** — bảng giám sát port 8080.
 
 ### 3.4 Skill Server factory (`ag_core/skill_app.py`)
@@ -187,10 +187,11 @@ Cả hai pipeline **không còn đổ nguyên workspace** vào mỗi call: mọi
 
 ## 11. Tích hợp MCP (Antigravity 2.0)
 
-`mcp_server.py` (JSON-RPC qua stdio hoặc HTTP) expose **14 tool** + **MCP resources**:
+`mcp_server.py` (JSON-RPC qua stdio hoặc HTTP) expose **17 tool** + **MCP resources**:
 - Đơn tác tử: `research`, `design`, `code`, `unit_test`, `security_audit`, `deploy` (dựng in-process qua `ag_core/agent_factory.py`, bundle stateless).
 - Pipeline: **`orchestrate`** (chạy toàn bộ pipeline nền, trả `job_id` ngay; `require_approval: true` → tạm dừng `awaiting_approval` sau research/design/code) + **`orchestrate_status`** (poll → stages/artifacts/awaiting_stage) + **`orchestrate_approve`**/**`orchestrate_reject`**.
 - Tiện ích: **`doctor`** (preflight, READY/NOT READY), **`debate`** (critic researcher ⇄ Claude, max 3 vòng, `[APPROVED]` dừng sớm), **`review`** (review code dán vào, không ghi file), **`code_graph`** (truy vấn đồ thị code read-only: `map`/`definition`/`references`/`importers`/`imports`/`skeleton`, JSON out — thêm tool mới phải cập nhật `tests/test_realrun_mcp.py::EXPECTED_TOOLS` vì danh sách tên bị ghim chính xác).
+- NotebookLM (opt-in, shell ra CLI `nlm`): **`notebooklm_list`** / **`notebooklm_query`** (hỏi-đáp **có trích dẫn** từ nguồn của một notebook có sẵn) / **`notebooklm_research`** (**MUTATES**: deep-research web/Drive → import vào notebook rồi truy vấn; `fast`≈30s, `deep`≈5min). Cần `nlm login` một lần + `GENIUS_NLM_PATH`; dùng chung helper với backend provider `notebooklm`.
 - Resources: artifact pipeline (`research/design/review/audit/deploy/plan.md` + `.bak`) dưới URI `genius://artifacts/<tên>` — whitelist cứng, tên sai → `-32002`. stdout ở chế độ stdio phải là JSON-RPC thuần (log đi stderr).
 
 Đăng ký trong `~/.gemini/antigravity/mcp_config.json` bằng đường dẫn tuyệt đối tới `python.exe`. Cần chạy `python serve.py` (cổng 8001–8006) trước khi dùng `orchestrate`; các tool còn lại chạy in-process.
@@ -202,7 +203,7 @@ Cả hai pipeline **không còn đổ nguyên workspace** vào mỗi call: mọi
 - **Bố cục:** test ở **hai nơi** — `test_*.py` ở root (~45 file) và `tests/` (~15 file). `verify_*.py` là **script thủ công**, không phải gate. `pytest.ini` đặt `norecursedirs = projects .agents`.
 - **`conftest.py`:** seed mock key; fixture autouse đổi `SKILL_API_KEY` theo tên file (`valid-api-key` cho `*distributed*`/`*robustness*`/`*milestone3_adversarial*`, còn lại `mock-skill-key`); monkeypatch cho phép plain-SHA256 cho test legacy (trừ `test_upgrades`); tắt debate & cache để xác định.
 - **Triết lý "Challenger / Forensic Auditor"** (`TEST_INFRA.md`): test opaque-box theo yêu cầu, dùng **`MockNetworkProtocol`** tiêm lỗi (latency, drop packet, HTTP 429/503/401/400) vào **hub/worker production thật**. Mandate liêm chính: **cấm hardcode kết quả / stub facade** — có auditor độc lập kiểm tra.
-- **Số lượng:** **786 test thu thập (784 pass, 2 skip)**, ~2 phút. Các cụm lớn: `test_e2e.py` 74, `tests/test_distributed.py` 71, `test_e2e_phase5.py` 40; R2–R4 bổ sung `tests/test_upgrades.py`, `test_repo_graph.py`, `test_agent_factory.py`, `test_code_graph_index.py`, `test_mcp_code_graph.py`, `test_cast_chunking.py`, `tests/test_realrun_mcp.py` (stdio subprocess thật, ghim chính xác danh sách 14 tool), `tests/test_realrun_hmac.py`.
+- **Số lượng:** **823 test thu thập (821 pass, 2 skip)**, ~2 phút. Các cụm lớn: `test_e2e.py` 74, `tests/test_distributed.py` 71, `test_e2e_phase5.py` 40; R2–R4 bổ sung `tests/test_upgrades.py`, `test_repo_graph.py`, `test_agent_factory.py`, `test_code_graph_index.py`, `test_mcp_code_graph.py`, `test_cast_chunking.py`, `tests/test_realrun_mcp.py` (stdio subprocess thật, ghim chính xác danh sách 17 tool), `tests/test_notebooklm.py` (backend + tool NotebookLM), `tests/test_realrun_hmac.py`.
 - **CI (`.github/workflows/ci.yml`):** ma trận per-OS theo nhánh — `windows-latest` cho `win`/`main`, `macos-latest` cho `mac`/`main` (bản mac chạy kèm uvloop) — Python 3.11, `pip install -r requirements.txt` → `python -m pytest` (`pytest-timeout` 300s/test làm backstop treo). Lint **không** nằm trong CI mà ở **pre-commit** (pin black 24.4.2; flake8 nay có trong `requirements.txt` @7.3.0).
 - **Không bao giờ chạy 2 tiến trình pytest cùng lúc** trên một máy (dùng chung `genius.db` + service registry).
 
@@ -222,7 +223,7 @@ Bốn round nâng cấp liên tiếp (R1 hardening → R2 survey ~34 fix → R3 
 
 | Gate | Kết quả |
 |---|---|
-| `python -m pytest` (lệnh CI) | ✅ **784 passed, 2 skipped** (~2 phút) |
+| `python -m pytest` (lệnh CI) | ✅ **821 passed, 2 skipped** (~2 phút) |
 | `flake8` | ✅ 0 lỗi |
 | `black 24.4.2` (bản pin) | ✅ sạch |
 | CI GitHub Actions | ✅ xanh cả 3 nhánh: `win`/`main` @ `c8e1ea4` (windows-latest), `mac` @ `4f5bcba` (macos-latest, chạy kèm uvloop) |
@@ -238,7 +239,7 @@ Bốn round nâng cấp liên tiếp (R1 hardening → R2 survey ~34 fix → R3 
 - **Kiến trúc rõ ràng, tách bạch:** vai trò → provider → CLI phân lớp gọn; skill server stateless dễ scale.
 - **Bảo mật nghiêm túc cho một dự án nội bộ:** HMAC-only ở production, JWT có chống replay (`jti`), che secret trong log git, chặn path-traversal ở nhiều lớp.
 - **Chống chịu tốt:** self-healing loop chạy test thật, degraded mode, doctor, idempotency, timeout CLI, `gather_or_raise`.
-- **Văn hoá test mạnh:** 786 test với tiêm lỗi mạng thật (MockNetworkProtocol) + smoke test subprocess stdio MCP thật, mandate cấm giả lập kết quả.
+- **Văn hoá test mạnh:** 823 test với tiêm lỗi mạng thật (MockNetworkProtocol) + smoke test subprocess stdio MCP thật, mandate cấm giả lập kết quả.
 
 ### 15.2 Rủi ro & Nợ kỹ thuật
 1. **Phụ thuộc `.agents/skills/<role>/run.py` + `api.py` sinh cục bộ** (bị gitignore). Nhiều wrapper (`claude`, `codex`, `grok`, `tester`) sẽ **fail nếu skill chưa được sinh** — rào cản onboarding.
@@ -307,6 +308,7 @@ Tổng hợp từ `PROJECT.md` (lưu trong [`history/`](./history/)). Toàn bộ
 | R2 (2026-07-03) | Survey-driven | 4 agent khảo sát song song → ~34 fix: event-loop offload, distributed (BoundedTasks/queue caps), MCP (workspace map, approval timeout), dashboard, per-OS CI, pin requirements (`60d8861`). Tách nhánh per-OS `win`/`mac`. |
 | R3 (2026-07-04) | Graph context | `repo_graph.py` — ngữ cảnh budgeted theo PageRank + `GENIUS_CONTEXT_TOKEN_BUDGET` (`fe892d4`); mac thêm uvloop. |
 | R4 (2026-07-04) | Factory + CodexGraph | Template-method 6 agent + `agent_factory.py`; `code_parse`/`graph_index` + tool MCP `code_graph` (14 tool); tree-sitter JS/TS/Go; cAST `split_file`; vá crash tiềm ẩn stdio-boot (`c8e1ea4`). |
+| R5 (2026-07-06) | NotebookLM | Backend provider opt-in `notebooklm` (shell ra CLI `nlm`, self-auth `nlm login`) + 3 tool MCP `notebooklm_list`/`notebooklm_query`/`notebooklm_research` (14→17 tool); wiring doctor + config knobs (`GENIUS_NLM_PATH`, `GENIUS_NOTEBOOKLM_NOTEBOOK`); `tests/test_notebooklm.py`. |
 
 ---
 
