@@ -132,7 +132,12 @@ def test_extract_notebook_id_flat_and_nested():
 
 def test_nlm_query_builds_args_and_parses_answer():
     proc = _json_proc({"answer": "42", "conversation_id": "c1"})
-    with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mex:
+    # Force the CLI to resolve to the benign "nlm" literal so this argv-shape
+    # test is deterministic whether or not a real nlm is installed on PATH.
+    with (
+        patch("shutil.which", return_value=None),
+        patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mex,
+    ):
         mex.return_value = proc
         data = _run(nlm.nlm_query("nb1", "what is the answer?"))
 
