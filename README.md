@@ -100,27 +100,47 @@ python mcp_server.py stdio      # chế độ MCP stdio cho Antigravity
 python mcp_server.py            # (tuỳ chọn) chế độ HTTP, cổng 8000
 ```
 
-Server hỗ trợ đầy đủ handshake MCP (`initialize` / `notifications/initialized` / `ping`) và expose **17 tool** cùng **MCP resources**:
+Server xây trên **MCP Python SDK chính thức** (`mcp`), hỗ trợ đầy đủ handshake (`initialize` với thương lượng `protocolVersion` / `notifications/initialized` / `ping`) và expose **18 tool** cùng **MCP resources**. Trên wire mỗi tool được đặt tên **`genius_<tên>`** (namespaced để không đụng với các MCP server khác trong cùng cấu hình Antigravity); schema tham số dùng đúng khoá camelCase `inputSchema`, và lỗi khi gọi tool trả về `isError: true` (kèm thông báo) thay vì lỗi protocol, để agent tự sửa. Có thể lộ **tập con tool** qua biến `GENIUS_MCP_TOOLS=genius_orchestrate,genius_doctor,...` để giữ dưới ngân sách ~100 tool khi bật nhiều MCP.
 
-| Tool | Chức năng |
+| Tool (tên trên wire) | Chức năng |
 |------|-----------|
-| `research`, `design`, `code`, `unit_test`, `security_audit`, `deploy` | Gọi từng tác tử đơn lẻ (in-process, dựng qua `ag_core/agent_factory.py`) |
-| `orchestrate` | **Chạy TOÀN BỘ pipeline** (research → design → code → test + security + deploy). Trả về `job_id` ngay lập tức. Truyền `require_approval: true` để pipeline **tạm dừng chờ duyệt** (`awaiting_approval`) sau các giai đoạn research/design/code |
-| `orchestrate_status` | Poll trạng thái job (`running` / `awaiting_approval` / `completed` / `failed`), kèm `elapsed_seconds`, tiến độ từng giai đoạn (`stages`: done/pending suy ra từ artifact trên đĩa), `artifacts_ready` (các URI đọc được ngay) và `awaiting_stage` khi đang chờ duyệt |
-| `orchestrate_approve` / `orchestrate_reject` | Duyệt tiếp hoặc huỷ một job đang `awaiting_approval` (trạng thái được lật đồng bộ — poll không bao giờ thấy pause cũ) |
-| `doctor` | Kiểm tra sẵn sàng (preflight): CLI agy/claude/codex (grok tuỳ chọn), `SKILL_API_KEY`, chuỗi fallback provider. **Nên gọi trước `orchestrate`** — trả về báo cáo READY / NOT READY, không có side effect |
-| `debate` | Tinh chỉnh bản thiết kế theo kiểu phản biện: critic role Researcher (mặc định agy/Gemini) phê bình ↔ Claude chỉnh sửa (tối đa 3 vòng, dừng sớm khi critic trả lời `[APPROVED]`). Chạy in-process, không cần Skill Server |
-| `review` | Review một đoạn code bất kỳ bằng tác tử Codex (in-process, **không ghi file**) |
-| `code_graph` | **Truy vấn đồ thị code** của một workspace (read-only, in-process, kiểu CodexGraph — không cần graph DB): `op` ∈ `map` (repo map xếp hạng theo ngân sách token) / `definition` / `references` / `importers` / `imports` / `skeleton`. Python qua `ast`, JS/TS/Go qua tree-sitter. Trả JSON |
-| `notebooklm_list`, `notebooklm_query`, `notebooklm_research` | **NotebookLM** (opt-in, shell ra CLI `nlm`): liệt kê notebook / hỏi-đáp **có trích dẫn** từ nguồn của một notebook có sẵn / **deep-research** web→notebook rồi truy vấn (**MUTATES**: `notebooklm_research` tạo notebook + import nguồn; `fast`≈30s, `deep`≈5min). Cần `nlm login` một lần + `GENIUS_NLM_PATH`. Trả JSON |
+| `genius_research`, `genius_design`, `genius_code`, `genius_unit_test`, `genius_security_audit`, `genius_deploy` | Gọi từng tác tử đơn lẻ (in-process, dựng qua `ag_core/agent_factory.py`) |
+| `genius_orchestrate` | **Chạy TOÀN BỘ pipeline** (research → design → code → test + security + deploy). Trả về `job_id` ngay lập tức. Truyền `require_approval: true` để pipeline **tạm dừng chờ duyệt** (`awaiting_approval`) sau các giai đoạn research/design/code |
+| `genius_orchestrate_status` | Poll trạng thái job (`running` / `awaiting_approval` / `completed` / `failed`), kèm `elapsed_seconds`, tiến độ từng giai đoạn (`stages`: done/pending suy ra từ artifact trên đĩa), `artifacts_ready` (các URI đọc được ngay) và `awaiting_stage` khi đang chờ duyệt |
+| `genius_orchestrate_approve` / `genius_orchestrate_reject` | Duyệt tiếp hoặc huỷ một job đang `awaiting_approval` (trạng thái được lật đồng bộ — poll không bao giờ thấy pause cũ) |
+| `genius_doctor` | Kiểm tra sẵn sàng (preflight): CLI agy/claude/codex (grok tuỳ chọn), `SKILL_API_KEY`, chuỗi fallback provider. **Nên gọi trước `genius_orchestrate`** — trả về báo cáo READY / NOT READY, không có side effect |
+| `genius_debate` | Tinh chỉnh bản thiết kế theo kiểu phản biện: critic role Researcher (mặc định agy/Gemini) phê bình ↔ Claude chỉnh sửa (tối đa 3 vòng, dừng sớm khi critic trả lời `[APPROVED]`). Chạy in-process, không cần Skill Server |
+| `genius_review` | Review một đoạn code bất kỳ bằng tác tử Codex (in-process, **không ghi file**) |
+| `genius_code_graph` | **Truy vấn đồ thị code** của một workspace (read-only, in-process, kiểu CodexGraph — không cần graph DB): `op` ∈ `map` (repo map xếp hạng theo ngân sách token) / `definition` / `references` / `importers` / `imports` / `skeleton`. Python qua `ast`, JS/TS/Go qua tree-sitter. Trả JSON |
+| `genius_eval` | **Chấm điểm** một lần chạy pipeline (metrics tất định + grader) — dùng cho eval flywheel (R5) |
+| `genius_notebooklm_list`, `genius_notebooklm_query`, `genius_notebooklm_research` | **NotebookLM** (opt-in, shell ra CLI `nlm`): liệt kê notebook / hỏi-đáp **có trích dẫn** từ nguồn của một notebook có sẵn / **deep-research** web→notebook rồi truy vấn (**MUTATES**: `genius_notebooklm_research` tạo notebook + import nguồn; `fast`≈30s, `deep`≈5min). Cần `nlm login` một lần + `GENIUS_NLM_PATH`. Trả JSON |
 
 Ngoài tool, server còn expose **MCP resources**: các artifact của pipeline (`research.md`, `design.md`, `review.md`, `audit.md`, `deploy.md`, `plan.md` và bản lưu `.bak` của chúng) dưới dạng URI `genius://artifacts/<tên-file>` (mimeType `text/markdown`). Antigravity có thể `resources/list` / `resources/read` để đọc trực tiếp kết quả từng giai đoạn — chỉ đúng danh sách artifact trên (whitelist cứng, không bao giờ lộ file khác của workspace); URI sai hoặc file chưa tồn tại trả về lỗi `-32002`.
 
 > `orchestrate` chạy pipeline dưới dạng tác vụ nền (async background job) nên không làm Antigravity bị treo chờ. Vì nó định tuyến qua các Skill Server FastAPI, **cần chạy `python serve.py` trước** (các cổng 8001–8006).
 
 ### Đăng ký vào Antigravity
-Thêm Genius vào file cấu hình MCP của Antigravity tại `~/.gemini/antigravity/mcp_config.json` (giữ nguyên các server sẵn có, chỉ **merge** thêm khoá `genius`):
+App **Antigravity** (Antigravity 2.0 / IDE / CLI dùng chung một file) đọc cấu hình MCP tại `~/.gemini/config/mcp_config.json`. Merge thêm khoá `genius` (giữ nguyên các server sẵn có). Xem file mẫu sẵn có trong repo: [`mcp_config.example.json`](mcp_config.example.json).
 
+**macOS / Linux:**
+```json
+{
+  "mcpServers": {
+    "genius": {
+      "command": "/absolute/path/to/python3",
+      "args": ["/absolute/path/to/Genius/mcp_server.py", "stdio"],
+      "env": {
+        "GENIUS_AGY_PATH": "/absolute/path/to/agy",
+        "GENIUS_PROVIDER_RESEARCHER": "claude,agy",
+        "GENIUS_PROVIDER_CODEX": "agy,claude",
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+      }
+    }
+  }
+}
+```
+
+**Windows:**
 ```json
 {
   "mcpServers": {
@@ -132,9 +152,10 @@ Thêm Genius vào file cấu hình MCP của Antigravity tại `~/.gemini/antigr
 }
 ```
 
-- Dùng **đường dẫn tuyệt đối tới `python.exe`** (do `python` thường không nằm trong PATH; có thể lấy bằng `py -c "import sys; print(sys.executable)"`).
-- **Không cần khối `env` chứa API key**: các CLI tự xác thực (`agy` dùng chung phiên đăng nhập Antigravity IDE, app desktop của Codex/Claude), còn `skill_api_key` được đọc nhất quán từ `config.yaml` ở cả hai phía.
-- Sau khi sửa file, **khởi động lại Antigravity** để nó nạp MCP server `genius`.
+- Dùng **đường dẫn tuyệt đối tới interpreter** (`python` thường không nằm trong PATH; lấy bằng `python3 -c "import sys; print(sys.executable)"` hoặc `py -c "..."`).
+- Khối **`env`** rất quan trọng vì `mcp_server.py` **không đọc `.env`** — mọi cấu hình (đường dẫn CLI, chuỗi provider) phải nằm ở đây hoặc trong môi trường của tiến trình cha. Đặt `PATH` để Antigravity tìm được `claude`/`grok`/`agy`; đặt `GENIUS_PROVIDER_*` để chọn backend (ví dụ bỏ `codex` nếu chưa cài).
+- **Không cần API key**: các CLI tự xác thực (`agy` dùng chung phiên đăng nhập Antigravity, app desktop của Codex/Claude), còn `skill_api_key` đọc từ `config.yaml`.
+- Sau khi sửa file, **khởi động lại Antigravity** rồi mở panel *MCP Servers* — server `genius` phải hiện **connected** và các tool `genius_*` hiển thị **kèm tham số**.
 
 ### Quy trình dùng từ Antigravity (đã kiểm chứng chạy thật)
 

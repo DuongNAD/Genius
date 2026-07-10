@@ -17,7 +17,7 @@
 - Test ở **hai nơi**: `test_*.py` ở root và `tests/`. `pytest.ini` đặt `norecursedirs = projects .agents`.
 - `verify_*.py` ở root là **script thủ công** (chạy `python verify_*.py`), không phải gate pytest.
 - `conftest.py`: seed mock API key; fixture autouse đổi `SKILL_API_KEY` theo tên file (`valid-api-key` cho `*distributed*`/`*robustness*`/`*milestone3_adversarial*`, còn lại `mock-skill-key`); monkeypatch cho phép plain-SHA256 cho test legacy (**trừ** `test_upgrades` và `tests/test_realrun_hmac.py` — hai file này strict HMAC-only); tắt debate & response-cache để chạy xác định.
-- Các cụm test mới từ R2–R4: `tests/test_upgrades.py` (hardening R2), `test_repo_graph.py` (ngữ cảnh budgeted R3), `test_agent_factory.py` / `test_code_graph_index.py` / `test_mcp_code_graph.py` / `test_cast_chunking.py` (R4), `tests/test_realrun_mcp.py` (subprocess stdio MCP **thật**, ghim CHÍNH XÁC danh sách 17 tool — thêm tool mới phải cập nhật `EXPECTED_TOOLS`), `tests/test_notebooklm.py` (backend provider + tool `notebooklm_*` qua CLI `nlm`, mock subprocess), `tests/test_realrun_hmac.py`.
+- Các cụm test mới từ R2–R4: `tests/test_upgrades.py` (hardening R2), `test_repo_graph.py` (ngữ cảnh budgeted R3), `test_agent_factory.py` / `test_code_graph_index.py` / `test_mcp_code_graph.py` / `test_cast_chunking.py` (R4), `tests/test_realrun_mcp.py` (subprocess stdio MCP **thật** qua SDK chính thức, ghim CHÍNH XÁC bộ 18 tool `genius_*` — thêm tool mới phải cập nhật `EXPECTED_TOOLS`), `tests/test_notebooklm.py` (backend provider + tool `notebooklm_*` qua CLI `nlm`, mock subprocess), `tests/test_realrun_hmac.py`.
 
 ## 3. Cấu trúc phủ (coverage tiers)
 

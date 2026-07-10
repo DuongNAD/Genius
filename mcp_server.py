@@ -1437,69 +1437,179 @@ def _redirect_all_logging_to_stderr(stream=None):
                     continue
 
 
-async def run_stdio_mcp():
+# ---------------------------------------------------------------------------
+# Official MCP SDK stdio transport — the wire that Antigravity consumes.
+#
+# ``handle_request`` above stays as the in-process engine the test-suite drives
+# directly. This layer wraps the SAME ``dispatch_tool`` engine + ``TOOLS`` +
+# resource whitelist behind the official ``mcp`` SDK so the wire is fully
+# spec-compliant: camelCase ``inputSchema`` (without it a strict client like
+# Antigravity/Gemini sees every tool as having NO parameters), automatic
+# protocolVersion negotiation, tool failures surfaced as ``isError`` results,
+# and proper parse/invalid-request error codes.
+#
+# Tools are namespaced ``genius_<name>`` on the wire so they never collide with
+# other MCP servers sharing the same Antigravity config; the short engine names
+# stay internal (``dispatch_tool("review", ...)``).
+# ---------------------------------------------------------------------------
+
+WIRE_PREFIX = "genius_"
+
+# Advisory-only annotation hints (they help Antigravity display and safely
+# auto-approve tools; they do not change behavior). Read-only tools never touch
+# the workspace; the destructive ones launch/steer a pipeline job or write
+# artifacts / notebooks.
+_READ_ONLY_TOOLS = {
+    "research", "design", "code", "unit_test", "security_audit", "deploy",
+    "doctor", "debate", "review", "code_graph", "eval",
+    "orchestrate_status", "notebooklm_list", "notebooklm_query",
+}
+_DESTRUCTIVE_TOOLS = {
+    "orchestrate", "orchestrate_approve", "orchestrate_reject",
+    "notebooklm_research",
+}
+
+
+def _selected_tool_names():
+    """Engine tool names to expose. Defaults to every tool in ``TOOLS``; an
+    operator can expose a lean subset via ``GENIUS_MCP_TOOLS=comma,list`` to
+    stay under Antigravity's cross-server tool budget (~100 tools total) when
+    several MCP servers are active. Both bare and ``genius_``-prefixed spellings
+    are accepted; unknown names are ignored, and an empty/all-unknown value
+    falls back to the full set."""
+    known = {t["name"] for t in TOOLS}
+    raw = (os.environ.get("GENIUS_MCP_TOOLS") or "").strip()
+    if not raw:
+        return known
+    resolved = set()
+    for token in raw.split(","):
+        name = token.strip()
+        if not name:
+            continue
+        engine = name[len(WIRE_PREFIX):] if name.startswith(WIRE_PREFIX) else name
+        if engine in known:
+            resolved.add(engine)
+    return resolved or known
+
+
+def _build_sdk_server():
+    """Construct the official-SDK MCP ``Server`` bound to the existing engine.
+
+    Built lazily (only for the ``stdio`` entrypoint) so importing this module
+    for the HTTP path or the test-suite never pulls in the SDK.
+    """
+    from mcp.server import Server
+    from mcp.server.lowlevel.helper_types import ReadResourceContents
+    from mcp.shared.exceptions import McpError
+    import mcp.types as types
+
+    server = Server("genius", version=SERVER_INFO["version"])
+
+    @server.list_tools()
+    async def _sdk_list_tools():
+        selected = _selected_tool_names()
+        tools = []
+        for spec in TOOLS:
+            name = spec["name"]
+            if name not in selected:
+                continue
+            tools.append(
+                types.Tool(
+                    name=WIRE_PREFIX + name,
+                    description=spec["description"],
+                    inputSchema=spec["input_schema"],
+                    annotations=types.ToolAnnotations(
+                        readOnlyHint=name in _READ_ONLY_TOOLS,
+                        destructiveHint=name in _DESTRUCTIVE_TOOLS,
+                    ),
+                )
+            )
+        return tools
+
+    # validate_input=False: the engine (dispatch_tool) is deliberately lenient
+    # (e.g. it coerces debate.rounds from a string, accepts str-or-list args),
+    # so let its friendly ValueErrors surface as isError results instead of the
+    # SDK's strict jsonschema pre-rejection. The client still SEES each schema
+    # from list_tools — which is the whole point.
+    @server.call_tool(validate_input=False)
+    async def _sdk_call_tool(name, arguments):
+        engine = name[len(WIRE_PREFIX):] if name.startswith(WIRE_PREFIX) else name
+        text = await dispatch_tool(engine, arguments or {})
+        return [types.TextContent(type="text", text=text)]
+
+    @server.list_resources()
+    async def _sdk_list_resources():
+        return [
+            types.Resource(
+                uri=r["uri"],
+                name=r["name"],
+                description=r.get("description"),
+                mimeType=r.get("mimeType"),
+            )
+            for r in _list_resources()
+        ]
+
+    @server.read_resource()
+    async def _sdk_read_resource(uri):
+        try:
+            blocks = _read_resource(str(uri))
+        except ResourceNotFoundError as e:
+            raise McpError(types.ErrorData(code=-32002, message=str(e)))
+        return [
+            ReadResourceContents(content=b["text"], mime_type=b["mimeType"])
+            for b in blocks
+        ]
+
+    return server
+
+
+async def _run_sdk_stdio():
+    """Serve MCP over stdio via the official SDK.
+
+    stdout is the JSON-RPC channel, so (1) all logging is retargeted to stderr,
+    and (2) the REAL stdout is captured BEFORE ``sys.stdout`` is aliased to
+    stderr (which catches stray ``print()`` from lazily-imported providers).
+    ``stdio_server`` binds ``sys.stdout.buffer`` at entry, so the captured
+    stream must be handed to it explicitly or responses would go to stderr.
+    """
+    import io
     import logging
 
-    real_stdout = sys.stdout
-    real_stderr = sys.stderr
+    import anyio
+    from mcp.server.stdio import stdio_server
 
+    real_stderr = sys.stderr
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     logging.basicConfig(stream=real_stderr, level=logging.INFO)
-    # Retarget non-root handlers (e.g. ag_core's stdout handler) to stderr so
-    # they can never contaminate the JSON-RPC stream on stdout.
     _redirect_all_logging_to_stderr(real_stderr)
 
+    # Take ownership of the binary stdout buffer via detach(): once we swap
+    # sys.stdout to stderr below, the original text wrapper loses its last
+    # reference and its finalizer would close(buffer) — killing the SDK writer
+    # the moment GC runs (only visible with a client that keeps the pipe open).
+    # detach() leaves the old wrapper defunct so it can't close our buffer; we
+    # re-wrap as UTF-8 for cross-platform (Windows) correctness.
+    stdout_buffer = sys.stdout.detach()
+    real_stdout = anyio.wrap_file(io.TextIOWrapper(stdout_buffer, encoding="utf-8"))
+    # Route stray print()/logging from lazily-imported providers to stderr; only
+    # the SDK writer (real_stdout) may touch the JSON-RPC channel on stdout.
     sys.stdout = sys.stderr
 
-    if sys.platform == "win32":
-        # The win32 branch reads text-mode sys.stdin, which decodes with the
-        # locale codepage (e.g. cp1252) for pipes. A client's UTF-8 BOM then
-        # arrives as 'ï»¿' (and any non-ASCII JSON as mojibake), so the BOM
-        # strip below never matches and the request fails to parse. Force
-        # UTF-8 to match the JSON-RPC wire format.
-        try:
-            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-
-    loop = asyncio.get_running_loop()
-
-    if sys.platform != "win32":
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
-
-    while True:
-        if sys.platform == "win32":
-            line = await loop.run_in_executor(None, sys.stdin.readline)
-            if not line:
-                break
-            line_str = line
-        else:
-            line_bytes = await reader.readline()
-            if not line_bytes:
-                break
-            line_str = line_bytes.decode("utf-8")
-        # Strip a leading UTF-8 BOM (some clients/Windows pipes prepend one to
-        # the first line) and surrounding whitespace before parsing.
-        line_str = line_str.lstrip("﻿").strip()
-        if not line_str:
-            continue
-        try:
-            req = json.loads(line_str)
-            res = await handle_request(req)
-            if res is not None:
-                real_stdout.write(json.dumps(res) + "\n")
-                real_stdout.flush()
-        except Exception as e:
-            sys.stderr.write(f"Error handling request: {e}\n")
-            sys.stderr.flush()
+    server = _build_sdk_server()
+    async with stdio_server(stdout=real_stdout) as (read_stream, write_stream):
+        await server.run(
+            read_stream, write_stream, server.create_initialization_options()
+        )
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "stdio":
-        asyncio.run(run_stdio_mcp())
+        # Must be the asyncio backend: the engine uses asyncio.create_task /
+        # Event / wait_for / to_thread directly (uvloop is asyncio-compatible).
+        import anyio
+
+        anyio.run(_run_sdk_stdio, backend="asyncio")
     else:
         import uvicorn
 

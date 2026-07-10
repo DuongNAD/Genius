@@ -17,7 +17,7 @@
 - **Hai chế độ vận hành:** HTTP trực tiếp tới từng server vai trò, hoặc **phân tán** qua một Central Hub điều phối worker qua WebSocket (đang chạy thật: hub trên máy Mac + worker grok trên máy thứ hai).
 - **Vòng lặp tự chữa (self-healing):** code sinh ra được chạy `pytest`/`flake8` thật, log lỗi được đưa ngược lại cho tác tử Codex để tự vá.
 - **Ngữ cảnh theo đồ thị code:** mỗi call agent nhận workspace đã được xếp hạng PageRank + cắt theo ngân sách token (`GENIUS_CONTEXT_TOKEN_BUDGET`, kiểu aider repo-map/CodexGraph) thay vì nguyên cả repo.
-- **Tích hợp MCP:** cắm trực tiếp vào Google Antigravity 2.0 như một bộ điều phối (17 tool + resources), gồm cả tool `code_graph` để agent tự truy vấn cấu trúc repo và bộ tool `notebooklm_*` để nghiên cứu có nguồn qua NotebookLM.
+- **Tích hợp MCP:** cắm trực tiếp vào app Google Antigravity (qua MCP Python SDK chính thức) như một bộ điều phối (**18 tool** namespaced `genius_*` + resources), gồm cả tool `genius_code_graph` để agent tự truy vấn cấu trúc repo và bộ tool `genius_notebooklm_*` để nghiên cứu có nguồn qua NotebookLM.
 
 **Quy mô & sức khỏe hiện tại (2026-07-04, commit `c8e1ea4`):**
 
@@ -79,7 +79,7 @@ Chuỗi provider ghi đè được per-role qua `GENIUS_PROVIDER_<ROLE>`; backen
 
 - **`serve.py`** — menu tương tác/CLI khởi chạy các server vai trò. Cờ: `--roles`, `--prompt`, `--auto-pilot`, `--distributed`, `--pipeline {sequential,e2e}`, `--hub-port`, `--doctor`. Ghi cổng thực đã bind vào `.agents/service_registry.json` để phát hiện động.
 - **`orchestrator.py`** — bộ điều phối pipeline bất đồng bộ (gọi service qua `httpx`, poll `/status`, retry bằng `tenacity`).
-- **`mcp_server.py`** — MCP server (stdio/HTTP) expose 17 tool + MCP resources cho Antigravity (xem §11).
+- **`mcp_server.py`** — MCP server (stdio qua SDK chính thức / HTTP) expose **18 tool** `genius_*` + MCP resources cho Antigravity (xem §11).
 - **`dashboard.py`** — bảng giám sát port 8080.
 
 ### 3.4 Skill Server factory (`ag_core/skill_app.py`)
@@ -187,8 +187,8 @@ Cả hai pipeline **không còn đổ nguyên workspace** vào mỗi call: mọi
 
 ## 11. Tích hợp MCP (Antigravity 2.0)
 
-`mcp_server.py` (JSON-RPC qua stdio hoặc HTTP) expose **17 tool** + **MCP resources**:
-- Đơn tác tử: `research`, `design`, `code`, `unit_test`, `security_audit`, `deploy` (dựng in-process qua `ag_core/agent_factory.py`, bundle stateless).
+Transport **stdio** (Antigravity dùng) chạy trên **MCP Python SDK chính thức** (`python mcp_server.py stdio`); còn có HTTP tool-API riêng. Expose **18 tool** — trên wire đặt tên **`genius_<tên>`** (namespaced, tránh đụng MCP khác; `inputSchema` camelCase, lỗi tool trả `isError:true`) — cùng **MCP resources**. Lộ tập con qua `GENIUS_MCP_TOOLS`.
+- Đơn tác tử: `genius_research`, `genius_design`, `genius_code`, `genius_unit_test`, `genius_security_audit`, `genius_deploy` (dựng in-process qua `ag_core/agent_factory.py`, bundle stateless).
 - Pipeline: **`orchestrate`** (chạy toàn bộ pipeline nền, trả `job_id` ngay; `require_approval: true` → tạm dừng `awaiting_approval` sau research/design/code) + **`orchestrate_status`** (poll → stages/artifacts/awaiting_stage) + **`orchestrate_approve`**/**`orchestrate_reject`**.
 - Tiện ích: **`doctor`** (preflight, READY/NOT READY), **`debate`** (critic researcher ⇄ Claude, max 3 vòng, `[APPROVED]` dừng sớm), **`review`** (review code dán vào, không ghi file), **`code_graph`** (truy vấn đồ thị code read-only: `map`/`definition`/`references`/`importers`/`imports`/`skeleton`, JSON out — thêm tool mới phải cập nhật `tests/test_realrun_mcp.py::EXPECTED_TOOLS` vì danh sách tên bị ghim chính xác).
 - NotebookLM (opt-in, shell ra CLI `nlm`): **`notebooklm_list`** / **`notebooklm_query`** (hỏi-đáp **có trích dẫn** từ nguồn của một notebook có sẵn) / **`notebooklm_research`** (**MUTATES**: deep-research web/Drive → import vào notebook rồi truy vấn; `fast`≈30s, `deep`≈5min). Cần `nlm login` một lần + `GENIUS_NLM_PATH`; dùng chung helper với backend provider `notebooklm`.

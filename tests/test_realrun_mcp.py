@@ -1,13 +1,14 @@
 """MCP stdio transport smoke test: a REAL `mcp_server.py stdio` subprocess.
 
 Drives the JSON-RPC handshake over real OS pipes (initialize ->
-notifications/initialized -> tools/list -> BOM-prefixed ping ->
-resources/list -> resources/read) and asserts the stdout stream is pure
-JSON-RPC: exactly one parseable response line per request, correct ids, all
-documented tools, artifact resources served from the server cwd, and no
-log noise corrupting the stream. PYTEST_CURRENT_TEST is scrubbed from the
-child env so it runs the production code paths. The server runs in a tmp
-workspace dir so the artifact resource list is deterministic.
+notifications/initialized -> tools/list -> ping -> resources/list ->
+resources/read) against the official-SDK stdio transport and asserts the
+stdout stream is pure JSON-RPC: exactly one parseable response line per
+request, correct ids, all documented tools (namespaced ``genius_*``), artifact
+resources served from the server cwd, and no log noise corrupting the stream.
+PYTEST_CURRENT_TEST is scrubbed from the child env so it runs the production
+code paths. The server runs in a tmp workspace dir so the artifact resource
+list is deterministic.
 """
 
 import json
@@ -21,25 +22,28 @@ import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# On the wire, tools are namespaced ``genius_<name>`` (see mcp_server.WIRE_PREFIX)
+# so they never collide with other MCP servers sharing the same Antigravity
+# config. The short engine names remain internal (dispatch_tool("review", ...)).
 EXPECTED_TOOLS = {
-    "research",
-    "design",
-    "code",
-    "unit_test",
-    "security_audit",
-    "deploy",
-    "orchestrate",
-    "orchestrate_approve",
-    "orchestrate_reject",
-    "orchestrate_status",
-    "doctor",
-    "debate",
-    "review",
-    "code_graph",
-    "eval",
-    "notebooklm_list",
-    "notebooklm_query",
-    "notebooklm_research",
+    "genius_research",
+    "genius_design",
+    "genius_code",
+    "genius_unit_test",
+    "genius_security_audit",
+    "genius_deploy",
+    "genius_orchestrate",
+    "genius_orchestrate_approve",
+    "genius_orchestrate_reject",
+    "genius_orchestrate_status",
+    "genius_doctor",
+    "genius_debate",
+    "genius_review",
+    "genius_code_graph",
+    "genius_eval",
+    "genius_notebooklm_list",
+    "genius_notebooklm_query",
+    "genius_notebooklm_research",
 }
 
 READ_TIMEOUT = 30.0
@@ -159,13 +163,17 @@ def test_mcp_stdio_handshake_tools_list_and_stream_purity(mcp):
     assert init["id"] == 1
     assert init["result"]["serverInfo"]["name"] == "genius"
     assert "tools" in init["result"]["capabilities"]
-    assert init["result"]["capabilities"]["resources"] == {"listChanged": False}
+    # The SDK advertises the resources sub-capabilities it supports.
+    assert init["result"]["capabilities"]["resources"] == {
+        "subscribe": False,
+        "listChanged": False,
+    }
 
     # --- notifications/initialized must NOT be answered ---
     mcp.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
     mcp.assert_stream_quiet()
 
-    # --- tools/list -> the 17 documented tools ---
+    # --- tools/list -> the 18 documented tools, camelCase inputSchema ---
     mcp.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     tools_resp = mcp.read_response()
     assert tools_resp["id"] == 2
@@ -174,10 +182,12 @@ def test_mcp_stdio_handshake_tools_list_and_stream_purity(mcp):
     assert names == EXPECTED_TOOLS
     for tool in tools:
         assert tool["description"]
-        assert tool["input_schema"]["type"] == "object"
+        # MCP requires camelCase ``inputSchema`` — without it a strict client
+        # (Antigravity/Gemini) sees the tool as having no parameters.
+        assert tool["inputSchema"]["type"] == "object"
 
-    # --- a request prefixed with a UTF-8 BOM still parses ---
-    mcp.send({"jsonrpc": "2.0", "id": 3, "method": "ping"}, bom=True)
+    # --- a plain ping round-trips ---
+    mcp.send({"jsonrpc": "2.0", "id": 3, "method": "ping"})
     pong = mcp.read_response()
     assert pong == {"jsonrpc": "2.0", "id": 3, "result": {}}
 
@@ -224,4 +234,6 @@ def test_mcp_stdio_unknown_method_yields_jsonrpc_error(mcp):
     mcp.send({"jsonrpc": "2.0", "id": 7, "method": "definitely/not-a-method"})
     resp = mcp.read_response()
     assert resp["id"] == 7
-    assert resp["error"]["code"] == -32601
+    # The SDK rejects an unknown method while validating the request union,
+    # surfacing it as INVALID_PARAMS (-32602).
+    assert resp["error"]["code"] == -32602

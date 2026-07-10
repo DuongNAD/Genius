@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "genius": {
+      "command": "/ABSOLUTE/PATH/TO/python3",
+      "args": ["/ABSOLUTE/PATH/TO/Genius/mcp_server.py", "stdio"],
+      "env": {
+        "GENIUS_AGY_PATH": "/ABSOLUTE/PATH/TO/agy",
+        "GENIUS_PROVIDER_RESEARCHER": "claude,agy",
+        "GENIUS_PROVIDER_CODEX": "agy,claude",
+        "GENIUS_PROVIDER_TESTER": "agy,claude",
+        "GENIUS_PROVIDER_SECURITY": "agy,claude",
+        "GENIUS_PROVIDER_DEVOPS": "agy,claude",
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+      }
+    }
+  }
+}

@@ -35,3 +35,9 @@ tree-sitter-go==0.25.0
 # orchestrator.py; uvicorn.run entrypoints pick it up automatically).
 # No Windows build exists — do NOT carry this line to the win branch.
 uvloop==0.21.0
+# Official MCP SDK — powers the spec-compliant stdio transport that Antigravity
+# (and any MCP client) consumes: `python mcp_server.py stdio` builds an
+# mcp.server.Server that wraps the in-process dispatch_tool engine. Gives
+# camelCase inputSchema, protocolVersion negotiation, and isError tool results
+# for free. Imported lazily (only for the stdio entrypoint).
+mcp==1.28.1
