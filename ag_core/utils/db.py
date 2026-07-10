@@ -92,6 +92,10 @@ def get_db_connection():
 
 _db_write_queue = queue.Queue()
 _db_writer_thread = None
+# Serializes the check-then-start/stop of the singleton writer thread so two
+# concurrent first-writers can't each spawn a thread (two write connections to
+# the same SQLite file).
+_db_writer_thread_lock = threading.Lock()
 
 
 class WriteTask:
@@ -156,19 +160,21 @@ def _db_writer_worker():
 
 def _start_writer_thread():
     global _db_writer_thread
-    if _db_writer_thread is None or not _db_writer_thread.is_alive():
-        _db_writer_thread = threading.Thread(
-            target=_db_writer_worker, daemon=True, name="SQLiteWriterThread"
-        )
-        _db_writer_thread.start()
+    with _db_writer_thread_lock:
+        if _db_writer_thread is None or not _db_writer_thread.is_alive():
+            _db_writer_thread = threading.Thread(
+                target=_db_writer_worker, daemon=True, name="SQLiteWriterThread"
+            )
+            _db_writer_thread.start()
 
 
 def stop_writer_thread():
     global _db_writer_thread
-    if _db_writer_thread and _db_writer_thread.is_alive():
-        _db_write_queue.put(None)
-        _db_writer_thread.join(timeout=2.0)
-        _db_writer_thread = None
+    with _db_writer_thread_lock:
+        if _db_writer_thread and _db_writer_thread.is_alive():
+            _db_write_queue.put(None)
+            _db_writer_thread.join(timeout=2.0)
+            _db_writer_thread = None
 
 
 def _submit_write(func, *args, **kwargs):

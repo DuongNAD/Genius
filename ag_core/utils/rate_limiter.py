@@ -10,7 +10,10 @@ class TokenBucketRateLimiter:
         self.rate = rate
         self.capacity = capacity
         self.tokens = capacity
-        self.last_update = time.time()
+        # Monotonic (not wall-clock): refill must be immune to system clock
+        # steps — a backward jump used to drive the balance negative and cause
+        # sustained spurious 429s.
+        self.last_update = time.monotonic()
         self.lock = threading.Lock()
 
     @property
@@ -35,14 +38,19 @@ class TokenBucketRateLimiter:
     def reset(self):
         with self.lock:
             self.tokens = self.capacity
-            self.last_update = time.time()
+            self.last_update = time.monotonic()
 
     def consume(self, tokens_to_consume: float = 1.0) -> bool:
         with self.lock:
-            now = time.time()
-            elapsed = now - self.last_update
+            now = time.monotonic()
+            # Clamp elapsed so a clock hiccup can't drive the balance negative,
+            # and clamp the balance so a bucket that somehow went negative
+            # recovers instead of 429ing forever.
+            elapsed = max(0.0, now - self.last_update)
             self.last_update = now
-            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            self.tokens = min(
+                self.capacity, max(0.0, self.tokens) + elapsed * self.rate
+            )
             if self.tokens >= tokens_to_consume:
                 self.tokens -= tokens_to_consume
                 return True
@@ -51,10 +59,12 @@ class TokenBucketRateLimiter:
     async def consume_async(self, tokens_to_consume: float = 1.0) -> bool:
         async with self.async_lock:
             with self.lock:
-                now = time.time()
-                elapsed = now - self.last_update
+                now = time.monotonic()
+                elapsed = max(0.0, now - self.last_update)
                 self.last_update = now
-                self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+                self.tokens = min(
+                    self.capacity, max(0.0, self.tokens) + elapsed * self.rate
+                )
                 if self.tokens >= tokens_to_consume:
                     self.tokens -= tokens_to_consume
                     return True

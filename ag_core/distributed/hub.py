@@ -482,11 +482,16 @@ class CentralHub:
                         {},
                     )
 
-                # Update task only if it is still running
+                # Settle the task AND free the worker only if the report is for
+                # the task still running on it. A late report for an
+                # already-terminal task (e.g. one the sweeper timed out and the
+                # worker was reassigned from) must NOT flip a now-busy worker
+                # back to idle — that would let the hub dispatch a second task to
+                # a worker still executing its current one.
                 if self.tasks[task_id]["status"] == "running":
                     self.tasks[task_id]["status"] = status
                     self.tasks[task_id]["result"] = result
-                self.workers[worker_id]["status"] = "idle"
+                    self.workers[worker_id]["status"] = "idle"
 
                 await self._process_queue()
                 return 200, {"status": "result_acknowledged"}, {}

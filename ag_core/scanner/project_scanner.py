@@ -4,6 +4,12 @@ import pathspec
 import tiktoken
 from typing import Dict, List, Optional, Tuple
 
+# Per-file byte cap for scan(): a single huge non-binary file (a minified
+# bundle, a data/log file that slipped the denylist) would otherwise be slurped
+# whole into memory — and every scanned file is retained in one dict at once.
+# Override with GENIUS_SCAN_MAX_FILE_BYTES (0 disables the cap).
+_MAX_SCAN_FILE_BYTES = int(os.environ.get("GENIUS_SCAN_MAX_FILE_BYTES") or 1_000_000)
+
 
 def is_binary_file(filepath: str) -> bool:
     """Detects if a file is binary by looking for null bytes in the first 1KB."""
@@ -95,7 +101,17 @@ class ProjectScanner:
                         head = fh.read(1024)
                         if b"\x00" in head:
                             continue
-                        data = head + fh.read()
+                        if _MAX_SCAN_FILE_BYTES > 0:
+                            # Read one byte past the cap so we can tell "exactly
+                            # at the cap" from "over it" without slurping a huge
+                            # file; skip anything over the cap rather than
+                            # feeding a truncated (broken) file into context.
+                            rest = fh.read(_MAX_SCAN_FILE_BYTES - len(head) + 1)
+                            if len(head) + len(rest) > _MAX_SCAN_FILE_BYTES:
+                                continue
+                            data = head + rest
+                        else:
+                            data = head + fh.read()
                 except Exception:
                     # Skip unreadable or locked files
                     continue

@@ -22,6 +22,7 @@ modes guarded here:
 import asyncio
 import json
 import os
+import signal
 import sys
 
 # LLM agent CLIs (notably ``codex exec``) can legitimately run for minutes, so
@@ -143,6 +144,10 @@ async def spawn_cli(
     OPENAI_* vars) without touching the process-wide environment.
     """
     actual_cmd = wrap_windows_cmd(cmd, cli_path)
+    # start_new_session makes the CLI its own process-group/session leader
+    # (POSIX setsid; ignored on Windows, where the tree is killed via
+    # taskkill /T). This lets _terminate kill the WHOLE group so grandchildren
+    # the CLI spawned die with it instead of being orphaned.
     try:
         return await asyncio.create_subprocess_exec(
             *actual_cmd,
@@ -151,6 +156,7 @@ async def spawn_cli(
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
+            start_new_session=True,
         )
     except OSError:
         if sys.platform == "win32" and actual_cmd[0] != "cmd.exe":
@@ -161,6 +167,7 @@ async def spawn_cli(
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=env,
+                start_new_session=True,
             )
         raise
 
@@ -190,10 +197,23 @@ async def _terminate(process) -> None:
         except Exception:
             killed = False
     if not killed:
-        try:
-            process.kill()
-        except (ProcessLookupError, OSError):
-            return
+        if sys.platform != "win32" and isinstance(pid, int):
+            # Kill the whole process GROUP so grandchildren the CLI spawned die
+            # with it — but ONLY when the child is its own group leader (it was
+            # spawned with start_new_session=True, so pgid == pid). Never signal
+            # a group we might share with the orchestrator itself.
+            try:
+                if os.getpgid(pid) == pid:
+                    os.killpg(pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except (ProcessLookupError, OSError):
+                return
+        else:
+            try:
+                process.kill()
+            except (ProcessLookupError, OSError):
+                return
     try:
         await process.wait()
     except Exception:
@@ -229,6 +249,13 @@ async def communicate_with_timeout(
             f"{cli_name} timed out after {timeout:.0f}s and was terminated. "
             f"Increase GENIUS_CLI_TIMEOUT if this CLI legitimately needs longer."
         )
+    except BaseException:
+        # External cancellation (the orchestrator dropping this call, a task
+        # group tearing down) must not orphan the running CLI. Kill it before
+        # propagating. process.kill() inside _terminate fires synchronously, so
+        # the child dies even if the subsequent wait() is itself cancelled.
+        await _terminate(process)
+        raise
 
 
 def explain_cli_failure(
