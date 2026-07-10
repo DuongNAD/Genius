@@ -66,6 +66,14 @@ def _reload_env_safely():
                     k, v = line.split("=", 1)
                     k = k.strip()
                     v = v.strip().strip("'\"")
+                    # A var already present in the process environment at import
+                    # time (captured in ``_original_env``) was provided by the
+                    # CALLER — Antigravity's mcp_config ``env`` block, a parent
+                    # shell, a docker `-e` — and MUST win over .env. Only fill
+                    # in vars the caller did not set, and still never clobber a
+                    # value changed at runtime after import.
+                    if k in _original_env:
+                        continue
                     current_val = os.environ.get(k)
                     original_val = _original_env.get(k)
                     if current_val == original_val:
