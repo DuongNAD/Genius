@@ -89,6 +89,24 @@ WORKFLOW = [
 # Background pipeline jobs (job_id -> state).
 PANEL_JOBS: Dict[str, Dict[str, Any]] = {}
 _PANEL_TASKS: set = set()
+# Cap the in-memory job registry so a long-lived panel doesn't grow it forever;
+# evict the oldest FINISHED jobs first (a running job is never dropped).
+_PANEL_JOBS_MAX = max(1, int(os.environ.get("GENIUS_PANEL_MAX_JOBS") or 200))
+
+
+def _prune_panel_jobs() -> None:
+    if len(PANEL_JOBS) < _PANEL_JOBS_MAX:
+        return
+    finished = [
+        (j.get("finished_at") or 0.0, jid)
+        for jid, j in PANEL_JOBS.items()
+        if j.get("status") != "running"
+    ]
+    finished.sort()  # oldest-finished first
+    while len(PANEL_JOBS) >= _PANEL_JOBS_MAX and finished:
+        _ts, jid = finished.pop(0)
+        PANEL_JOBS.pop(jid, None)
+
 
 _ROOT_ARTIFACTS = ("research.md", "design.md", "review.md", "audit.md", "deploy.md")
 
@@ -192,6 +210,7 @@ async def api_orchestrate(body: Dict[str, Any]) -> JSONResponse:
     if pipeline not in ("sequential", "e2e"):
         return JSONResponse({"error": "pipeline must be sequential|e2e"}, 400)
 
+    _prune_panel_jobs()
     job_id = uuid.uuid4().hex
     workspace = os.path.join(root_dir, "projects", f"panel-{job_id}")
     os.makedirs(workspace, exist_ok=True)

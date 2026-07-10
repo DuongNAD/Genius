@@ -544,11 +544,18 @@ class CentralHub:
                     return 400, {"error": "Path traversal detected"}, {}
 
                 dirname = os.path.dirname(target)
-                if dirname:
-                    os.makedirs(dirname, exist_ok=True)
-                try:
+
+                def _write_file():
+                    if dirname:
+                        os.makedirs(dirname, exist_ok=True)
                     with open(target, "w", encoding="utf-8") as f:
                         f.write(content)
+
+                try:
+                    # Off the event loop: this runs while holding the hub lock,
+                    # so a synchronous write would block heartbeat processing,
+                    # dispatch, and the sweeper for its whole duration.
+                    await asyncio.to_thread(_write_file)
                 except Exception as e:
                     return 500, {"error": f"Failed to write file: {str(e)}"}, {}
                 return 200, {"status": "file_written"}, {}

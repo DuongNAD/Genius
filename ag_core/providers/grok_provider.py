@@ -270,8 +270,12 @@ class GrokProvider(BaseProvider):
                     f"stderr tail: {tail_text(stderr_str)}"
                 )
 
-            prompt_tokens = res_json.get("usage", {}).get("input_tokens", 0)
-            completion_tokens = res_json.get("usage", {}).get("output_tokens", 0)
+            # `or {}` (not a get() default): a JSON `"usage": null` makes
+            # get("usage", {}) return None, and None.get() would crash — throwing
+            # away an already-parsed valid answer.
+            usage = res_json.get("usage") or {}
+            prompt_tokens = usage.get("input_tokens", 0)
+            completion_tokens = usage.get("output_tokens", 0)
             total_tokens = prompt_tokens + completion_tokens
 
             response = ProviderResponse(

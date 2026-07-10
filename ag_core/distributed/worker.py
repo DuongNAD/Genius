@@ -3,6 +3,7 @@ import hmac
 import time
 import json
 import os
+from collections import deque
 from typing import Dict, List, Optional, Any
 from ag_core.utils.jwt import encode_jwt
 
@@ -37,7 +38,12 @@ class ClientWorker:
         self.heartbeat_task = None
         self.heartbeat_interval = 0.05
         self.running = False
-        self.received_tasks = []
+        # Bounded task-history ring: retained full task_data (prompts + context)
+        # for every task ever accepted, growing without limit on a long-lived
+        # worker. Keep only the most recent N (GENIUS_WORKER_TASK_HISTORY).
+        self.received_tasks = deque(
+            maxlen=max(1, int(os.environ.get("GENIUS_WORKER_TASK_HISTORY") or 500))
+        )
         self.tasks_completed = 0
         self.tasks_failed = 0
         self.ws = None

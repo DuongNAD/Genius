@@ -1,11 +1,14 @@
 import os
 import json
+import logging
 import uuid
 import re
 import math
 import hashlib
 from collections import Counter
 from typing import List, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 _CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT_DIR = os.path.abspath(os.path.join(_CURRENT_DIR, "..", ".."))
@@ -175,7 +178,24 @@ class VectorMemory:
                 print(
                     f"Warning: SentenceTransformer encoding failed ({e}). Falling back to TF-IDF."
                 )
+                # Keep the fallback at the ST model's dimension so an
+                # intermittent encode failure can't inject a wrong-dimension
+                # vector that poisons a fixed-dim Chroma collection (or silently
+                # unranks every row in the SQLite fallback).
+                dim = self._st_expected_dim()
+                if dim:
+                    return [[0.0] * dim for _ in texts]
         return self.embedder.get_embeddings(texts)
+
+    def _st_expected_dim(self):
+        """The SentenceTransformer model's output dimension, or None."""
+        model = self.sentence_transformer_model
+        if model is None:
+            return None
+        try:
+            return model.get_sentence_embedding_dimension()
+        except Exception:
+            return None
 
     def _get_connection(self):
         import sqlite3
@@ -300,21 +320,34 @@ class VectorMemory:
 
             query_vector = self.get_embeddings([query_text])[0]
             scored_rows = []
+            dim_mismatches = 0
             for uid, text, metadata_str, emb_str in rows:
                 try:
                     emb = json.loads(emb_str)
-                    if len(query_vector) != len(emb):
-                        score = 0.0
-                    else:
-                        score = sum(q * e for q, e in zip(query_vector, emb))
                 except Exception:
-                    score = 0.0
+                    continue
+                if len(query_vector) != len(emb):
+                    # The stored embedding's dimension differs from the current
+                    # query embedding (the embedding backend/model changed). It
+                    # can't be compared, so SKIP it instead of scoring it 0.0 and
+                    # returning it as a bogus "match" alongside real results.
+                    dim_mismatches += 1
+                    continue
+                score = sum(q * e for q, e in zip(query_vector, emb))
 
                 try:
                     meta = json.loads(metadata_str) if metadata_str else {}
                 except Exception:
                     meta = {}
                 scored_rows.append((score, uid, text, meta))
+
+            if dim_mismatches:
+                logger.warning(
+                    "VectorMemory: skipped %d stored embedding(s) whose dimension "
+                    "differs from the current query embedding (the embedding "
+                    "backend likely changed); they cannot be ranked.",
+                    dim_mismatches,
+                )
 
             scored_rows.sort(key=lambda x: x[0], reverse=True)
             return [

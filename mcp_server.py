@@ -944,6 +944,12 @@ def _read_resource(uri: str, workspace: str = None) -> List[Dict[str, str]]:
                 text = f.read()
         except OSError:
             continue
+        except UnicodeDecodeError:
+            # A whitelisted artifact that isn't valid UTF-8 is corruption, not a
+            # reason to crash: re-read best-effort with replacement chars rather
+            # than letting UnicodeDecodeError escape as an unhandled error.
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
         return [{"uri": uri, "mimeType": "text/markdown", "text": text}]
     raise ResourceNotFoundError(
         f"Artifact '{name}' does not exist yet - the pipeline stage that "

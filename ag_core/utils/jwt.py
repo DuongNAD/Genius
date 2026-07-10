@@ -112,6 +112,12 @@ def decode_jwt(
     except Exception as e:
         raise ValueError("Invalid header") from e
 
+    # A valid-JSON but non-object header (e.g. a JSON array/string) would make
+    # header.get() raise AttributeError and escape the auth boundary as a 500
+    # instead of a clean 401. Reject it as a ValueError like the other checks.
+    if not isinstance(header, dict):
+        raise ValueError("Invalid header")
+
     if header.get("alg") != "HS256":
         raise ValueError("Unsupported algorithm")
 
@@ -131,6 +137,11 @@ def decode_jwt(
         payload = json.loads(payload_json)
     except Exception as e:
         raise ValueError("Invalid payload") from e
+
+    # Same guard as the header: a non-object payload would make the `in payload`
+    # / payload.get() claim checks below raise and escape as a 500 not a 401.
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid payload")
 
     if leeway is None:
         leeway = jwt_leeway()

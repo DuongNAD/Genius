@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import importlib.util
 import os
+import signal
 import sys
 import time
 import traceback
@@ -1085,12 +1086,35 @@ async def main_async():
 
     # If we started servers, we await them to run continuously
     if server_tasks:
+        # Handle SIGTERM (docker stop / systemd / `kill`) the same as Ctrl+C:
+        # cancel the servers so the finally-block cleanup runs (workers
+        # deregistered, DB queue drained) instead of the process being killed
+        # abruptly. POSIX only — add_signal_handler is unsupported on Windows.
+        installed_signals = []
+        if sys.platform != "win32":
+            loop = asyncio.get_running_loop()
+
+            def _request_shutdown():
+                for task in server_tasks:
+                    task.cancel()
+
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    loop.add_signal_handler(sig, _request_shutdown)
+                    installed_signals.append(sig)
+                except (NotImplementedError, RuntimeError, ValueError):
+                    pass
         try:
             print("FastAPI servers are running. Press Ctrl+C to stop.")
             await asyncio.gather(*server_tasks)
         except (asyncio.CancelledError, KeyboardInterrupt):
             print("Stopping servers...")
         finally:
+            for sig in installed_signals:
+                try:
+                    loop.remove_signal_handler(sig)
+                except Exception:
+                    pass
             for task in server_tasks:
                 task.cancel()
             if server_tasks:
