@@ -1568,7 +1568,10 @@ def _redirect_all_logging_to_stderr(stream=None):
 # stay internal (``dispatch_tool("review", ...)``).
 # ---------------------------------------------------------------------------
 
-WIRE_PREFIX = "genius_"
+# Wire-name prefix, overridable so a SECOND registration of this same server
+# (e.g. a `genius-debug` entry pointing at different provider models) can expose
+# non-colliding tool names like ``gdbg_code``. Defaults to ``genius_``.
+WIRE_PREFIX = os.environ.get("GENIUS_MCP_WIRE_PREFIX") or "genius_"
 
 # Advisory-only annotation hints (they help Antigravity display and safely
 # auto-approve tools; they do not change behavior). Read-only tools never touch
@@ -1618,7 +1621,12 @@ def _build_sdk_server():
     from mcp.shared.exceptions import McpError
     import mcp.types as types
 
-    server = Server("genius", version=SERVER_INFO["version"])
+    # Server name overridable (GENIUS_MCP_SERVER_NAME) so a second registration
+    # identifies itself distinctly (e.g. "genius-debug"); defaults to "genius".
+    server = Server(
+        os.environ.get("GENIUS_MCP_SERVER_NAME") or "genius",
+        version=SERVER_INFO["version"],
+    )
 
     @server.list_tools()
     async def _sdk_list_tools():
