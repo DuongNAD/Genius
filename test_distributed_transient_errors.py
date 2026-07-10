@@ -89,3 +89,45 @@ async def test_hub_transport_error_surfaces_as_pipeline_error(monkeypatch):
         )
 
     assert "failed" in str(exc_info.value).lower()
+
+
+# --- hub HTTP response-integrity verification --------------------------------
+
+
+class _FakeResp:
+    def __init__(self, content: bytes, headers: dict):
+        self.content = content
+        self.headers = headers
+
+
+def _hub_secret():
+    import os
+
+    from ag_core.config import load_config
+
+    return load_config().skill_api_key or os.getenv("SKILL_API_KEY", "")
+
+
+def test_verify_hub_response_accepts_valid_signature():
+    from ag_core.utils.security import calculate_checksum
+
+    body = b'{"status": "completed"}'
+    sig = calculate_checksum(body, _hub_secret())
+    orchestrator._verify_hub_response_if_signed(
+        _FakeResp(body, {"X-Payload-SHA256": sig})
+    )  # must not raise
+
+
+def test_verify_hub_response_rejects_tampered_body():
+    from ag_core.utils.security import calculate_checksum
+
+    # Signature computed over a DIFFERENT body than what is delivered.
+    sig = calculate_checksum(b'{"status": "completed"}', _hub_secret())
+    tampered = _FakeResp(b'{"status": "hacked"}', {"X-Payload-SHA256": sig})
+    with pytest.raises(orchestrator.ChecksumMismatchError):
+        orchestrator._verify_hub_response_if_signed(tampered)
+
+
+def test_verify_hub_response_skips_when_unsigned():
+    # Backward compatible: an older hub sends no signature -> skip, don't raise.
+    orchestrator._verify_hub_response_if_signed(_FakeResp(b'{"x": 1}', {}))

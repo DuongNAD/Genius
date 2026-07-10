@@ -21,6 +21,18 @@ def test_stream_branch_propagates_non_200_status():
     assert r.status_code == 401
 
 
+def test_hub_http_response_is_signed():
+    # The hub signs its (non-stream) HTTP responses so the orchestrator's
+    # hub-poll path can verify integrity. Even the unauthenticated 401 body is
+    # signed with the shared secret over the exact bytes sent.
+    from ag_core.utils.security import verify_checksum
+
+    r = client.post("/dispatch", json={"role": "x"})
+    sig = r.headers.get("X-Payload-SHA256")
+    assert sig
+    assert verify_checksum(r.content, sig, serve.central_hub.api_key)
+
+
 @pytest.mark.asyncio
 async def test_register_returns_false_when_hub_rejects():
     hub = serve.central_hub

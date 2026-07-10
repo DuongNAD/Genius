@@ -251,8 +251,20 @@ async def hub_http_route(path: str, request: Request):
     status_code, body, resp_headers = await central_hub.handle_request(
         "/" + path, payload, headers
     )
+    body_str = json.dumps(body)
+    # Sign the response so the orchestrator's distributed hub-poll path can
+    # verify the integrity of the worker-generated result relayed through the
+    # hub — matching the local skill-server path. Checksum is over the exact
+    # bytes sent, keyed by the same shared secret used for request auth.
+    from ag_core.utils.security import calculate_checksum
+
+    resp_headers = dict(resp_headers or {})
+    resp_headers.setdefault(
+        "X-Payload-SHA256",
+        calculate_checksum(body_str.encode("utf-8"), central_hub.api_key or ""),
+    )
     return Response(
-        content=json.dumps(body),
+        content=body_str,
         status_code=status_code,
         media_type="application/json",
         headers=resp_headers,

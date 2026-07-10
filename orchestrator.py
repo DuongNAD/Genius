@@ -603,6 +603,22 @@ def verify_response_checksum(response) -> None:
         )
 
 
+def _verify_hub_response_if_signed(response) -> None:
+    """Verify a hub HTTP response's X-Payload-SHA256 when the hub signed it.
+
+    The distributed hub-poll path consumes worker-generated results relayed by
+    the hub; the local skill-server path verifies response checksums, and this
+    closes the same integrity gap for cross-machine mode. Backward compatible:
+    an older hub sends no signature, so verification is skipped when the header
+    is absent — but a present-but-wrong signature is rejected as tampering.
+    """
+    # A real response header is a non-empty str; require that (a missing header
+    # is None, and this also ignores non-string test doubles).
+    sig = response.headers.get("X-Payload-SHA256")
+    if isinstance(sig, str) and sig:
+        verify_response_checksum(response)
+
+
 def is_transient_error(exception) -> bool:
     logger.debug("Evaluating retryability: %s", type(exception).__name__)
     if isinstance(exception, ChecksumMismatchError):
@@ -826,6 +842,7 @@ async def call_api(
                         f"{hub_url}/workers", content=payload_bytes, headers=headers
                     )
                     resp.raise_for_status()
+                    _verify_hub_response_if_signed(resp)
                     workers_dict = resp.json()
 
                     # Alias-tolerant role matching: workers may still advertise
@@ -853,6 +870,7 @@ async def call_api(
                             f"{hub_url}/workers", content=payload_bytes, headers=headers
                         )
                         resp.raise_for_status()
+                        _verify_hub_response_if_signed(resp)
                         workers_dict = resp.json()
                         idle_worker_ids = [
                             w_id
@@ -880,6 +898,7 @@ async def call_api(
                         f"{hub_url}/dispatch", content=dispatch_bytes, headers=headers
                     )
                     resp.raise_for_status()
+                    _verify_hub_response_if_signed(resp)
                     dispatch_res = resp.json()
                     task_id = dispatch_res["task_id"]
 
@@ -902,6 +921,7 @@ async def call_api(
                             f"{hub_url}/tasks", content=tasks_bytes, headers=headers
                         )
                         resp.raise_for_status()
+                        _verify_hub_response_if_signed(resp)
                         all_tasks = resp.json()
 
                         task_info = all_tasks.get(task_id)
