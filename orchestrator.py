@@ -2291,6 +2291,34 @@ async def run_pipeline(
             # to Claude"). A full automatic re-code loop is intentionally
             # deferred; the fix plan is surfaced for the operator/next run.
             if flow == "custom" and codex_url:
+                # Gather the ACTUAL implemented files so the reviewer audits real
+                # code, not just design+audit. Without this the reviewer never
+                # sees the sources and falsely reports files "missing"/"empty".
+                _code_sections = []
+                for _f in files_to_implement:
+                    _rel = _f.get("path")
+                    if not _rel:
+                        continue
+                    try:
+                        with open(
+                            os.path.join(project_dir, _rel),
+                            "r",
+                            encoding="utf-8",
+                        ) as _fh:
+                            _src = _fh.read()
+                    except OSError:
+                        _code_sections.append(
+                            f"### {_rel}\n(file not found on disk)"
+                        )
+                        continue
+                    if len(_src) > 8000:
+                        _src = _src[:8000] + "\n... (truncated)"
+                    _code_sections.append(f"### {_rel}\n```\n{_src}\n```")
+                implemented_code = (
+                    "\n\n".join(_code_sections)
+                    if _code_sections
+                    else "(no files were implemented)"
+                )
                 try:
                     final_review = await call_api(
                         codex_url,
@@ -2299,6 +2327,7 @@ async def run_pipeline(
                         "design and audit. If it is correct and complete, "
                         "include [APPROVED]. Otherwise list concrete issues.\n\n"
                         f"Design:\n{claude_content}\n\n"
+                        f"Implemented code:\n{implemented_code}\n\n"
                         f"Consolidated audit:\n{consolidated_audit}",
                         context={},
                         client=client,

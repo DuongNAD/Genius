@@ -1,4 +1,4 @@
-﻿---
+---
 name: researcher
 description: Grok Researcher Agent scans project files, researches requirements, and documents findings.
 ---
