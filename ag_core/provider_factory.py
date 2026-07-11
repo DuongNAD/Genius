@@ -180,8 +180,25 @@ def build_backend(backend: str, config, role: Optional[str] = None):
     api_key = None
     if key_attr:
         api_key = getattr(config, key_attr, None) or os.getenv(key_attr.upper(), "")
-    model_name = os.environ.get(f"GENIUS_MODEL_{backend.upper()}") or getattr(
-        config.models, model_attr
+    # Model precedence, most specific first (blank = unset, `or`-chained so an
+    # unset knob transparently drops through — with no role knob set this is
+    # byte-identical to the old per-backend-only resolution):
+    #   1. GENIUS_MODEL_ROLE_<ROLE>          (per-role env)
+    #   2. config.models.roles.<role>        (per-role config)
+    #   3. GENIUS_MODEL_<BACKEND>            (per-backend env)
+    #   4. config.models.<attr>              (per-backend config)
+    # Per-role lets two roles share a backend yet use different models (e.g.
+    # researcher and codex both on agy but gemini-pro vs gemini-flash).
+    role_model = ""
+    if role:
+        crole = canonical_role(role)
+        role_model = os.environ.get(
+            f"GENIUS_MODEL_ROLE_{crole.upper()}", ""
+        ) or getattr(config.models.roles, crole, "")
+    model_name = (
+        role_model
+        or os.environ.get(f"GENIUS_MODEL_{backend.upper()}")
+        or getattr(config.models, model_attr)
     )
     kwargs = {"api_key": api_key, "model_name": model_name}
     if role:

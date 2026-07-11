@@ -94,10 +94,29 @@ class AppConfig(BaseModel):
     version: str = "2.0"
 
 
+class RoleModelsConfig(BaseModel):
+    """Optional PER-ROLE model override. Wins over the per-backend model, so two
+    roles can share one backend yet use different models (e.g. researcher and
+    codex both on the agy backend but gemini-pro vs gemini-flash — impossible
+    with the per-backend model alone). Empty = fall through to the per-backend
+    model. Env equivalent: ``GENIUS_MODEL_ROLE_<ROLE>`` (e.g.
+    ``GENIUS_MODEL_ROLE_RESEARCHER``) — deliberately NOT ``GENIUS_MODEL_<ROLE>``
+    so it never collides with the ``GENIUS_MODEL_<BACKEND>`` vars for the
+    same-named claude/codex backends."""
+
+    researcher: str = ""
+    claude: str = ""
+    codex: str = ""
+    tester: str = ""
+    security: str = ""
+    devops: str = ""
+
+
 class ModelsConfig(BaseModel):
     # Empty = the CLI's own default model; a value is passed through to the
     # CLI's model flag (codex -m / claude --model / agy --model). Per-backend
-    # env override: GENIUS_MODEL_<BACKEND>.
+    # env override: GENIUS_MODEL_<BACKEND>. Per-ROLE override (wins over the
+    # per-backend value): models.roles.<role> / GENIUS_MODEL_ROLE_<ROLE>.
     openai: str = ""
     anthropic: str = ""
     # grok is an opt-in backend only (kept for GENIUS_PROVIDER_<ROLE>
@@ -109,6 +128,7 @@ class ModelsConfig(BaseModel):
     # it holds the default notebook id/alias the provider queries (override at
     # runtime with GENIUS_NOTEBOOKLM_NOTEBOOK or GENIUS_MODEL_NOTEBOOKLM).
     notebooklm: str = ""
+    roles: RoleModelsConfig = Field(default_factory=RoleModelsConfig)
 
 
 class ScannerConfig(BaseModel):
