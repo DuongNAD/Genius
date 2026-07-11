@@ -117,8 +117,12 @@ TOOLS = [
                 },
                 "pipeline": {
                     "type": "string",
-                    "enum": ["sequential", "e2e"],
-                    "description": "Pipeline variant (default 'sequential')",
+                    "enum": ["sequential", "e2e", "custom"],
+                    "description": (
+                        "Pipeline variant (default 'sequential'). 'custom' = the "
+                        "plan-first / codex-debate / codex-gpt5.6-sol final-review "
+                        "flow (honours GENIUS_REVIEW_ROLE)."
+                    ),
                 },
                 "workspace": {
                     "type": "string",
@@ -127,9 +131,11 @@ TOOLS = [
                 "require_approval": {
                     "type": "boolean",
                     "description": (
-                        "Pause after each stage (research, design, code) as "
+                        "Pause after each stage (research, design, code; plus "
+                        "review + devops on the custom flow) as "
                         "'awaiting_approval' until orchestrate_approve / "
-                        "orchestrate_reject is called (sequential pipeline only)"
+                        "orchestrate_reject is called (sequential and custom "
+                        "pipelines; not e2e)"
                     ),
                 },
             },

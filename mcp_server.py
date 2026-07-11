@@ -530,7 +530,12 @@ async def _run_orchestration(
         if pipeline == "e2e":
             await run_e2e_pipeline(prompt, workspace=workspace)
         else:
-            await run_pipeline(prompt, workspace=workspace, stage_gate=stage_gate)
+            # "sequential" or "custom"; flow="custom" selects the plan-first /
+            # codex-debate / codex-gpt5.6-sol final-review variant.
+            flow = "custom" if pipeline == "custom" else "sequential"
+            await run_pipeline(
+                prompt, workspace=workspace, stage_gate=stage_gate, flow=flow
+            )
         job["artifacts"] = _collect_artifacts(workspace or os.getcwd())
         job["status"] = "completed"
     except Exception as e:  # noqa: BLE001 - surface any pipeline failure to the client
@@ -557,8 +562,8 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         if not prompt:
             raise ValueError("orchestrate requires a non-empty 'prompt'.")
         pipeline = arguments.get("pipeline", "sequential")
-        if pipeline not in ("sequential", "e2e"):
-            raise ValueError("pipeline must be 'sequential' or 'e2e'.")
+        if pipeline not in ("sequential", "e2e", "custom"):
+            raise ValueError("pipeline must be 'sequential', 'e2e', or 'custom'.")
         workspace = arguments.get("workspace")
         require_approval = bool(arguments.get("require_approval", False))
         if require_approval and pipeline == "e2e":

@@ -211,6 +211,43 @@ async def test_run_orchestration_records_failure(tmp_path):
     assert "boom" in job["error"]
 
 
+@pytest.mark.asyncio
+async def test_run_orchestration_custom_passes_flow(tmp_path):
+    """pipeline='custom' runs run_pipeline with flow='custom' (plan-first /
+    codex-debate / codex-gpt5.6-sol final-review variant)."""
+    _register("j-custom", pipeline="custom")
+    with patch("orchestrator.run_pipeline", new=AsyncMock(return_value=None)) as rp:
+        await mcp_server._run_orchestration("j-custom", "p", "custom", str(tmp_path))
+    rp.assert_awaited_once()
+    _, kwargs = rp.call_args
+    assert kwargs.get("flow") == "custom"
+    assert mcp_server.ORCHESTRATION_JOBS["j-custom"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_run_orchestration_sequential_keeps_default_flow(tmp_path):
+    """pipeline='sequential' keeps flow='sequential' (byte-identical default)."""
+    _register("j-seq")
+    with patch("orchestrator.run_pipeline", new=AsyncMock(return_value=None)) as rp:
+        await mcp_server._run_orchestration("j-seq", "p", "sequential", str(tmp_path))
+    rp.assert_awaited_once()
+    _, kwargs = rp.call_args
+    assert kwargs.get("flow") == "sequential"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_accepts_custom_pipeline():
+    """dispatch_tool registers a 'custom' job instead of rejecting it."""
+    with patch("mcp_server._run_orchestration", new=AsyncMock()):
+        out = await mcp_server.dispatch_tool(
+            "orchestrate", {"prompt": "build x", "pipeline": "custom"}
+        )
+        await asyncio.sleep(0)
+    data = json.loads(out)
+    assert data["status"] == "running"
+    assert mcp_server.ORCHESTRATION_JOBS[data["job_id"]]["pipeline"] == "custom"
+
+
 # --- approval gates ---------------------------------------------------------
 
 
@@ -232,7 +269,7 @@ async def _wait_job_state(job_id, state, timeout=5.0):
 async def test_orchestrate_approval_gates_pause_and_resume(tmp_path):
     stages_run = []
 
-    async def fake_pipeline(prompt, workspace=None, stage_gate=None):
+    async def fake_pipeline(prompt, workspace=None, stage_gate=None, flow="sequential"):
         # Mirrors the real run_pipeline gate protocol.
         for stage in ("research", "design", "code"):
             stages_run.append(stage)
@@ -273,7 +310,7 @@ async def test_orchestrate_approval_gates_pause_and_resume(tmp_path):
 
 @pytest.mark.asyncio
 async def test_orchestrate_reject_fails_job(tmp_path):
-    async def fake_pipeline(prompt, workspace=None, stage_gate=None):
+    async def fake_pipeline(prompt, workspace=None, stage_gate=None, flow="sequential"):
         await stage_gate("research")
 
     with patch("orchestrator.run_pipeline", new=AsyncMock(side_effect=fake_pipeline)):
