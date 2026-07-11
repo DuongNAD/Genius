@@ -33,6 +33,9 @@ ROLE_MAP = dict(agent_factory.AGENT_CLASSES)
 class RunRequest(BaseModel):
     prompt: str
     context: Optional[Any] = None
+    # Per-request reasoning effort (e.g. threaded from a pipeline @deep). None ->
+    # the agent falls back to its own prompt-derived effort / env, as before.
+    effort: Optional[str] = None
 
 
 # Cap for the per-app task/idempotency stores so a long-lived skill server
@@ -159,9 +162,16 @@ def create_skill_app(role: str) -> FastAPI:
         async def _execute():
             try:
                 agent = build_agent(role, stateless=True)
-                output = await agent.run(
-                    prompt=request.prompt, context_data=request.context
-                )
+                # Only pass effort when set, so the common (None) path is
+                # byte-identical to a plain run(prompt, context_data) call and
+                # agent mocks without an effort param keep working.
+                run_kwargs = {
+                    "prompt": request.prompt,
+                    "context_data": request.context,
+                }
+                if request.effort:
+                    run_kwargs["effort"] = request.effort
+                output = await agent.run(**run_kwargs)
                 tasks[task_id] = {"status": "completed", "result": output}
             except Exception as exc:  # noqa: BLE001 - report failure to caller
                 # Server-side traceback too: str(exc) relayed to the client

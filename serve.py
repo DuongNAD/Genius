@@ -945,7 +945,13 @@ async def main_async():
     # Dynamic role resolution for prompt command execution
     prompt = args.prompt
     if prompt:
-        first_word = prompt.strip().split()[0] if prompt.strip() else ""
+        # Detect the routed command on the @modifier-stripped prompt so
+        # `@deep /code ...` still launches the codex role's server; args.prompt
+        # itself is untouched (it flows to the orchestrator, which re-parses).
+        from ag_core.directives import parse_directives
+
+        cleaned = parse_directives(prompt)[0]
+        first_word = cleaned.strip().split()[0] if cleaned.strip() else ""
         if first_word.startswith("/") and first_word in ROUTING_TABLE:
             target_role, target_port = ROUTING_TABLE[first_word]
             if target_role not in selected_roles:

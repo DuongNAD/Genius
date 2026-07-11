@@ -212,6 +212,7 @@ class ClientWorker:
                 role = task_data.get("role")
                 prompt = task_data.get("prompt")
                 context = task_data.get("context", {})
+                effort = task_data.get("effort")
 
                 from ag_core.provider_factory import canonical_role
 
@@ -237,7 +238,13 @@ class ClientWorker:
                         # worker.
                         agent = build_agent(factory_role, stateless=True)
 
-                        output = await agent.run(prompt=prompt, context_data=context)
+                        # Only pass effort when set, so the common (None) path
+                        # is byte-identical to a plain run(prompt, context_data)
+                        # call — agent mocks without an effort param still work.
+                        run_kwargs = {"prompt": prompt, "context_data": context}
+                        if effort:
+                            run_kwargs["effort"] = effort
+                        output = await agent.run(**run_kwargs)
                         status = "completed"
                         result = {"output": output}
                         self.tasks_completed += 1

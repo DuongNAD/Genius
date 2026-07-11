@@ -30,6 +30,7 @@ from ag_core.utils.cli_runner import (
     CLITimeoutError,
 )
 from ag_core.runtime import under_pytest
+from ag_core.directives import parse_directives
 from collections import OrderedDict
 
 
@@ -241,23 +242,37 @@ def write_progress_md(progress_file_path: str, status_dict: dict) -> None:
 
 def _resolve_pipeline_setup(prompt, workspace, max_debate_rounds):
     """Shared pipeline preamble: resolve the debate-round default (0 under
-    pytest), validate the prompt, derive the project name from the prompt, and
-    default the workspace to cwd. Returns (project_name, workspace,
-    max_debate_rounds). Raises PipelineError on an empty prompt."""
+    pytest), validate the prompt, derive the project name, and default the
+    workspace to cwd.
+
+    Also parses the leading ``@modifier`` run once (see ag_core.directives):
+    returns ``cleaned`` (the prompt with any leading @modifiers stripped, used
+    for slash-command DETECTION and the project slug) and ``effort`` (from
+    ``@deep``, threaded on the call stack to the structured stages whose
+    synthesized prompts carry no @deep token). The RAW ``prompt`` is what
+    callers still SEND to the agents, which re-parse @modifiers themselves — so
+    prose modifiers (@table/@critic/…) keep working via the agent, and effort
+    additionally reaches codex/claude even on synthesized prompts. For a prompt
+    with no @modifier, ``cleaned is prompt`` (byte-identical) and effort is None.
+
+    Returns (project_name, workspace, max_debate_rounds, cleaned, effort).
+    Raises PipelineError on an empty (or @modifier-only) prompt."""
     if max_debate_rounds is None:
         max_debate_rounds = 0 if under_pytest() else 2
 
-    if not prompt or not prompt.strip():
+    cleaned, directives = parse_directives(prompt or "")
+
+    if not cleaned or not cleaned.strip():
         raise PipelineError("Prompt cannot be empty.")
 
-    slugified = re.sub(r"[^a-zA-Z0-9]+", "_", prompt.strip().lower()).strip("_")
+    slugified = re.sub(r"[^a-zA-Z0-9]+", "_", cleaned.strip().lower()).strip("_")
     if not slugified:
         project_name = "default_project"
     elif len(slugified) > 50:
         project_name = (
             slugified[:40]
             + "_"
-            + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
+            + hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:8]
         )
     else:
         project_name = slugified
@@ -265,7 +280,7 @@ def _resolve_pipeline_setup(prompt, workspace, max_debate_rounds):
     if workspace is None:
         workspace = os.getcwd()
 
-    return project_name, workspace, max_debate_rounds
+    return project_name, workspace, max_debate_rounds, cleaned, directives.effort
 
 
 def _write_text(path: str, content: str) -> None:
@@ -407,6 +422,26 @@ def _is_distributed() -> bool:
         return _DISTRIBUTED_MODE_VAR.get()
     except LookupError:
         return DISTRIBUTED_MODE
+
+
+# Pipeline-scoped reasoning effort (from a leading @deep on the pipeline prompt),
+# carried exactly like the distributed-mode flag above: set once at pipeline
+# entry, read by call_api. This reaches every stage's provider on the call stack
+# — including the STRUCTURED stages whose synthesized prompts carry no @deep
+# token — without threading a param through ~20 call sites. Being a per-task
+# contextvar copy, concurrent pipelines never stomp each other's effort, and it
+# is never an environment variable.
+_PIPELINE_EFFORT_VAR: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
+    "genius_pipeline_effort"
+)
+
+
+def _pipeline_effort():
+    """The pipeline's contextvar effort if set, else None (direct-call/test)."""
+    try:
+        return _PIPELINE_EFFORT_VAR.get()
+    except LookupError:
+        return None
 
 
 DEFAULT_ANTIGRAVITY_ARGS = ["--design", "{input}", "--output", "{output}"]
@@ -622,6 +657,7 @@ async def call_api(
     context: dict = None,
     client: httpx.AsyncClient = None,
     poll_timeout: float = 60.0,
+    effort: str | None = None,
 ) -> str:
     import time
     import uuid
@@ -629,9 +665,19 @@ async def call_api(
 
     import os
 
+    # An explicit effort arg wins; otherwise inherit the pipeline-scoped effort
+    # (the @deep contextvar). None on the direct-call/test path -> byte-identical.
+    if effort is None:
+        effort = _pipeline_effort()
+
     # Key the cache by the hash of the URL, the prompt, and the sorted JSON-serialized context dictionary.
     sorted_context = json.dumps(context or {}, sort_keys=True)
-    cache_string = f"{url}\n{prompt}\n{sorted_context}"
+    # Fold effort into the cache key so calls differing only in reasoning effort
+    # don't collide; a None effort leaves the key byte-identical (and the cache
+    # is disabled under pytest anyway).
+    cache_string = f"{url}\n{prompt}\n{sorted_context}" + (
+        f"\n{effort}" if effort else ""
+    )
     cache_key = hashlib.sha256(cache_string.encode("utf-8")).hexdigest()
 
     use_cache = True
@@ -658,7 +704,12 @@ async def call_api(
         )
 
         role = None
-        first_word = prompt.strip().split()[0] if prompt.strip() else ""
+        # Detect the routed role on the @modifier-stripped prompt (the URL
+        # fallback below already self-heals, but keep detection consistent).
+        _routing_prompt = parse_directives(prompt)[0]
+        first_word = (
+            _routing_prompt.strip().split()[0] if _routing_prompt.strip() else ""
+        )
         if first_word.startswith("/") and first_word in ROUTING_TABLE:
             role = ROUTING_TABLE[first_word][0]
         else:
@@ -770,6 +821,8 @@ async def call_api(
                             "context": context or {},
                         },
                     }
+                    if effort:
+                        dispatch_payload["task_data"]["effort"] = effort
                     dispatch_checksum = calculate_checksum(dispatch_payload, secret)
                     dispatch_bytes = json.dumps(
                         dispatch_payload, sort_keys=True, separators=(",", ":")
@@ -868,6 +921,8 @@ async def call_api(
 
                 task_id = f"task_{uuid.uuid4().hex[:8]}"
                 task_data = {"role": role, "prompt": prompt, "context": context or {}}
+                if effort:
+                    task_data["effort"] = effort
 
                 async with central_hub.lock:
                     central_hub.tasks[task_id] = {
@@ -1049,6 +1104,9 @@ async def call_api(
             )
 
     req_payload = {"prompt": prompt, "context": context}
+    # Conditional so a None effort leaves the signed body byte-identical.
+    if effort:
+        req_payload["effort"] = effort
 
     # Calculate checksum for POST request body
     from ag_core.utils.security import calculate_checksum
@@ -1591,9 +1649,20 @@ async def run_pipeline(
     """
     _DISTRIBUTED_MODE_VAR.set(distributed)
 
-    project_name, workspace, max_debate_rounds = _resolve_pipeline_setup(
-        prompt, workspace, max_debate_rounds
+    project_name, workspace, max_debate_rounds, cleaned_prompt, effort = (
+        _resolve_pipeline_setup(prompt, workspace, max_debate_rounds)
     )
+    # Carry the @deep effort to every stage's provider via a per-task contextvar
+    # (read by call_api). Set AFTER the unpack that defines `effort`.
+    _PIPELINE_EFFORT_VAR.set(effort)
+    if effort:
+        logger.info(
+            "Pipeline reasoning effort '%s' (from @deep) applies on the call "
+            "stack to the codex/claude stages; the researcher primary provider "
+            "agy has no effort flag, so it is a no-op there unless agy fails "
+            "over to claude/codex.",
+            effort,
+        )
 
     project_dir = os.path.join(workspace, "projects", project_name)
     os.makedirs(os.path.join(project_dir, "src"), exist_ok=True)
@@ -1610,8 +1679,14 @@ async def run_pipeline(
     audit_file = os.path.join(workspace, "audit.md")
     deploy_file = os.path.join(workspace, "deploy.md")
 
-    # Intercept direct slash command routing before cleaning up all files
-    first_word = prompt.strip().split()[0] if prompt.strip() else ""
+    # Intercept direct slash command routing before cleaning up all files.
+    # Detect on the @modifier-stripped prompt so `@deep /code ...` still routes
+    # to the single /code stage; the RAW `prompt` is still what agents receive
+    # (they re-parse @modifiers). `effort` (from @deep) is threaded on the call
+    # stack to every stage below.
+    first_word = (
+        cleaned_prompt.strip().split()[0] if cleaned_prompt.strip() else ""
+    )
     is_slash_cmd = first_word.startswith("/") and first_word in ROUTING_TABLE
 
     # 1. Clean up old output files
@@ -2484,9 +2559,20 @@ async def run_e2e_pipeline(
     """Execute the E2E automated pipeline (Claude -> critic critique -> Codex implementation & self-healing -> Tester test generation & self-healing)."""
     _DISTRIBUTED_MODE_VAR.set(distributed)
 
-    project_name, workspace, max_debate_rounds = _resolve_pipeline_setup(
-        prompt, workspace, max_debate_rounds
+    project_name, workspace, max_debate_rounds, cleaned_prompt, effort = (
+        _resolve_pipeline_setup(prompt, workspace, max_debate_rounds)
     )
+    # Carry the @deep effort to every stage's provider via a per-task contextvar
+    # (read by call_api). Set AFTER the unpack that defines `effort`.
+    _PIPELINE_EFFORT_VAR.set(effort)
+    if effort:
+        logger.info(
+            "Pipeline reasoning effort '%s' (from @deep) applies on the call "
+            "stack to the codex/claude stages; the researcher primary provider "
+            "agy has no effort flag, so it is a no-op there unless agy fails "
+            "over to claude/codex.",
+            effort,
+        )
 
     project_dir = os.path.join(workspace, "projects", project_name)
     os.makedirs(os.path.join(project_dir, "src"), exist_ok=True)
@@ -2529,7 +2615,13 @@ async def run_e2e_pipeline(
     try:
         # Step 1: Claude (Architect) - Call API
         logger.info("--- Running E2E Step: Claude (Planning) ---")
-        claude_prompt = prompt if prompt.startswith("/plan") else f"/plan {prompt}"
+        # Detect /plan on the @modifier-stripped prompt, but forward the RAW
+        # prompt so the architect re-parses @deep etc. itself.
+        claude_prompt = (
+            prompt
+            if cleaned_prompt.lstrip().startswith("/plan")
+            else f"/plan {prompt}"
+        )
         claude_content = await call_api(
             claude_url,
             api_key,
