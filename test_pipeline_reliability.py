@@ -9,7 +9,12 @@ import pytest
 from unittest.mock import patch, AsyncMock
 
 import orchestrator
-from orchestrator import is_test_module, save_raw_response, PipelineError
+from orchestrator import (
+    is_test_module,
+    is_pytest_infra,
+    save_raw_response,
+    PipelineError,
+)
 
 
 # --- is_test_module ----------------------------------------------------------
@@ -27,6 +32,22 @@ def test_is_test_module_ignores_regular_sources():
     assert not is_test_module("contest.py")
     assert not is_test_module("latest_results.py")
     assert not is_test_module("src/testing_utils.py")
+
+
+# --- is_pytest_infra ----------------------------------------------------------
+
+
+def test_is_pytest_infra_detects_conftest_and_init():
+    assert is_pytest_infra("conftest.py")
+    assert is_pytest_infra("tests/conftest.py")
+    assert is_pytest_infra("pkg/__init__.py")
+    assert is_pytest_infra("src\\__init__.py")
+
+
+def test_is_pytest_infra_ignores_regular_sources():
+    assert not is_pytest_infra("src/main.py")
+    assert not is_pytest_infra("palindrome.py")
+    assert not is_pytest_infra("test_conftest.py")  # a real test module, not infra
 
 
 # --- save_raw_response --------------------------------------------------------

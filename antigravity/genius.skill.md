@@ -18,6 +18,9 @@ Steps:
    - `require_approval`: `true` ONLY if the user asked to approve each stage
      (otherwise omit it). When true, resume with `genius_orchestrate_approve` /
      `genius_orchestrate_reject` at each `awaiting_approval` pause.
+   - **Do NOT pass a `workspace` argument.** Genius writes to its own writable
+     jobs directory, so your project stays clean and artifacts never fail to
+     save. (A relative/non-writable workspace is ignored anyway.)
    It returns a `job_id`.
 
 2. Poll `genius_orchestrate_status` with that `job_id` roughly every 20 seconds

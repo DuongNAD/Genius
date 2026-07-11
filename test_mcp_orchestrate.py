@@ -248,6 +248,35 @@ async def test_orchestrate_accepts_custom_pipeline():
     assert mcp_server.ORCHESTRATION_JOBS[data["job_id"]]["pipeline"] == "custom"
 
 
+@pytest.mark.asyncio
+async def test_orchestrate_ignores_unusable_relative_workspace():
+    """A relative workspace (resolved against the MCP server's cwd, often '/')
+    is ignored in favour of the guaranteed-writable jobs dir, so artifact
+    writes cannot fail silently."""
+    with patch("mcp_server._run_orchestration", new=AsyncMock()):
+        out = await mcp_server.dispatch_tool(
+            "orchestrate", {"prompt": "build x", "workspace": "test"}
+        )
+        await asyncio.sleep(0)
+    data = json.loads(out)
+    ws = mcp_server.ORCHESTRATION_JOBS[data["job_id"]]["workspace"]
+    assert ws != "test"
+    assert ws.startswith(mcp_server._jobs_root())
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_keeps_usable_absolute_workspace(tmp_path):
+    """An absolute workspace with a writable parent is honoured as-is."""
+    ws_in = str(tmp_path / "myws")
+    with patch("mcp_server._run_orchestration", new=AsyncMock()):
+        out = await mcp_server.dispatch_tool(
+            "orchestrate", {"prompt": "build x", "workspace": ws_in}
+        )
+        await asyncio.sleep(0)
+    data = json.loads(out)
+    assert mcp_server.ORCHESTRATION_JOBS[data["job_id"]]["workspace"] == ws_in
+
+
 # --- approval gates ---------------------------------------------------------
 
 

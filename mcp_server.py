@@ -5,6 +5,7 @@ import time
 import uuid
 import hmac
 import asyncio
+import logging
 import traceback
 from typing import Any, Dict, List
 from fastapi import FastAPI, HTTPException, Header
@@ -552,6 +553,22 @@ def _jobs_root() -> str:
     )
 
 
+def _workspace_is_usable(workspace: str) -> bool:
+    """A caller-supplied workspace is safe only when it is an ABSOLUTE path
+    whose parent directory is writable.
+
+    A GUI launcher (e.g. Antigravity) starts the MCP server with cwd ``/``, so a
+    relative workspace like ``"test"`` resolves to the read-only ``/test`` and a
+    non-writable parent makes every ``_write_text`` fail silently — the pipeline
+    then "completes" with zero artifacts and the job looks stuck forever. In
+    that case orchestrate falls back to the guaranteed-writable jobs dir.
+    """
+    if not workspace or not os.path.isabs(workspace):
+        return False
+    parent = os.path.dirname(os.path.abspath(workspace)) or os.sep
+    return os.path.isdir(parent) and os.access(parent, os.W_OK)
+
+
 async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
     """Route a tool call to either the full pipeline or a single agent.
 
@@ -572,6 +589,17 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
                 "pipeline (the e2e variant has no stage gates)."
             )
         job_id = uuid.uuid4().hex
+        if workspace and not _workspace_is_usable(workspace):
+            # A relative or non-writable workspace (the MCP server's cwd is
+            # often "/" under a GUI launch) would make every artifact write
+            # fail silently and the job look stuck forever. Ignore it and use
+            # the guaranteed-writable jobs dir instead.
+            logging.getLogger(__name__).warning(
+                "orchestrate: ignoring unusable workspace %r (relative path or "
+                "non-writable parent); using the jobs dir instead.",
+                workspace,
+            )
+            workspace = None
         if not workspace:
             # Isolate each job in its own directory. Concurrent jobs sharing the
             # CWD clobber each other's fixed-name artifacts (design.md, app.py,

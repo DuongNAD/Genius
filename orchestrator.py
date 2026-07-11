@@ -123,6 +123,21 @@ def is_test_module(rel_path: str) -> bool:
     return name.startswith("test_") or norm.startswith("tests/") or "/tests/" in norm
 
 
+def is_pytest_infra(rel_path: str) -> bool:
+    """True for pytest support files that must NOT get generated unit tests
+    (``conftest.py``, ``__init__.py``).
+
+    A real run generated a broken ``test_conftest.py`` (an ``importlib.reload``
+    on a not-yet-imported module) that failed collection and dragged the
+    self-heal loop through pointless retries. These files are still implemented
+    and security-audited, but they never get a tests-for-infrastructure module.
+    """
+    return os.path.basename(rel_path.replace("\\", "/")) in (
+        "conftest.py",
+        "__init__.py",
+    )
+
+
 def save_raw_response(project_dir: str, name: str, content: str) -> None:
     """Persist a raw agent response under ``logs/raw/`` for debugging.
 
@@ -1431,10 +1446,15 @@ async def process_single_file(
                     "and security audit; it will be executed directly."
                 )
                 security_report = ""
-            elif not file_is_python:
+            elif not file_is_python or is_pytest_infra(file_path):
+                _skip_reason = (
+                    "is pytest infrastructure (conftest.py/__init__.py)"
+                    if file_is_python
+                    else "is not a Python module"
+                )
                 logger.info(
-                    f"{file_path} is not a Python module: skipping test "
-                    "generation; running the security audit only."
+                    f"{file_path} {_skip_reason}: skipping test generation; "
+                    "running the security audit only."
                 )
                 security_req_prompt = f"/audit Audit the following file for security issues (secrets, unsafe configuration, injection vectors) in '{file_path}':\n\n{code_to_write}"
                 try:
