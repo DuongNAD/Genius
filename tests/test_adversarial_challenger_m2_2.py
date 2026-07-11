@@ -198,8 +198,14 @@ async def test_worker_unexpected_websocket_close(run_server):
                 if data.get("type") in ("run_task", "dispatch"):
                     # Task is dispatched! Signal the test to trigger disconnection
                     task_started_event.set()
-                    # Do not report result; just hold connection to simulate executing task
                     break
+            # Hold the connection open so the task stays "running" until the test
+            # explicitly closes ws_client (the simulated abrupt disconnect).
+            # Exiting the `async with` here would close the socket immediately;
+            # under uvicorn's websockets-sansio impl the server processes that
+            # disconnect fast enough to fail the task before the test asserts it
+            # is running. The test cancels worker_task to end this sleep.
+            await asyncio.sleep(30)
 
     worker_task = asyncio.create_task(run_flaky_worker())
     await asyncio.sleep(0.2)  # wait for registry
@@ -322,6 +328,12 @@ async def test_result_payload_tampering_leaks_worker(run_server):
                     await ws.send(json.dumps(res_payload))
                     task_dispatched_event.set()
                     break
+            # Stay connected after sending the (rejected) result so the worker
+            # remains registered while the test verifies it was returned to idle.
+            # Closing here (via the `async with` exit) would unregister the
+            # worker first under uvicorn's faster websockets-sansio disconnect
+            # handling. The test cancels worker_task to end this sleep.
+            await asyncio.sleep(30)
 
     worker_task = asyncio.create_task(run_tampering_worker())
     await asyncio.sleep(0.2)
