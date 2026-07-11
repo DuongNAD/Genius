@@ -84,7 +84,12 @@ class AnthropicProvider(BaseProvider):
         )
 
     async def send_prompt(
-        self, prompt: str, system: str | None = None, **kwargs: Any
+        self,
+        prompt: str,
+        system: str | None = None,
+        *,
+        effort: str | None = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         async with self.semaphore:
             await self.rate_limiter.acquire()
@@ -126,24 +131,28 @@ class AnthropicProvider(BaseProvider):
             # not a Claude tier — ignored with a warning). GENIUS_CLAUDE_FALLBACK
             # _MODEL adds --fallback-model so an unavailable/declined primary
             # (e.g. Opus 4.8) falls back to another model (e.g. Fable 5).
-            role = str(self.extra_params.get("role") or "").strip().lower()
-            effort = ""
-            if role:
-                effort = (
-                    os.getenv(f"GENIUS_CLAUDE_EFFORT_{role.upper()}", "")
-                    .strip()
-                    .lower()
-                )
-            if not effort:
-                effort = os.getenv("GENIUS_CLAUDE_EFFORT", "").strip().lower()
-            if effort:
-                if effort in _CLAUDE_EFFORT_LEVELS:
-                    cmd.extend(["--effort", effort])
+            # Precedence: per-request arg (e.g. from @deep) > GENIUS_CLAUDE_
+            # EFFORT_<ROLE> > GENIUS_CLAUDE_EFFORT. The arg is passed on the
+            # call stack, so concurrent jobs at different efforts never collide.
+            effort_value = (effort or "").strip().lower()
+            if not effort_value:
+                role = str(self.extra_params.get("role") or "").strip().lower()
+                if role:
+                    effort_value = (
+                        os.getenv(f"GENIUS_CLAUDE_EFFORT_{role.upper()}", "")
+                        .strip()
+                        .lower()
+                    )
+                if not effort_value:
+                    effort_value = os.getenv("GENIUS_CLAUDE_EFFORT", "").strip().lower()
+            if effort_value:
+                if effort_value in _CLAUDE_EFFORT_LEVELS:
+                    cmd.extend(["--effort", effort_value])
                 else:
                     logger.warning(
-                        "Ignoring GENIUS_CLAUDE_EFFORT=%r: valid levels are %s "
+                        "Ignoring reasoning effort %r: valid levels are %s "
                         "(Claude has no 'ultra' tier — 'max' is the ceiling).",
-                        effort,
+                        effort_value,
                         list(_CLAUDE_EFFORT_LEVELS),
                     )
             fallback_model = os.getenv("GENIUS_CLAUDE_FALLBACK_MODEL", "").strip()

@@ -350,6 +350,8 @@ class OpenAIProvider(BaseProvider):
         prompt: str,
         system: str | None = None,
         workdir: str | None = None,
+        *,
+        effort: str | None = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         async with self.semaphore:
@@ -403,7 +405,10 @@ class OpenAIProvider(BaseProvider):
             # THIS call only, so a globally-configured "ultra" can be dialed to
             # a cheaper "high" for the pipeline without editing the user's codex
             # config. Passed through verbatim (codex validates the value).
-            codex_effort = os.getenv("GENIUS_CODEX_EFFORT", "").strip().lower()
+            # Per-request arg (e.g. from @deep) wins over GENIUS_CODEX_EFFORT;
+            # passed verbatim (codex validates it). On the call stack, not env,
+            # so parallel pipeline calls stay isolated.
+            codex_effort = (effort or os.getenv("GENIUS_CODEX_EFFORT", "")).strip().lower()
             if codex_effort:
                 cmd += ["-c", f"model_reasoning_effort={codex_effort}"]
             if workdir:

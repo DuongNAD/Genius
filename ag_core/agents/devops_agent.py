@@ -3,6 +3,7 @@ from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
 from ag_core.utils.prompt_templates import DEVOPS_PROMPT
+from ag_core.directives import ALL_MODIFIERS
 
 
 class DevOpsAgent(BaseAgent):
@@ -22,6 +23,8 @@ class DevOpsAgent(BaseAgent):
     SYSTEM_PROMPT = DEVOPS_PROMPT
     USES_MEMORY = True
     DEFAULT_OUTPUT_FILE = "deploy.md"
+    # Prose output consumed verbatim -> accepts every modifier.
+    ACCEPTED_MODIFIERS = ALL_MODIFIERS
 
     def __init__(
         self, provider: BaseProvider, config: Config = None, **kwargs: Any
@@ -30,6 +33,10 @@ class DevOpsAgent(BaseAgent):
         super().__init__(name="DevOpsAgent", provider=provider, **kwargs)
 
     async def run(
-        self, prompt: str | None = None, context_data: dict | None = None
+        self,
+        prompt: str | None = None,
+        context_data: dict | None = None,
+        *,
+        effort: str | None = None,
     ) -> str:
-        return await self._run_standard(prompt, context_data)
+        return await self._run_standard(prompt, context_data, effort=effort)

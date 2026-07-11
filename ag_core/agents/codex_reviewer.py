@@ -88,6 +88,9 @@ class CodexReviewerAgent(BaseAgent):
     # downstream: the appended pytest log of this host repo's own suite was
     # the largest fenced block and got extracted instead of the code).
     GENERATION_COMMANDS = ("/code", "/refactor")
+    # Output is parsed by extract_code + ast.parse -> effort only; format/
+    # variants are excluded so they can never perturb the ```python``` block.
+    ACCEPTED_MODIFIERS = frozenset({"deep"})
     SLASH_PREFIXES = {
         "/code": "Write clean, robust, and well-documented code for the following request:\n\n",
         "/refactor": "Refactor the existing code or components to improve readability, performance, and structure, explaining the changes made:\n\n",
@@ -104,9 +107,14 @@ class CodexReviewerAgent(BaseAgent):
         super().__init__(name="CodexReviewerAgent", provider=provider, **kwargs)
 
     async def run(
-        self, prompt: str | None = None, context_data: dict | None = None
+        self,
+        prompt: str | None = None,
+        context_data: dict | None = None,
+        *,
+        effort: str | None = None,
     ) -> str:
         user_prompt, cmd = self._route_slash_command(self._resolve_user_prompt(prompt))
+        effort = effort or self.directives.effort
         generation_mode = cmd in self.GENERATION_COMMANDS
 
         # Scan project files (or use provided context_data) and format context
@@ -127,7 +135,9 @@ class CodexReviewerAgent(BaseAgent):
             system_prompt = CODER_PROMPT + SURGICAL_EDIT_GUIDANCE
 
         # Invoke provider
-        response = await self.provider.send_prompt(full_prompt, system=system_prompt)
+        response = await self.provider.send_prompt(
+            full_prompt, system=system_prompt, effort=effort
+        )
         content = response.get("content", "")
         usage = response.get("usage", {})
 
@@ -250,7 +260,7 @@ class CodexReviewerAgent(BaseAgent):
                     "complete file content in a single ```python fenced block."
                 )
                 response = await self.provider.send_prompt(
-                    retry_prompt, system=CODER_PROMPT
+                    retry_prompt, system=CODER_PROMPT, effort=effort
                 )
                 content = response.get("content", "")
                 usage = response.get("usage", {})

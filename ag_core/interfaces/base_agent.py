@@ -5,6 +5,7 @@ from typing import Any, List, Dict
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.memory.vector_store import VectorMemory
 from ag_core.utils.logger import log_transaction
+from ag_core.directives import parse_directives, PromptDirectives
 
 
 class BaseAgent(abc.ABC):
@@ -17,6 +18,11 @@ class BaseAgent(abc.ABC):
         self.name = name
         self.provider = provider
         self.extra_params = kwargs
+        # Per-run @modifier state, (re)set by _resolve_user_prompt each call.
+        # Safe as instance state only because skill/worker/MCP build a fresh
+        # agent per request (stateless bundle); never reuse an agent across
+        # concurrent requests or directives would bleed.
+        self.directives = PromptDirectives()
 
         # Read from config memory section if available
         config = kwargs.get("config") or getattr(self, "config", None)
@@ -182,9 +188,101 @@ class BaseAgent(abc.ABC):
     SYSTEM_PROMPT = ""
     USES_MEMORY = False
     DEFAULT_OUTPUT_FILE = "output.md"
+    # @modifier names this agent accepts (see ag_core.directives). Default: none,
+    # so a modifier never reaches an agent that hasn't opted in. Structure-
+    # sensitive agents (codex/tester/security/architect) accept only "deep"
+    # (effort) so format/variants can't perturb their code/JSON output.
+    ACCEPTED_MODIFIERS: frozenset = frozenset()
 
     def _resolve_user_prompt(self, prompt: str | None) -> str:
-        return prompt or self.extra_params.get("prompt") or self.DEFAULT_TASK
+        raw = prompt or self.extra_params.get("prompt") or self.DEFAULT_TASK
+        cleaned, directives = parse_directives(raw)
+        # Gate here, before any guidance/effort is applied, so a rejected
+        # modifier is stripped from BOTH the text and the directive object.
+        self.directives = self._filter_directives(directives)
+        # A directive-only prompt ("@deep") cleans to "" -> fall back to the
+        # agent's default task, preserving the old empty-prompt behaviour.
+        return cleaned or self.DEFAULT_TASK
+
+    def _filter_directives(self, d: PromptDirectives) -> PromptDirectives:
+        """Keep only modifiers this agent's ACCEPTED_MODIFIERS allows; move the
+        rest into ``rejected`` (telemetry). Empty directives pass through so the
+        common no-modifier path allocates nothing new."""
+        if d.is_empty():
+            return d
+        acc = self.ACCEPTED_MODIFIERS
+        rejected = list(d.rejected)
+
+        def gate(name, present):
+            if present and name not in acc:
+                rejected.append(name)
+                return False
+            return present
+
+        effort = d.effort if gate("deep", d.effort is not None) else None
+        critic = gate("critic", d.critic)
+        variants = d.variants if gate("variants", d.variants is not None) else None
+        ideas = d.ideas if gate("ideas", d.ideas is not None) else None
+        formats = frozenset(f for f in d.formats if f in acc)
+        rejected.extend(f for f in d.formats if f not in acc)
+        return PromptDirectives(
+            effort=effort,
+            critic=critic,
+            variants=variants,
+            ideas=ideas,
+            formats=formats,
+            raw=d.raw,
+            rejected=tuple(rejected),
+        )
+
+    # Guidance text per modifier. Effort (@deep) is absent — it goes to the
+    # provider, not the prompt. @tight/@redpen act on the CURRENT request's
+    # inlined text (skill/worker/MCP are stateless — there is no prior answer).
+    _MODIFIER_GUIDANCE = {
+        "critic": (
+            "Draft an answer, then adversarially critique your own draft for the"
+            " strongest objections, then output only the improved final answer."
+        ),
+        "simple": "Explain in simple words with concrete examples.",
+        "table": "Present the answer as a Markdown table.",
+        "steps": "Present the answer as a numbered, step-by-step list.",
+        "tight": (
+            "Tighten the text provided in this request: cut filler, keep the"
+            " important information."
+        ),
+        "natural": "Write in a natural, human style.",
+        "redpen": (
+            "Act as a line editor and red-pen the text provided in this request:"
+            " fix grammar, clarity, and phrasing."
+        ),
+    }
+
+    def _directive_guidance(self) -> str:
+        """Render the accepted directives into a trailing guidance block, or ""
+        when there is nothing to say (the byte-identical no-op path)."""
+        d = self.directives
+        if d.is_empty():
+            return ""
+        parts = []
+        if d.critic:
+            parts.append(self._MODIFIER_GUIDANCE["critic"])
+        if d.variants:
+            parts.append(
+                f"Produce {d.variants} genuinely distinct alternative answers,"
+                f" each clearly labelled 'Variant 1'..'Variant {d.variants}'."
+            )
+        if d.ideas:
+            parts.append(
+                f"Brainstorm {d.ideas} distinct ideas as a bulleted list."
+            )
+        for name in ("simple", "table", "steps", "tight", "natural", "redpen"):
+            if name in d.formats:
+                parts.append(self._MODIFIER_GUIDANCE[name])
+        if not parts:
+            return ""
+        return "\n\n--- Response directives ---\n" + "\n".join(
+            f"- {p}" for p in parts
+        )
 
     def _route_slash_command(self, user_prompt: str) -> tuple:
         """(rewritten_prompt, cmd) — cmd is the leading "/token" if present
@@ -213,6 +311,9 @@ class BaseAgent(abc.ABC):
         self, user_prompt: str, memory_context: str, context: str
     ) -> str:
         full_prompt = f"{self.format_history()}{user_prompt}\n"
+        guidance = self._directive_guidance()
+        if guidance:
+            full_prompt += f"{guidance}\n"
         if memory_context:
             full_prompt += f"{memory_context}\n"
         full_prompt += f"\nProject files context:\n{context}"
@@ -235,7 +336,11 @@ class BaseAgent(abc.ABC):
         )
 
     async def _run_standard(
-        self, prompt: str | None = None, context_data: dict | None = None
+        self,
+        prompt: str | None = None,
+        context_data: dict | None = None,
+        *,
+        effort: str | None = None,
     ) -> str:
         user_prompt, _ = self._route_slash_command(self._resolve_user_prompt(prompt))
         _, context = await self.scan_context_async(context_data)
@@ -244,8 +349,13 @@ class BaseAgent(abc.ABC):
             memory_context = await self._memory_context_block(user_prompt)
         full_prompt = self._compose_full_prompt(user_prompt, memory_context, context)
 
+        # An explicit run(effort=...) wins over the @deep-derived value. Passed
+        # keyword-only down the call stack (never via env / instance state) so
+        # concurrent jobs can't interfere.
         response = await self.provider.send_prompt(
-            full_prompt, system=self.SYSTEM_PROMPT
+            full_prompt,
+            system=self.SYSTEM_PROMPT,
+            effort=effort or self.directives.effort,
         )
         content = response.get("content", "")
         usage = response.get("usage", {})

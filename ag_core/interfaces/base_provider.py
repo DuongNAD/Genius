@@ -141,12 +141,17 @@ class BaseProvider(abc.ABC):
         return sem
 
     @abc.abstractmethod
-    async def send_prompt(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    async def send_prompt(
+        self, prompt: str, *, effort: str | None = None, **kwargs: Any
+    ) -> Dict[str, Any]:
         """
         Sends a prompt to the provider's model asynchronously.
 
         Args:
             prompt: The string prompt to send to the model.
+            effort: Optional per-request reasoning effort (e.g. from @deep),
+                passed on the call stack — never via env — so concurrent jobs
+                don't interfere. Providers without an effort knob ignore it.
             **kwargs: Extra parameters to forward to the API (e.g., temperature, max_tokens).
 
         Returns:

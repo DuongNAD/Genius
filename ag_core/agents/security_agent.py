@@ -25,6 +25,9 @@ class SecurityAgent(BaseAgent):
     SYSTEM_PROMPT = SECURITY_PROMPT
     USES_MEMORY = True
     DEFAULT_OUTPUT_FILE = "audit.md"
+    # Output is parsed by parse_security_verdict (JSON/verdict) -> effort only;
+    # a @table here could drop to the free-text heuristic and invert the verdict.
+    ACCEPTED_MODIFIERS = frozenset({"deep"})
 
     def __init__(
         self, provider: BaseProvider, config: Config = None, **kwargs: Any
@@ -33,6 +36,10 @@ class SecurityAgent(BaseAgent):
         super().__init__(name="SecurityAgent", provider=provider, **kwargs)
 
     async def run(
-        self, prompt: str | None = None, context_data: dict | None = None
+        self,
+        prompt: str | None = None,
+        context_data: dict | None = None,
+        *,
+        effort: str | None = None,
     ) -> str:
-        return await self._run_standard(prompt, context_data)
+        return await self._run_standard(prompt, context_data, effort=effort)

@@ -113,7 +113,12 @@ class AgyProvider(BaseProvider):
         )
 
     async def send_prompt(
-        self, prompt: str, system: str | None = None, **kwargs: Any
+        self,
+        prompt: str,
+        system: str | None = None,
+        *,
+        effort: str | None = None,  # accepted for interface parity; agy has no effort flag
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         async with self.semaphore:
             await self.rate_limiter.acquire()

@@ -53,6 +53,9 @@ class ClaudeArchitectAgent(BaseAgent):
     SYSTEM_PROMPT = ARCHITECT_SYSTEM_PROMPT
     USES_MEMORY = True
     DEFAULT_OUTPUT_FILE = "design.md"
+    # Output is parsed into a DesignPlan JSON block -> effort only; no
+    # format/variants that could perturb the single ```json``` contract.
+    ACCEPTED_MODIFIERS = frozenset({"deep"})
 
     def __init__(
         self, provider: BaseProvider, config: Config = None, **kwargs: Any
@@ -61,6 +64,10 @@ class ClaudeArchitectAgent(BaseAgent):
         super().__init__(name="ClaudeArchitectAgent", provider=provider, **kwargs)
 
     async def run(
-        self, prompt: str | None = None, context_data: dict | None = None
+        self,
+        prompt: str | None = None,
+        context_data: dict | None = None,
+        *,
+        effort: str | None = None,
     ) -> str:
-        return await self._run_standard(prompt, context_data)
+        return await self._run_standard(prompt, context_data, effort=effort)

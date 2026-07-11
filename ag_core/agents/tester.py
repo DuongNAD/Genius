@@ -23,6 +23,9 @@ class TesterAgent(BaseAgent):
         "/unit-test": "Generate comprehensive unit tests and test suites using pytest for the project files context, focusing on edge cases and validation:\n\n",
         "/stress-test": "Create a performance or stress testing script or scenario to simulate heavy concurrent load, analyzing latency and failure modes:\n\n",
     }
+    # Output is written AND executed as a pytest module -> effort only; nothing
+    # that could perturb the runnable ```python``` block.
+    ACCEPTED_MODIFIERS = frozenset({"deep"})
     USES_MEMORY = False
     DEFAULT_OUTPUT_FILE = "test_generated.py"
 
@@ -34,9 +37,14 @@ class TesterAgent(BaseAgent):
         super().__init__(name="TesterAgent", provider=provider, **kwargs)
 
     async def run(
-        self, prompt: str | None = None, context_data: dict | None = None
+        self,
+        prompt: str | None = None,
+        context_data: dict | None = None,
+        *,
+        effort: str | None = None,
     ) -> str:
         user_prompt, _ = self._route_slash_command(self._resolve_user_prompt(prompt))
+        effort = effort or self.directives.effort
 
         # Scan project files (or use provided context_data) and format context
         _, context = await self.scan_context_async(context_data)
@@ -45,7 +53,9 @@ class TesterAgent(BaseAgent):
         from ag_core.utils.prompt_templates import TESTER_PROMPT
 
         # Invoke provider
-        response = await self.provider.send_prompt(full_prompt, system=TESTER_PROMPT)
+        response = await self.provider.send_prompt(
+            full_prompt, system=TESTER_PROMPT, effort=effort
+        )
         content = response.get("content", "")
         usage = response.get("usage", {})
 
@@ -109,7 +119,7 @@ class TesterAgent(BaseAgent):
                         f"Please fix the test code and return it. Original context:\n{full_prompt}"
                     )
                     response = await self.provider.send_prompt(
-                        retry_prompt, system=TESTER_PROMPT
+                        retry_prompt, system=TESTER_PROMPT, effort=effort
                     )
                     content = response.get("content", "")
                     usage = response.get("usage", {})

@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, patch
 from ag_core.providers.anthropic_provider import AnthropicProvider
 
 
-def _capture_claude_argv(monkeypatch, env, role=None):
+def _capture_claude_argv(monkeypatch, env, role=None, effort=None):
     for k in (
         "GENIUS_CLAUDE_EFFORT",
         "GENIUS_CLAUDE_FALLBACK_MODEL",
@@ -46,7 +46,7 @@ def _capture_claude_argv(monkeypatch, env, role=None):
             patch("shutil.which", return_value="/usr/local/bin/claude"),
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
         ):
-            await provider.send_prompt("hi")
+            await provider.send_prompt("hi", effort=effort)
 
     asyncio.run(run())
     return captured["args"]
@@ -67,6 +67,36 @@ def test_effort_max_passed(monkeypatch):
 def test_effort_is_lowercased(monkeypatch):
     argv = _capture_claude_argv(monkeypatch, {"GENIUS_CLAUDE_EFFORT": "XHIGH"})
     assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+# --- per-request effort arg (@deep threading, no env) ------------------------
+
+
+def test_per_request_effort_arg_added(monkeypatch):
+    # @deep -> send_prompt(effort="high") adds --effort with no env set.
+    argv = _capture_claude_argv(monkeypatch, {}, effort="high")
+    assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_per_request_effort_overrides_env(monkeypatch):
+    argv = _capture_claude_argv(
+        monkeypatch, {"GENIUS_CLAUDE_EFFORT": "low"}, effort="max"
+    )
+    assert argv[argv.index("--effort") + 1] == "max"
+
+
+def test_effort_none_falls_back_to_env(monkeypatch):
+    # No per-request effort -> the existing env behaviour is preserved.
+    argv = _capture_claude_argv(
+        monkeypatch, {"GENIUS_CLAUDE_EFFORT": "high"}, effort=None
+    )
+    assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_invalid_per_request_effort_dropped(monkeypatch):
+    # A non-Claude tier (e.g. codex's "ultra") is warned + dropped, not passed.
+    argv = _capture_claude_argv(monkeypatch, {}, effort="ultra")
+    assert "--effort" not in argv
 
 
 def test_invalid_effort_ultra_is_ignored(monkeypatch):

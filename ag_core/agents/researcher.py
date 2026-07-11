@@ -3,6 +3,7 @@ from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
 from ag_core.utils.prompt_templates import RESEARCHER_PROMPT
+from ag_core.directives import ALL_MODIFIERS
 
 
 class ResearcherAgent(BaseAgent):
@@ -23,6 +24,8 @@ class ResearcherAgent(BaseAgent):
     SYSTEM_PROMPT = RESEARCHER_PROMPT
     USES_MEMORY = False
     DEFAULT_OUTPUT_FILE = "research.md"
+    # Prose output consumed verbatim -> accepts every modifier.
+    ACCEPTED_MODIFIERS = ALL_MODIFIERS
 
     def __init__(
         self, provider: BaseProvider, config: Config = None, **kwargs: Any
@@ -31,6 +34,10 @@ class ResearcherAgent(BaseAgent):
         super().__init__(name="ResearcherAgent", provider=provider, **kwargs)
 
     async def run(
-        self, prompt: str | None = None, context_data: dict | None = None
+        self,
+        prompt: str | None = None,
+        context_data: dict | None = None,
+        *,
+        effort: str | None = None,
     ) -> str:
-        return await self._run_standard(prompt, context_data)
+        return await self._run_standard(prompt, context_data, effort=effort)
