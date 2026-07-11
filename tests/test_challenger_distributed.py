@@ -189,29 +189,35 @@ async def test_busy_worker_reregistration_race(network, hub):
     w1.set_network(network)
     await w1.register()
 
-    # Dispatch first task
-    payload = {"role": "grok", "task_data": "task_1 sleep:0.5"}
-    headers = hub.create_headers(payload)
-    await network.send_to_hub("/dispatch", payload, headers)
-    await asyncio.sleep(0.005)
+    try:
+        # Dispatch first task
+        payload = {"role": "grok", "task_data": "task_1 sleep:0.5"}
+        headers = hub.create_headers(payload)
+        await network.send_to_hub("/dispatch", payload, headers)
+        await asyncio.sleep(0.005)
 
-    assert hub.workers["w1"]["status"] == "busy"
-    assert hub.tasks["task_1"]["status"] == "running"
+        assert hub.workers["w1"]["status"] == "busy"
+        assert hub.tasks["task_1"]["status"] == "running"
 
-    # Re-register w1 while it is busy
-    await w1.register()
+        # Re-register w1 while it is busy
+        await w1.register()
 
-    # Worker status must still be "busy", and task_1 is still "running"
-    assert hub.workers["w1"]["status"] == "busy"
-    assert hub.tasks["task_1"]["status"] == "running"
+        # Worker status must still be "busy", and task_1 is still "running"
+        assert hub.workers["w1"]["status"] == "busy"
+        assert hub.tasks["task_1"]["status"] == "running"
 
-    # Dispatch second task - it should be queued as pending because w1 is busy
-    payload2 = {"role": "grok", "task_data": "task_2"}
-    headers2 = hub.create_headers(payload2)
-    await network.send_to_hub("/dispatch", payload2, headers2)
-    await asyncio.sleep(0.005)
+        # Dispatch second task - it should be queued as pending because w1 is busy
+        payload2 = {"role": "grok", "task_data": "task_2"}
+        headers2 = hub.create_headers(payload2)
+        await network.send_to_hub("/dispatch", payload2, headers2)
+        await asyncio.sleep(0.005)
 
-    assert hub.tasks["task_2"]["status"] == "pending"
+        assert hub.tasks["task_2"]["status"] == "pending"
+    finally:
+        # task_1 is a `sleep:0.5` execution still running on w1 when the asserts
+        # finish. Drain it so it doesn't outlive the test as a pending task that
+        # the event loop destroys on close (PytestUnraisableExceptionWarning).
+        await w1.aclose()
 
 
 # =<ctrl42>= CHALLENGE 5: ClientWorker Lacks Retry for Result Reporting =cat=

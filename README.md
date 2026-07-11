@@ -81,6 +81,18 @@ Mở Terminal mới và chạy để theo dõi toàn bộ hệ thống đang là
 python dashboard.py
 ```
 
+**Cách 4: Chạy bằng Docker (tuỳ chọn)**
+```bash
+# Token là BẮT BUỘC khi dashboard expose ra 0.0.0.0 — compose sẽ từ chối start nếu thiếu.
+export GENIUS_DASHBOARD_TOKEN=$(openssl rand -hex 16)
+docker compose up --build
+```
+Lưu ý về Docker:
+- **Dữ liệu tách khỏi code:** DB (`genius.db`) nằm trong volume `genius_data` mount tại `/data` (không phải `/app`), trỏ qua `GENIUS_DB_PATH=/data/genius.db`. Nhờ vậy `/app` luôn là source thuần, rebuild không bị volume cũ che khuất.
+- **Bảo mật dashboard:** dashboard dump toàn bộ prompt/kết quả/lỗi đã lưu, nên khi bind ngoài loopback bắt buộc phải có `GENIUS_DASHBOARD_TOKEN`; thiếu token thì `dashboard.py` fail-closed và compose cũng không start.
+- **CLI tác tử KHÔNG được đóng gói sẵn:** image chỉ chạy hub/dashboard/điều phối. Các provider `subprocess` ra `agy`/`claude`/`codex`/`grok`/`nlm` — mỗi CLI cần login tương tác riêng (không bake credential vào image được). Muốn chạy pipeline thật trong container: extend image cài CLI + mount config đã login (xem hướng dẫn trong `Dockerfile`), hoặc chạy pipeline trên host.
+- `.dockerignore` giữ `.env`, `genius.db` (~96MB) và `.git` khỏi build context — đừng xoá.
+
 ### 3. Cấu hình (`config.yaml`)
 Toàn bộ hệ thống giờ đây được gom về một cấu hình chung tại `config.yaml`. Bạn có thể tuỳ chỉnh:
 - Giới hạn memory/log

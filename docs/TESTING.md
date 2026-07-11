@@ -5,9 +5,9 @@
 
 ## 1. Trạng thái hiện tại (2026-07-04, sau R4)
 
-- **823 test** thu thập: **821 pass, 2 skip** (0 fail), ~2 phút trên máy dev.
-- **CI** (`.github/workflows/ci.yml`): ma trận per-OS theo nhánh — `windows-latest` cho `win`/`main`, `macos-latest` cho `mac`/`main` (bản mac chạy kèm uvloop) — Python 3.11, `pip install -r requirements.txt` → `python -m pytest`. `pytest-timeout` đặt trần 300s/test (backstop treo).
-- **Lint** không nằm trong CI mà ở **pre-commit** (pin black 24.4.2; flake8 nay có trong `requirements.txt` @7.3.0).
+- **918 test** thu thập: **915 pass, 3 skip** (0 fail), ~2 phút trên máy dev. Bộ test **hermetic**: `conftest.py`/`ag_core.config` không nạp `.env` dưới pytest nên kết quả khớp CI dù máy dev có `.env`.
+- **CI** (`.github/workflows/ci.yml`): ma trận per-OS theo nhánh — `windows-latest` cho `win`/`main`, `macos-latest` cho `mac`/`main` (bản mac chạy kèm uvloop) — Python 3.11, `pip install -r requirements.txt` → `python -m pytest`. `pytest-timeout` đặt trần 300s/test (backstop treo); `PytestUnraisableExceptionWarning` bị gate thành lỗi (bắt task async rò rỉ).
+- **Gate độc lập OS** (job `lint-and-audit` + `docker-build` trên `ubuntu-latest`, mọi nhánh): `flake8 .`, `pip check`, `pip-audit` (advisory), và `docker build` smoke. Ngoài ra **pre-commit** vẫn chạy black 24.4.2 + flake8 cục bộ.
 - **Không chạy 2 tiến trình pytest cùng lúc** trên một máy (dùng chung `genius.db` + service registry).
 
 > Các số liệu cũ trong `history/` (243 test, 540 test…) là **snapshot lịch sử** ở các mốc trước, không phản ánh tổng hiện tại.

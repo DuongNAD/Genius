@@ -1,0 +1,64 @@
+# Keep the Docker build context small and free of secrets/state.
+# Without this file, the Dockerfile's `COPY . .` would sweep in .env,
+# the ~96MB genius.db, and the .git history — leaking secrets into the
+# image and bloating every layer.
+
+# --- Secrets / local config -------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Databases / runtime state ----------------------------------------------
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Version control / CI ---------------------------------------------------
+.git
+.gitignore
+.gitattributes
+.github
+
+# --- Generated pipeline output / scratch ------------------------------------
+projects/
+temp_workspace_*/
+*.log
+logs/
+
+# --- Python caches / build artifacts ----------------------------------------
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- Virtual environments ---------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# --- Editor / OS / tooling metadata -----------------------------------------
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+.claude/
+.codex/
+
+# --- Docker files themselves (not needed inside the image) ------------------
+Dockerfile
+docker-compose.yml
+.dockerignore

@@ -68,12 +68,33 @@ def init_db():
             )
         """
         )
+        # Indexes for the two hot lookups on agent_logs: the per-task status
+        # UPDATEs (WHERE task_id = ?) and the dashboard's busy check
+        # (WHERE agent_name IN (...) AND status IN (...)). Without them every
+        # such query is a full table scan that worsens as history grows.
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_logs_task_id "
+            "ON agent_logs(task_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_logs_name_status "
+            "ON agent_logs(agent_name, status)"
+        )
         conn.commit()
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         raise
     finally:
         conn.close()
+
+    # Bound history growth at startup. Non-fatal: retention must never stop a
+    # service from booting. Uses a fresh connection so a prune failure can't
+    # leave init_db's transaction half-applied.
+    try:
+        with get_db_connection() as prune_conn:
+            _prune_history_impl(prune_conn)
+    except Exception as e:
+        logger.error(f"History retention prune failed during init_db: {e}")
 
 
 @contextmanager
@@ -236,6 +257,73 @@ def _log_conversation_impl(conn, prompt: str, result: str):
     conn.commit()
 
 
+# --- History retention ---
+#
+# conversations/agent_logs are append-only (INSERT/UPDATE, never trimmed), so a
+# long-lived install grows without bound — a single conversation stores the full
+# prompt + LLM result, so the file reaches tens of MB per few thousand rows.
+# These caps trim the OLDEST rows once a table exceeds the limit. The row cap
+# defaults to a generous ceiling so a normal-sized DB is never touched; age
+# retention is opt-in. seen_jtis is intentionally excluded (already bounded by
+# the anti-replay DELETEs in the JWT layer).
+_DEFAULT_HISTORY_MAX_ROWS = 100000
+_HISTORY_TABLES = ("conversations", "agent_logs")
+
+
+def _int_env(name: str, default: int) -> int:
+    """Parse a non-negative int env var. Blank/unset -> default; garbage ->
+    default (a typo must not silently disable or over-aggressively enable
+    pruning)."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return max(int(raw), 0)
+    except ValueError:
+        logger.warning(f"Invalid integer for {name}={raw!r}; using {default}")
+        return default
+
+
+def _history_retention():
+    """Return (max_rows, max_age_days) for the history tables.
+
+    ``GENIUS_DB_MAX_ROWS`` caps rows per table (default 100000; ``0`` disables).
+    ``GENIUS_DB_RETENTION_DAYS`` drops rows older than N days (default 0 = off).
+    """
+    return (
+        _int_env("GENIUS_DB_MAX_ROWS", _DEFAULT_HISTORY_MAX_ROWS),
+        _int_env("GENIUS_DB_RETENTION_DAYS", 0),
+    )
+
+
+def _prune_history_impl(conn, max_rows=None, max_age_days=None):
+    cfg_rows, cfg_days = _history_retention()
+    if max_rows is None:
+        max_rows = cfg_rows
+    if max_age_days is None:
+        max_age_days = cfg_days
+    if max_rows <= 0 and max_age_days <= 0:
+        return
+    cursor = conn.cursor()
+    for table in _HISTORY_TABLES:  # fixed names, never user input
+        if max_age_days > 0:
+            cursor.execute(
+                f"DELETE FROM {table} WHERE timestamp < datetime('now', ?)",
+                (f"-{int(max_age_days)} days",),
+            )
+        if max_rows > 0:
+            # id is a monotonic AUTOINCREMENT PK: find the id of the Nth-newest
+            # row and delete everything at or below it. Uses the PK index — no
+            # full scan or big IN (...) list.
+            boundary = cursor.execute(
+                f"SELECT id FROM {table} ORDER BY id DESC LIMIT 1 OFFSET ?",
+                (max_rows,),
+            ).fetchone()
+            if boundary:
+                cursor.execute(f"DELETE FROM {table} WHERE id <= ?", (boundary[0],))
+    conn.commit()
+
+
 # --- Public API Functions ---
 
 
@@ -274,6 +362,18 @@ def log_conversation(prompt: str, result: str):
         _submit_write(_log_conversation_impl, prompt, result)
     except Exception as e:
         logger.error(f"Error logging conversation: {e}")
+
+
+def prune_history(max_rows=None, max_age_days=None):
+    """Trim the history tables to their configured caps (see
+    :func:`_history_retention`). Runs on the single writer thread so it never
+    races the logging writes. Non-fatal: retention failures are logged, not
+    raised. init_db() already prunes at startup; call this to trim a long-lived
+    process without a restart."""
+    try:
+        _submit_write(_prune_history_impl, max_rows, max_age_days)
+    except Exception as e:
+        logger.error(f"Error pruning history tables: {e}")
 
 
 async def log_conversation_async(prompt: str, result: str):

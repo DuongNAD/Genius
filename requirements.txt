@@ -11,7 +11,11 @@ tiktoken==0.12.0
 httpx==0.28.1
 python-dotenv==1.2.2
 fastapi==0.135.1
-uvicorn==0.41.0
+# >=0.46 satisfies google-antigravity (installed alongside the agy CLI) and, at
+# 0.51, its `ws="auto"` resolves to the new websockets-sansio implementation —
+# so the hub/dashboard servers stop importing the deprecated `websockets.legacy`
+# module (validated: WS test suite passes with zero legacy DeprecationWarnings).
+uvicorn==0.51.0
 flake8==7.3.0
 websockets==16.0
 requests==2.32.5

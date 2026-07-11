@@ -129,6 +129,24 @@ class ClientWorker:
                 pass
             self.heartbeat_task = None
 
+    async def aclose(self):
+        """Cancel and await every background task this worker owns — the
+        heartbeat loop plus any in-flight ``execute_task`` coroutines. Without
+        this, a worker left mid-task (e.g. a still-sleeping dispatched task when
+        a test ends) leaks a pending task that the event loop destroys on close,
+        surfacing as a PytestUnraisableExceptionWarning. Idempotent and safe to
+        call more than once."""
+        await self.stop_heartbeats()
+        # Snapshot: execute_task's finally clause pops running_tasks as each
+        # task settles, mutating the dict while we iterate.
+        running = list(self.running_tasks.values())
+        for t in running:
+            t.cancel()
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+        self.running_tasks.clear()
+        self.active_tasks.clear()
+
     async def _heartbeat_loop(self):
         while self.running:
             if self.ws is not None:

@@ -32,6 +32,54 @@ jobs:
         run: |
           python -m pytest
 
+  # OS-independent quality gates. Run once on Linux for every branch (no ref
+  # gating) so a lint break, a broken dependency set, or a broken Dockerfile
+  # fails fast regardless of which platform branch the change targets.
+  lint-and-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint (flake8)
+        run: flake8 .
+
+      - name: Dependency consistency (pip check)
+        run: pip check
+
+      - name: Vulnerability audit (pip-audit)
+        # Advisory, not blocking: a newly-disclosed CVE in a transitive dep
+        # would otherwise redden an unrelated PR. The finding still shows in the
+        # job log; promote to a hard gate once the dependency set is triaged.
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Docker smoke build
+        # Validates the Dockerfile + .dockerignore + requirements install cleanly
+        # into the image. Build only (no push, no run) — the agent CLIs the
+        # providers need aren't in the image by design, so there is no pipeline
+        # to exercise here.
+        run: docker build -t genius:ci .
+
   test-macos:
     if: >-
       github.ref_name == 'mac' || github.ref_name == 'main' ||

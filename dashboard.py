@@ -699,4 +699,20 @@ if __name__ == "__main__":
         or "127.0.0.1"
     )
     port = int(os.environ.get("GENIUS_DASHBOARD_PORT") or 8080)
+
+    # Fail closed. The data endpoints dump every stored prompt, result, and
+    # error, so binding a non-loopback interface without a token would serve
+    # that history open to the network. Refuse to start in that configuration
+    # instead of silently exposing it; require_dashboard_auth only enforces the
+    # token when one is set, so a missing token on a public bind must be caught
+    # here at startup.
+    loopback_hosts = {"127.0.0.1", "::1", "localhost", ""}
+    if host.strip() not in loopback_hosts and not _dashboard_token():
+        sys.exit(
+            f"Refusing to start: GENIUS_DASHBOARD_HOST={host!r} exposes the "
+            "dashboard beyond loopback, but GENIUS_DASHBOARD_TOKEN is not set. "
+            "The dashboard serves the full prompt/result/error history. Set "
+            "GENIUS_DASHBOARD_TOKEN=<secret> to require auth, or bind 127.0.0.1."
+        )
+
     uvicorn.run("dashboard:app", host=host, port=port, ws="auto")

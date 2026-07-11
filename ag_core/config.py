@@ -14,6 +14,14 @@ _original_env = dict(os.environ)
 
 # Find and load .env robustly
 def _load_env():
+    # Under pytest, never load the developer's .env. CI runs with no .env, so
+    # auto-loading it locally leaks GENIUS_PROVIDER_*, CLI-path, and behavior-
+    # toggle overrides into the suite — turning a CI-green commit red on a dev
+    # machine (and, per the provider chains, occasionally hanging). This mirrors
+    # the guard already in _reload_env_safely(); conftest seeds the mock API keys
+    # the tests need before this module is imported.
+    if under_pytest():
+        return
     curr_dir = os.path.abspath(os.getcwd())
     while curr_dir:
         temp_path = os.path.join(curr_dir, ".env")

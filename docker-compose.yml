@@ -1,5 +1,11 @@
 version: '3.8'
 
+# Persistent state (the SQLite DB) lives in the named `genius_data` volume,
+# mounted at /data — deliberately NOT at /app. Mounting a named volume over
+# /app used to shadow the image's source tree: after `docker compose build`
+# the container kept serving the volume's stale copy of the code. Keeping the
+# volume at /data leaves /app as pure, rebuildable source and isolates data
+# from code. GENIUS_DB_PATH points every service at /data/genius.db.
 services:
   hub:
     build: .
@@ -7,9 +13,9 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - GENIUS_DB_PATH=/app/genius.db
+      - GENIUS_DB_PATH=/data/genius.db
     volumes:
-      - genius_data:/app
+      - genius_data:/data
 
   dashboard:
     build: .
@@ -17,15 +23,19 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - GENIUS_DB_PATH=/app/genius.db
-      # The dashboard now binds loopback by default; inside a container it must
-      # bind all interfaces for the 8080 port mapping to reach it. Set a token
-      # to require auth: GENIUS_DASHBOARD_TOKEN=<secret>.
+      - GENIUS_DB_PATH=/data/genius.db
+      # The dashboard binds loopback by default; inside a container it must bind
+      # all interfaces for the 8080 port mapping to reach it. Because the data
+      # endpoints dump every stored prompt/result/error, a token is REQUIRED
+      # when exposed: compose refuses to start if GENIUS_DASHBOARD_TOKEN is unset
+      # (pass it via the host env or a .env file next to this compose file), and
+      # dashboard.py itself fails closed on a non-loopback bind without a token.
       - GENIUS_DASHBOARD_HOST=0.0.0.0
+      - GENIUS_DASHBOARD_TOKEN=${GENIUS_DASHBOARD_TOKEN:?set GENIUS_DASHBOARD_TOKEN to expose the dashboard}
     depends_on:
       - hub
     volumes:
-      - genius_data:/app
+      - genius_data:/data
 
   grok_researcher:
     build: .
@@ -33,11 +43,11 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - GENIUS_DB_PATH=/app/genius.db
+      - GENIUS_DB_PATH=/data/genius.db
     depends_on:
       - hub
     volumes:
-      - genius_data:/app
+      - genius_data:/data
 
   claude_architect:
     build: .
@@ -45,11 +55,11 @@ services:
     ports:
       - "8002:8002"
     environment:
-      - GENIUS_DB_PATH=/app/genius.db
+      - GENIUS_DB_PATH=/data/genius.db
     depends_on:
       - hub
     volumes:
-      - genius_data:/app
+      - genius_data:/data
 
   codex_reviewer:
     build: .
@@ -57,11 +67,11 @@ services:
     ports:
       - "8003:8003"
     environment:
-      - GENIUS_DB_PATH=/app/genius.db
+      - GENIUS_DB_PATH=/data/genius.db
     depends_on:
       - hub
     volumes:
-      - genius_data:/app
+      - genius_data:/data
 
   tester_agent:
     build: .
@@ -69,11 +79,11 @@ services:
     ports:
       - "8004:8004"
     environment:
-      - GENIUS_DB_PATH=/app/genius.db
+      - GENIUS_DB_PATH=/data/genius.db
     depends_on:
       - hub
     volumes:
-      - genius_data:/app
+      - genius_data:/data
 
   security_agent:
     build: .
@@ -81,11 +91,11 @@ services:
     ports:
       - "8005:8005"
     environment:
-      - GENIUS_DB_PATH=/app/genius.db
+      - GENIUS_DB_PATH=/data/genius.db
     depends_on:
       - hub
     volumes:
-      - genius_data:/app
+      - genius_data:/data
 
   devops_agent:
     build: .
@@ -93,11 +103,11 @@ services:
     ports:
       - "8006:8006"
     environment:
-      - GENIUS_DB_PATH=/app/genius.db
+      - GENIUS_DB_PATH=/data/genius.db
     depends_on:
       - hub
     volumes:
-      - genius_data:/app
+      - genius_data:/data
 
 volumes:
   genius_data:
