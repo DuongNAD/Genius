@@ -488,8 +488,22 @@ from ag_core.orchestration_helpers import (  # noqa: E402,F401
     format_cmd_args,
     detect_vulnerabilities,
     parse_security_verdict,
-    security_is_blocking,
 )
+
+
+def security_is_blocking(security_report: str) -> bool:
+    """Decide whether the security audit should block acceptance of the code.
+
+    Defined here (not in orchestration_helpers) so it calls
+    ``parse_security_verdict`` / ``detect_vulnerabilities`` through orchestrator's
+    OWN namespace — callers/tests that monkeypatch
+    ``orchestrator.detect_vulnerabilities`` or ``orchestrator.parse_security_verdict``
+    still take effect. A helper-module copy would resolve those names in
+    orchestration_helpers and silently bypass the patch."""
+    verdict = parse_security_verdict(security_report)
+    if verdict is not None:
+        return bool(verdict.get("blocking"))
+    return detect_vulnerabilities(security_report)
 
 
 def validate_file(path, step_name, is_input=True):

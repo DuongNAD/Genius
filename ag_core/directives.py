@@ -166,6 +166,10 @@ def parse_directives(text: str) -> Tuple[str, PromptDirectives]:
         if token.startswith("@"):
             name, _, value = token[1:].partition("=")
             has_value = "=" in token
+            # Case-insensitive like the legacy /HUMAN aliases below, so mobile
+            # autocapitalization (`@Deep`, `@Table`) still resolves rather than
+            # leaking the literal token into the prompt.
+            name = name.lower()
             if name in MODIFIER_TABLE:
                 _apply_token(name, value if has_value else None, state)
                 raw.append(token)

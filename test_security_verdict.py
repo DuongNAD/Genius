@@ -1,7 +1,28 @@
 """Tests for the machine-readable security verdict and the blocking gate
 (Phase 2 B5 / H2 / H3)."""
 
+import orchestrator
 from orchestrator import parse_security_verdict, security_is_blocking
+
+
+def test_security_is_blocking_respects_patched_detect(monkeypatch):
+    # A prose report with no structured verdict falls back to
+    # detect_vulnerabilities; patching it at the orchestrator namespace must
+    # take effect (security_is_blocking lives in orchestrator so the call
+    # resolves there, not in a helper-module copy).
+    report = "plain prose security report with no json verdict block"
+    assert parse_security_verdict(report) is None
+    monkeypatch.setattr(orchestrator, "detect_vulnerabilities", lambda r: True)
+    assert orchestrator.security_is_blocking(report) is True
+    monkeypatch.setattr(orchestrator, "detect_vulnerabilities", lambda r: False)
+    assert orchestrator.security_is_blocking(report) is False
+
+
+def test_security_is_blocking_respects_patched_verdict(monkeypatch):
+    monkeypatch.setattr(
+        orchestrator, "parse_security_verdict", lambda r: {"blocking": True}
+    )
+    assert orchestrator.security_is_blocking("anything") is True
 
 
 def test_verdict_blocking_true():

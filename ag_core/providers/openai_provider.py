@@ -12,6 +12,14 @@ from ag_core.utils.cli_runner import (
     spawn_cli,
     tail_text,
 )
+from ag_core.utils.logger import logger
+
+# Common codex reasoning-effort values. codex validates the real (install-
+# specific) set itself, so an out-of-set value is still passed through (forward-
+# compatible with new tiers) but WARNED — otherwise a carried-over Claude tier
+# like "xhigh"/"max" would make codex exit non-zero and silently fail over to
+# the next backend with no hint of the typo (unlike anthropic, which validates).
+_CODEX_EFFORT_LEVELS = ("minimal", "low", "medium", "high")
 
 # Codex is a login-based desktop CLI (ChatGPT auth). If a machine also exports
 # OPENAI_API_KEY / OPENAI_BASE_URL (e.g. a LiteLLM or other OpenAI-compatible
@@ -410,6 +418,15 @@ class OpenAIProvider(BaseProvider):
             # so parallel pipeline calls stay isolated.
             codex_effort = (effort or os.getenv("GENIUS_CODEX_EFFORT", "")).strip().lower()
             if codex_effort:
+                if codex_effort not in _CODEX_EFFORT_LEVELS:
+                    logger.warning(
+                        "Codex reasoning effort %r is not a common value %s; "
+                        "codex may reject it and the call would fail over to the "
+                        "next backend. (Claude tiers like 'xhigh'/'max' are not "
+                        "codex efforts.)",
+                        codex_effort,
+                        list(_CODEX_EFFORT_LEVELS),
+                    )
                 cmd += ["-c", f"model_reasoning_effort={codex_effort}"]
             if workdir:
                 # Point Codex's working root at a caller-provided directory so

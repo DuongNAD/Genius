@@ -201,8 +201,10 @@ class BaseAgent(abc.ABC):
         # modifier is stripped from BOTH the text and the directive object.
         self.directives = self._filter_directives(directives)
         # A directive-only prompt ("@deep") cleans to "" -> fall back to the
-        # agent's default task, preserving the old empty-prompt behaviour.
-        return cleaned or self.DEFAULT_TASK
+        # agent's default task. Use .strip() (not plain truthiness) so a
+        # whitespace-only prompt also falls back, matching the orchestrator's
+        # _resolve_pipeline_setup check.
+        return cleaned if cleaned.strip() else self.DEFAULT_TASK
 
     def _filter_directives(self, d: PromptDirectives) -> PromptDirectives:
         """Keep only modifiers this agent's ACCEPTED_MODIFIERS allows; move the

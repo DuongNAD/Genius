@@ -159,3 +159,18 @@ def test_raw_tokens_recorded():
 
 def test_default_directives_is_empty():
     assert PromptDirectives().is_empty()
+
+
+# --- case-insensitivity (mobile autocapitalization) --------------------------
+
+
+def test_modifier_case_insensitive_effort():
+    cleaned, d = parse_directives("@Deep Explain consensus")
+    assert d.effort == DEEP_EFFORT
+    assert cleaned == "Explain consensus"  # @Deep stripped, not leaked
+
+
+def test_modifier_case_insensitive_format_and_value():
+    _, d = parse_directives("@TABLE @Variants=3 Summarize")
+    assert "table" in d.formats
+    assert d.variants == 3

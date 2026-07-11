@@ -126,6 +126,13 @@ async def test_concurrency_isolation():
 
 
 @pytest.mark.asyncio
+async def test_whitespace_only_prompt_uses_default_task():
+    agent = _agent("researcher")
+    await agent.run(prompt="   ", context_data={})
+    assert type(agent).DEFAULT_TASK in agent.provider.calls[0]["prompt"]
+
+
+@pytest.mark.asyncio
 async def test_plain_prompt_composition_unchanged():
     # No directive -> guidance must be absent (byte-identical no-op path).
     agent = _agent("researcher")

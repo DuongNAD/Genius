@@ -210,13 +210,6 @@ def parse_security_verdict(security_report: str):
     return None
 
 
-def security_is_blocking(security_report: str) -> bool:
-    """
-    Decide whether the security audit should block acceptance of the code.
-    Prefers a structured verdict (the security agent's machine-readable output);
-    falls back to free-text detection for legacy/prose reports.
-    """
-    verdict = parse_security_verdict(security_report)
-    if verdict is not None:
-        return bool(verdict.get("blocking"))
-    return detect_vulnerabilities(security_report)
+# security_is_blocking lives in orchestrator.py (not here) so it resolves
+# parse_security_verdict/detect_vulnerabilities through orchestrator's namespace,
+# keeping those monkeypatch points effective.

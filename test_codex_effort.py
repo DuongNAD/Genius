@@ -82,3 +82,16 @@ def test_codex_effort_none_falls_back_to_env(monkeypatch):
 def test_codex_argv_unchanged_when_no_effort(monkeypatch):
     argv = _capture_codex_argv(monkeypatch, {}, effort=None)
     assert not any(str(a).startswith("model_reasoning_effort=") for a in argv)
+
+
+def test_codex_uncommon_effort_still_passed_forward_compat(monkeypatch):
+    # An out-of-set value (e.g. a carried-over Claude tier) is still passed
+    # through (codex validates its own install-specific set) but a warning is
+    # logged so a typo isn't silent. Here we assert the forward-compat pass.
+    argv = _capture_codex_argv(monkeypatch, {}, effort="xhigh")
+    assert "model_reasoning_effort=xhigh" in argv
+
+
+def test_codex_common_effort_passed(monkeypatch):
+    argv = _capture_codex_argv(monkeypatch, {}, effort="minimal")
+    assert "model_reasoning_effort=minimal" in argv
