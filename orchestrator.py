@@ -1262,6 +1262,8 @@ async def process_single_file(
     message_bus,
     parent_art_id,
     design_plan_content="",
+    flow: str = "sequential",
+    claude_url: str = None,
 ):
     from ag_core.utils.message_bus import Artifact
 
@@ -1300,7 +1302,49 @@ async def process_single_file(
             # 1. Call Codex API /code
             codex_req_prompt = f"/code Implement the file '{file_path}' according to this specification:\n{specification}"
             if attempt > 1:
-                codex_req_prompt += f"\n\nPrevious implementation attempt failed check.\nTest Failures/Logs:\n{truncate_log(test_failures_logs)}\n\nSecurity Report:\n{truncate_log(security_report)}"
+                raw_feedback = (
+                    f"\n\nPrevious implementation attempt failed check.\n"
+                    f"Test Failures/Logs:\n{truncate_log(test_failures_logs)}\n\n"
+                    f"Security Report:\n{truncate_log(security_report)}"
+                )
+                diagnosed = False
+                if flow == "custom" and claude_url:
+                    # Custom self-heal: Claude(Max) diagnoses the ROOT CAUSE from
+                    # the logs and prescribes concrete fixes for the gemini coder,
+                    # instead of dumping raw logs at it (user's flow: "Claude Max
+                    # finds the cause and directs gemini to fix"). Falls back to
+                    # the raw logs if the diagnosis call fails.
+                    diagnose_prompt = (
+                        "You are the architect. A generated implementation of "
+                        f"'{file_path}' failed its checks. Diagnose the ROOT "
+                        "CAUSE and give concrete, numbered fix instructions for "
+                        "the coder. Do NOT write the code yourself.\n\n"
+                        f"Specification:\n{specification}"
+                        + raw_feedback
+                    )
+                    try:
+                        diagnosis = await call_api(
+                            claude_url,
+                            api_key,
+                            diagnose_prompt,
+                            context={},
+                            client=client,
+                            poll_timeout=poll_timeout,
+                        )
+                        codex_req_prompt += (
+                            "\n\nThe previous attempt failed. The architect "
+                            "diagnosed the cause and prescribed these fixes:\n"
+                            f"{diagnosis}"
+                        )
+                        diagnosed = True
+                    except Exception as e:
+                        logger.warning(
+                            "Custom self-heal diagnosis failed (%s); using raw "
+                            "logs instead.",
+                            e,
+                        )
+                if not diagnosed:
+                    codex_req_prompt += raw_feedback
                 codex_req_prompt += (
                     "\n\nDo NOT run tests, commands, or tools. Output ONLY the "
                     "complete file content in a single ```python fenced block."
@@ -1654,12 +1698,19 @@ async def run_pipeline(
     max_debate_rounds: int = None,
     distributed: bool = False,
     stage_gate=None,
+    flow: str = "sequential",
 ):
     """Execute the sequential pipeline (Research -> Claude -> Codex -> Tester -> Security -> DevOps).
 
     ``stage_gate`` is an optional ``async def gate(stage: str)`` awaited after
     the research, design and code stages complete; it may pause (human
     approval) or raise to abort. None (the default) runs straight through.
+
+    ``flow`` selects the pipeline variant: ``"sequential"`` (default, the path
+    above) or ``"custom"`` — the opt-in user-tailored flow (plan-first, codex
+    debate, Claude-diagnosed self-heal, final review, per-stage gates). Every
+    custom-only behaviour lives behind ``if flow == "custom":`` so the default
+    branch is byte-identical to before.
     """
     _DISTRIBUTED_MODE_VAR.set(distributed)
 
@@ -1816,12 +1867,35 @@ async def run_pipeline(
             db_path=os.path.join(project_dir, "logs", "message_bus.db")
         )
 
+        # CUSTOM plan-first: Claude drafts the plan from the RAW prompt BEFORE
+        # research, so research is informed by the plan (user's flow: plan ->
+        # research -> debate). DEFAULT: research first, then Claude designs from
+        # it below. claude_content stays None in the default path until then.
+        plan_first = flow == "custom"
+        claude_content = None
+        if plan_first:
+            logger.info("--- Custom flow: Claude drafts the plan first ---")
+            claude_content = await call_api(
+                claude_url,
+                api_key,
+                prompt,
+                context=scanned_files,
+                client=client,
+                poll_timeout=poll_timeout,
+            )
+
+        # Default: research context is scanned_files verbatim (byte-identical).
+        # Custom: add the draft plan so research is informed by it.
+        research_ctx = scanned_files
+        if plan_first and claude_content is not None:
+            research_ctx = dict(scanned_files)
+            research_ctx["plan.md"] = claude_content
         try:
             research_content = await call_api(
                 researcher_url,
                 api_key,
                 prompt,
-                context=scanned_files,
+                context=research_ctx,
                 client=client,
                 poll_timeout=poll_timeout,
             )
@@ -1871,14 +1945,18 @@ async def run_pipeline(
 
         scanned_files["research.md"] = claude_prompt
 
-        claude_content = await call_api(
-            claude_url,
-            api_key,
-            claude_prompt,
-            context=scanned_files,
-            client=client,
-            poll_timeout=poll_timeout,
-        )
+        # DEFAULT: Claude designs FROM the research. CUSTOM: claude_content was
+        # already drafted plan-first, so the debate below (now with research
+        # available) refines it instead of a second full design call.
+        if not plan_first:
+            claude_content = await call_api(
+                claude_url,
+                api_key,
+                claude_prompt,
+                context=scanned_files,
+                client=client,
+                poll_timeout=poll_timeout,
+            )
 
         def _write_design_files(content):
             """Persist the design to disk. Called immediately after the initial
@@ -1894,7 +1972,10 @@ async def run_pipeline(
         # the already-produced (and paid-for) design is safe on disk.
         _write_design_files(claude_content)
 
-        # Multi-Agent Debate Refinement
+        # Multi-Agent Debate Refinement. DEFAULT critic = researcher role;
+        # CUSTOM critic = codex (user's flow: "codex debates the plan"). The
+        # refiner stays Claude ("route back to Claude to revise") in both.
+        critic_url = codex_url if flow == "custom" else researcher_url
         if max_debate_rounds > 0:
             logger.info(
                 f"--- Starting Multi-Agent Debate Refinement (Max Rounds: {max_debate_rounds}) ---"
@@ -1921,7 +2002,7 @@ async def run_pipeline(
                     # scanned workspace every round is pure token burn (the
                     # MCP debate has always passed {} for the same reason).
                     critic_content = await call_api(
-                        researcher_url,
+                        critic_url,
                         api_key,
                         critic_prompt,
                         context={},
@@ -2124,6 +2205,8 @@ async def run_pipeline(
                         message_bus,
                         claude_art_id,
                         design_plan_content=design_plan_content,
+                        flow=flow,
+                        claude_url=claude_url,
                     )
                     status_dict[file_path] = "completed"
                     update_progress_md(status_dict)
@@ -2201,6 +2284,59 @@ async def run_pipeline(
             except Exception as e:
                 logger.warning(f"Failed to write audit.md: {e}")
 
+            # CUSTOM: a final reviewer (codex/gpt-5.6 per config) audits the
+            # implemented project against its design + audit; if it does not
+            # emit [APPROVED], Claude analyses the review and prescribes fixes,
+            # recorded in review.md (user's flow: "review -> route issues back
+            # to Claude"). A full automatic re-code loop is intentionally
+            # deferred; the fix plan is surfaced for the operator/next run.
+            if flow == "custom" and codex_url:
+                try:
+                    final_review = await call_api(
+                        codex_url,
+                        api_key,
+                        "/security Review the implemented project against its "
+                        "design and audit. If it is correct and complete, "
+                        "include [APPROVED]. Otherwise list concrete issues.\n\n"
+                        f"Design:\n{claude_content}\n\n"
+                        f"Consolidated audit:\n{consolidated_audit}",
+                        context={},
+                        client=client,
+                        poll_timeout=poll_timeout,
+                    )
+                    if "[APPROVED]" in final_review:
+                        logger.info("Custom final review approved the implementation.")
+                    elif claude_url:
+                        fix_plan = await call_api(
+                            claude_url,
+                            api_key,
+                            "A reviewer raised issues with the implementation. "
+                            "Analyse the root cause and prescribe concrete "
+                            f"fixes.\n\nReview:\n{final_review}",
+                            context={},
+                            client=client,
+                            poll_timeout=poll_timeout,
+                        )
+                        try:
+                            _write_text(
+                                os.path.join(project_dir, "review.md"),
+                                review_content
+                                + "\n\n## Final review\n"
+                                + final_review
+                                + "\n\n## Claude fix plan\n"
+                                + fix_plan,
+                            )
+                        except Exception:
+                            pass
+                        logger.info(
+                            "Custom final review raised issues; Claude fix plan "
+                            "recorded in review.md."
+                        )
+                except Exception as e:
+                    logger.warning("Custom final review failed (%s); continuing.", e)
+                if stage_gate is not None:
+                    await stage_gate("review")
+
             if stage_gate is not None:
                 await stage_gate("code")
 
@@ -2264,6 +2400,12 @@ async def run_pipeline(
             logger.info(
                 f"Step 'DevOps' successfully completed. Output verified: {deploy_file}"
             )
+
+            # CUSTOM: report the final deploy step for approval too, so the
+            # custom flow gates after EVERY stage (research/design/code/review/
+            # devops), not only the first three.
+            if flow == "custom" and stage_gate is not None:
+                await stage_gate("devops")
 
             logger.info(
                 "Pipeline executed successfully and all files implemented, verified, and deployed."
@@ -3182,9 +3324,11 @@ def main():
     # Pipeline selection
     parser.add_argument(
         "--pipeline",
-        choices=["sequential", "e2e"],
+        choices=["sequential", "e2e", "custom"],
         default="sequential",
-        help="Pipeline type to execute",
+        help="Pipeline type: sequential (default), e2e, or custom (opt-in "
+        "user-tailored flow: plan-first, codex debate, Claude-diagnosed "
+        "self-heal, final review, per-stage gates)",
     )
 
     # Polling timeout
@@ -3264,6 +3408,7 @@ def main():
                     max_retries=args.max_retries,
                     max_debate_rounds=args.max_debate_rounds,
                     distributed=args.distributed,
+                    flow=("custom" if args.pipeline == "custom" else "sequential"),
                 )
             )
     except PipelineError as e:

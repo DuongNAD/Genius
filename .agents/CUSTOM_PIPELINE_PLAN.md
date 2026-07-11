@@ -1,7 +1,10 @@
 # Kế hoạch triển khai: Pipeline tùy biến 8 bước
 
-> Trạng thái: **BẢN KẾ HOẠCH — chưa code**. Đã map chính xác code + review đối kháng (workflow).
-> Nguyên tắc lõi: **opt-in `flow="custom"`** + **config trước** → pipeline mặc định & 971 test **giữ nguyên byte-identical**.
+> **TRẠNG THÁI: ĐÃ BUILD XONG (Phase 1-6).** `--pipeline custom` / `run_pipeline(flow="custom")`.
+> Phase 1 (per-role model) + Phase 2 (config .env) + Phase 3 (scaffold) + Phase 4 (plan-first + codex critic) + Phase 5 (Claude-diagnose self-heal) + Phase 6 (final review + per-stage gate). Full suite 982 pass, default byte-identical.
+> Chạy: `python orchestrator.py --pipeline custom --prompt "..."`.
+> Nguyên tắc lõi: **opt-in `flow="custom"`** → mọi thay đổi sau `if flow=="custom":`, pipeline mặc định & test **giữ nguyên byte-identical**.
+> Còn hoãn: re-code tự động đầy đủ từ final-review (hiện chỉ ghi fix-plan vào review.md); director LLM call per-file (không cần — DesignPlan đã decompose task).
 
 ## 1. Luồng mong muốn (của bạn) → ánh xạ Genius
 
@@ -73,6 +76,20 @@ GENIUS_CODEX_EFFORT=high
 3. **"Claude High điều hướng mỗi phần" = LLM call thật per-file?** (thêm latency/cost qua Semaphore(3)) hay điều phối tất định? Hiện orchestration là Python thuần, không có claude call per-subtask.
 4. **Duyệt "sau MỖI bước" = per-STAGE hay per-FILE?** Per-file gate sẽ **tuần tự hóa** fan-out đang chạy song song (đánh đổi throughput lấy độ mịn).
 5. **Cách dựng: 1 hàm với param `flow`** (khuyến nghị — default provably unchanged) hay `run_custom_pipeline()` clone ~600 dòng (dễ drift)?
+
+## 5b. QUYẾT ĐỊNH ĐÃ CHỐT (user, phiên này)
+
+1. **Research** = grok ưu tiên → **agy/gemini-3.1-pro** nếu grok fail. Chain `grok,agy` (bỏ claude vì per-role gemini-pro invalid trên claude).
+2. **Reviewer** = codex gpt-5.6 ưu tiên → claude → agy nếu fail. (Fable-fallback riêng cần per-role-per-backend; hiện fallback là claude/agy hợp lệ.)
+3. **"Claude điều hướng mỗi phần" = Claude chia thành task nhỏ (chính là DesignPlan decomposition đã có) + gemini code từng file.** → **KHÔNG cần per-file Claude LLM call riêng.** Phase 5 rút gọn: chỉ còn "Claude chẩn đoán lỗi" trong self-heal (bỏ director layer).
+4. Duyệt "sau mỗi bước": tạm hiểu **per-STAGE** (chưa chốt per-file; per-file sẽ tuần tự hóa fan-out).
+5. Dựng: **1 hàm với param `flow`** (khuyến nghị).
+
+### ⚠️ CAVEAT quan trọng (phát hiện khi verify): per-role model + fallback
+Per-role model (`GENIUS_MODEL_ROLE_<ROLE>`) áp cho **MỌI backend trong chuỗi fallback**, mà model lại đặc thù backend → nếu role có fallback sang backend khác, model per-role sẽ **invalid** ở đó (vd design opus → agy fallback nhận `claude-opus-4-8` invalid). **Quy tắc:**
+- Dùng **per-BACKEND** (`GENIUS_MODEL_<BACKEND>`) khi role có fallback đa-backend (design→claude-opus, review→codex-gpt5.6): mọi backend dùng model của chính nó, fallback hợp lệ.
+- Dùng **per-ROLE** (`GENIUS_MODEL_ROLE_<ROLE>`) CHỈ khi chuỗi ở lại backend tương thích, hoặc để tách 2 role trên cùng 1 backend (research agy-fallback=gemini-pro vs code agy=gemini-flash — chain research là grok,agy nên không có claude để lỗi).
+- Nâng cấp tương lai nếu cần "model khác nhau mỗi backend mỗi role": thêm `GENIUS_MODEL_ROLE_<ROLE>_<BACKEND>`.
 
 ## 6. Slice đầu tiên nên làm (khuyến nghị của review)
 
