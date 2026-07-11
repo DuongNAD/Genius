@@ -879,9 +879,9 @@ async def main_async():
     )
     parser.add_argument(
         "--pipeline",
-        choices=["sequential", "e2e"],
+        choices=["sequential", "e2e", "custom"],
         default="sequential",
-        help="Pipeline type to execute",
+        help="Pipeline type to execute (custom = opt-in user-tailored flow)",
     )
     parser.add_argument(
         "--distributed", action="store_true", help="Start the central hub service"
@@ -1062,6 +1062,8 @@ async def main_async():
                     e2e_kwargs["distributed"] = True
                 await run_e2e_pipeline(prompt, **e2e_kwargs)
             else:
+                if getattr(args, "pipeline", "sequential") == "custom":
+                    pipeline_kwargs["flow"] = "custom"
                 await run_pipeline(prompt, **pipeline_kwargs)
             print("Orchestrator pipeline completed successfully.")
         except Exception as e:
