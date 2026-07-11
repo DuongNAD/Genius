@@ -1699,6 +1699,7 @@ async def run_pipeline(
     distributed: bool = False,
     stage_gate=None,
     flow: str = "sequential",
+    review_url: str = None,
 ):
     """Execute the sequential pipeline (Research -> Claude -> Codex -> Tester -> Security -> DevOps).
 
@@ -1975,7 +1976,25 @@ async def run_pipeline(
         # Multi-Agent Debate Refinement. DEFAULT critic = researcher role;
         # CUSTOM critic = codex (user's flow: "codex debates the plan"). The
         # refiner stays Claude ("route back to Claude to revise") in both.
-        critic_url = codex_url if flow == "custom" else researcher_url
+        #
+        # CUSTOM debate critic + final review default to the codex-role service
+        # (codex_url). When the codex role is repurposed (e.g. as the gemini
+        # coder), route them to a codex-gpt5.6-sol service instead: pass
+        # review_url, or set GENIUS_REVIEW_ROLE to a role name whose service
+        # runs that model (e.g. "security"). Unset => codex_url, so the default
+        # custom flow stays byte-identical.
+        _review_url = review_url
+        if _review_url is None:
+            _review_url = {
+                "codex": codex_url,
+                "security": security_url,
+                "tester": tester_url,
+                "devops": devops_url,
+                "researcher": researcher_url,
+                "claude": claude_url,
+            }.get(os.getenv("GENIUS_REVIEW_ROLE", "").strip().lower())
+        review_target_url = _review_url or codex_url
+        critic_url = review_target_url if flow == "custom" else researcher_url
         if max_debate_rounds > 0:
             logger.info(
                 f"--- Starting Multi-Agent Debate Refinement (Max Rounds: {max_debate_rounds}) ---"
@@ -2290,7 +2309,7 @@ async def run_pipeline(
             # recorded in review.md (user's flow: "review -> route issues back
             # to Claude"). A full automatic re-code loop is intentionally
             # deferred; the fix plan is surfaced for the operator/next run.
-            if flow == "custom" and codex_url:
+            if flow == "custom" and review_target_url:
                 # Gather the ACTUAL implemented files so the reviewer audits real
                 # code, not just design+audit. Without this the reviewer never
                 # sees the sources and falsely reports files "missing"/"empty".
@@ -2321,7 +2340,7 @@ async def run_pipeline(
                 )
                 try:
                     final_review = await call_api(
-                        codex_url,
+                        review_target_url,
                         api_key,
                         "/security Review the implemented project against its "
                         "design and audit. If it is correct and complete, "
@@ -2333,8 +2352,28 @@ async def run_pipeline(
                         client=client,
                         poll_timeout=poll_timeout,
                     )
+                    _verdict = parse_security_verdict(final_review)
                     if "[APPROVED]" in final_review:
                         logger.info("Custom final review approved the implementation.")
+                    elif _verdict is not None and not _verdict.get("blocking", True):
+                        # A non-blocking verdict (e.g. codex-gpt5.6-sol via the
+                        # security service) = approved with optional hardening
+                        # notes. Record them but spend NO Claude fix plan (user's
+                        # flow: route to Claude only on real, blocking issues).
+                        try:
+                            _write_text(
+                                os.path.join(project_dir, "review.md"),
+                                review_content
+                                + "\n\n## Final review (non-blocking)\n"
+                                + final_review,
+                            )
+                        except Exception:
+                            pass
+                        logger.info(
+                            "Custom final review returned a non-blocking verdict "
+                            "(%d suggestion(s)); no Claude fix plan.",
+                            len(_verdict.get("findings") or []),
+                        )
                     elif claude_url:
                         fix_plan = await call_api(
                             claude_url,

@@ -207,3 +207,118 @@ async def test_custom_flow_final_review_and_per_stage_gates(
     assert "devops" in gates
     # The final review ran on the codex reviewer.
     assert review_calls and review_calls[0] == URLS["codex_url"]
+
+
+def _critic_and_review_recorder(design):
+    """A call_api mock recording debate-critic and final-review target URLs."""
+    critic_calls = []
+    review_calls = []
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        if prompt.startswith("/code"):
+            return "```python\ndef foo():\n    return 1\n```"
+        if "You are CriticReviewer" in prompt:
+            critic_calls.append(url)
+            return "Looks good [APPROVED]"
+        if "Review the implemented project" in prompt:
+            review_calls.append(url)
+            return "All good [APPROVED]"
+        if url == URLS["tester_url"]:
+            return "```python\ndef test_foo():\n    assert True\n```"
+        if url == URLS["security_url"]:
+            return '```json\n{"blocking": false}\n```'
+        return f"```json\n{design}\n```"  # plan / design / research
+
+    return critic_calls, review_calls, impl
+
+
+_DESIGN_ONE_FILE = (
+    '{"project_name":"p","description":"d",'
+    '"files":[{"path":"foo.py","specification":"make foo"}]}'
+)
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_custom_flow_review_url_override_routes_critic_and_review(
+    mock_exec, mock_call_api, temp_workspace
+):
+    """An explicit review_url reroutes BOTH the debate critic and the final
+    review off the codex-role service (so codex-gpt5.6-sol can review while the
+    codex role stays the gemini coder)."""
+    critic_calls, review_calls, impl = _critic_and_review_recorder(_DESIGN_ONE_FILE)
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _mock_exec
+    await run_pipeline(
+        prompt="Build a calculator app",
+        workspace=str(temp_workspace),
+        max_debate_rounds=1,
+        flow="custom",
+        review_url="http://review",
+        **URLS,
+    )
+    assert critic_calls and critic_calls[0] == "http://review"
+    assert review_calls and review_calls[0] == "http://review"
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_custom_flow_review_role_env_routes_to_security(
+    mock_exec, mock_call_api, temp_workspace, monkeypatch
+):
+    """GENIUS_REVIEW_ROLE=security maps to the security service URL for the
+    debate critic + final review, with no explicit review_url passed."""
+    monkeypatch.setenv("GENIUS_REVIEW_ROLE", "security")
+    critic_calls, review_calls, impl = _critic_and_review_recorder(_DESIGN_ONE_FILE)
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _mock_exec
+    await run_pipeline(
+        prompt="Build a calculator app",
+        workspace=str(temp_workspace),
+        max_debate_rounds=1,
+        flow="custom",
+        **URLS,
+    )
+    assert critic_calls and critic_calls[0] == URLS["security_url"]
+    assert review_calls and review_calls[0] == URLS["security_url"]
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_custom_flow_nonblocking_review_skips_claude_fix_plan(
+    mock_exec, mock_call_api, temp_workspace
+):
+    """A non-blocking final-review verdict ({"blocking": false}) counts as
+    approved: the pipeline records the notes but spends NO Claude fix plan."""
+    fix_plan_calls = []
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        if prompt.startswith("/code"):
+            return "```python\ndef foo():\n    return 1\n```"
+        if prompt.startswith("A reviewer raised issues"):
+            fix_plan_calls.append(url)
+            return "fix plan"
+        if "You are CriticReviewer" in prompt:
+            return "Looks good [APPROVED]"
+        if "Review the implemented project" in prompt:
+            return '```json\n{"blocking": false, "findings": [{"issue": "minor"}]}\n```'
+        if url == URLS["tester_url"]:
+            return "```python\ndef test_foo():\n    assert True\n```"
+        if url == URLS["security_url"]:
+            return '```json\n{"blocking": false}\n```'
+        return f"```json\n{_DESIGN_ONE_FILE}\n```"
+
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _mock_exec
+    await run_pipeline(
+        prompt="Build a calculator app",
+        workspace=str(temp_workspace),
+        max_debate_rounds=1,
+        flow="custom",
+        **URLS,
+    )
+    # Non-blocking verdict => approved => the "raised issues" Claude call is skipped.
+    assert fix_plan_calls == []
