@@ -604,6 +604,8 @@ async def _run_project_pytest(project_dir: str) -> tuple[int, str]:
     env["PYTHONPATH"] = os.path.pathsep.join(
         [project_dir, os.path.join(project_dir, "src"), env.get("PYTHONPATH", "")]
     ).strip(os.path.pathsep)
+    # Verification must not leave __pycache__ bytecode inside the deliverable.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         process = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -1941,6 +1943,7 @@ async def process_single_file(
                     env["PYTHONPATH"] = os.path.pathsep.join(
                         [project_dir, project_src_dir, env.get("PYTHONPATH", "")]
                     ).strip(os.path.pathsep)
+                    env["PYTHONDONTWRITEBYTECODE"] = "1"
 
                     process = await asyncio.create_subprocess_exec(
                         *pytest_cmd,
@@ -3667,6 +3670,7 @@ async def run_e2e_pipeline(
                     env["PYTHONPATH"] = os.path.pathsep.join(
                         [project_dir, project_src_dir, env.get("PYTHONPATH", "")]
                     ).strip(os.path.pathsep)
+                    env["PYTHONDONTWRITEBYTECODE"] = "1"
 
                     # Check lint with flake8 — Python files only. A non-.py
                     # target (README.md, Dockerfile, JSON, ...) linted as Python
