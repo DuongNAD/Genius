@@ -162,6 +162,28 @@ def chain_source(role: str) -> Optional[str]:
     return None
 
 
+# Model families for the SINGLE-family backends. A per-ROLE model pinned for
+# one backend must not leak into a DIFFERENT backend on fallback: a live
+# drill had the researcher's role model (gemini-3.1-pro, an agy slug) passed
+# to the claude fallback backend, which 404'd on it and killed the whole
+# chain — the fallback was worse than useless whenever a role model was set.
+# "agy" is deliberately absent: the Antigravity CLI serves multiple families
+# (gemini, claude, gpt-oss), so any explicit model is forwarded to it.
+_BACKEND_MODEL_PREFIXES = {
+    "claude": ("claude",),
+    "codex": ("gpt", "codex"),
+    "grok": ("grok",),
+}
+
+
+def _role_model_fits_backend(backend: str, model: str) -> bool:
+    """False when a role-pinned model clearly belongs to another backend."""
+    prefixes = _BACKEND_MODEL_PREFIXES.get(backend)
+    if not prefixes or not model:
+        return True
+    return model.lower().startswith(prefixes)
+
+
 def build_backend(backend: str, config, role: Optional[str] = None):
     """Instantiate the provider for one backend from ``config``.
 
@@ -195,6 +217,18 @@ def build_backend(backend: str, config, role: Optional[str] = None):
         role_model = os.environ.get(
             f"GENIUS_MODEL_ROLE_{crole.upper()}", ""
         ) or getattr(config.models.roles, crole, "")
+    if role_model and not _role_model_fits_backend(backend, role_model):
+        # Foreign-family role model (e.g. a gemini slug reaching the claude
+        # fallback): ignore it so THIS backend runs its own default instead
+        # of dying on a model it can never serve.
+        logger.warning(
+            "role '%s' pins model '%s', which backend '%s' cannot serve; "
+            "using the backend's own model instead.",
+            role,
+            role_model,
+            backend,
+        )
+        role_model = ""
     model_name = (
         role_model
         or os.environ.get(f"GENIUS_MODEL_{backend.upper()}")

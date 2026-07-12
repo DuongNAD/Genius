@@ -57,6 +57,17 @@ def resolve_agy_cli() -> str:
     """
     explicit = (os.environ.get("GENIUS_AGY_PATH") or "").strip()
     if explicit:
+        # Validate eagerly: an explicit-but-wrong path otherwise surfaces as a
+        # bare "[Errno 2] No such file or directory" from the subprocess layer
+        # (a live fallback drill hit exactly that) — name the culprit instead.
+        # Still a RuntimeError, so a FallbackProvider chain moves on cleanly.
+        # Unit tests set fake literals and stub the subprocess layer, so the
+        # check is skipped under pytest (same convention as below).
+        if not os.path.exists(explicit) and not os.getenv("PYTEST_CURRENT_TEST"):
+            raise RuntimeError(
+                f"agy CLI not found at GENIUS_AGY_PATH={explicit!r}; fix or "
+                "unset the variable, then run `python serve.py --doctor`."
+            )
         return explicit
     cli_path = which_external("agy")
     if not cli_path:

@@ -56,3 +56,36 @@ def test_backend_env_still_works_without_role(monkeypatch):
     assert build_backend("claude", load_config()).model_name == "claude-fable-5"
     monkeypatch.setenv("GENIUS_MODEL_CLAUDE", "")
     assert build_backend("claude", load_config()).model_name == load_config().models.anthropic
+
+
+def test_foreign_role_model_never_leaks_into_single_family_backend(monkeypatch):
+    """A live fallback drill died because the researcher's role model
+    (gemini-3.1-pro, an agy slug) was passed to the CLAUDE fallback backend,
+    which 404'd on it — the whole chain failed. A role model from another
+    family is ignored on single-family backends (claude/codex/grok) so the
+    fallback runs its own default model instead."""
+    monkeypatch.setenv("GENIUS_MODEL_ROLE_RESEARCHER", "gemini-3.1-pro")
+    monkeypatch.setenv("GENIUS_MODEL_CLAUDE", "claude-opus-4-8")
+    cfg = load_config()
+    # The primary (agy, multi-family CLI) still honours the role pin...
+    assert build_backend("agy", cfg, role="researcher").model_name == "gemini-3.1-pro"
+    # ...but the claude fallback uses ITS OWN model, not the gemini slug.
+    assert (
+        build_backend("claude", cfg, role="researcher").model_name
+        == "claude-opus-4-8"
+    )
+
+
+def test_matching_role_model_still_applies_to_its_own_backend(monkeypatch):
+    cfg = load_config()
+    monkeypatch.setenv("GENIUS_MODEL_ROLE_CLAUDE", "claude-opus-4-8")
+    assert build_backend("claude", cfg, role="claude").model_name == "claude-opus-4-8"
+    monkeypatch.setenv("GENIUS_MODEL_ROLE_SECURITY", "gpt-5.6-sol")
+    assert build_backend("codex", cfg, role="security").model_name == "gpt-5.6-sol"
+
+
+def test_foreign_role_model_skipped_on_codex_backend(monkeypatch):
+    monkeypatch.setenv("GENIUS_MODEL_ROLE_SECURITY", "gemini-3.5-flash")
+    monkeypatch.setenv("GENIUS_MODEL_CODEX", "gpt-5.6-sol")
+    cfg = load_config()
+    assert build_backend("codex", cfg, role="security").model_name == "gpt-5.6-sol"

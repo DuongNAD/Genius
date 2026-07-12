@@ -429,6 +429,18 @@ def test_doctor_missing_required_cli_still_fatal():
     assert code == 1
 
 
+def test_resolve_agy_cli_names_bad_explicit_path(monkeypatch):
+    """An explicit GENIUS_AGY_PATH that does not exist must raise a
+    self-explanatory RuntimeError (naming the path and the variable), not
+    surface later as a bare FileNotFoundError from the subprocess layer."""
+    monkeypatch.setenv("GENIUS_AGY_PATH", "/nonexistent/agy")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    from ag_core.providers.agy_provider import resolve_agy_cli
+
+    with pytest.raises(RuntimeError, match="GENIUS_AGY_PATH='/nonexistent/agy'"):
+        resolve_agy_cli()
+
+
 # --- optional live smoke test (never runs in CI) -----------------------------
 
 # Resolve a REAL agy the same way production does — env override, PATH — with
