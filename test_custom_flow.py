@@ -648,6 +648,45 @@ async def test_designed_test_modules_run_after_implementation_wave(
 @pytest.mark.asyncio
 @patch("orchestrator.call_api", new_callable=MagicMock)
 @patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_devops_prompt_carries_fixed_file_budget(
+    mock_exec, mock_call_api, temp_workspace
+):
+    """The deploy stage must work WITHIN the design's file set: a live
+    deploy.md proposed a fifth file (requirements-ci.txt) for an
+    'exactly four files' request."""
+    devops_prompts = []
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        if url == URLS["devops_url"]:
+            devops_prompts.append(prompt)
+            return "deploy plan"
+        if prompt.startswith("/code"):
+            return "```python\ndef foo():\n    return 1\n```"
+        if "Review the implemented project" in prompt:
+            return "All good [APPROVED]"
+        if url == URLS["tester_url"]:
+            return "```python\ndef test_gen():\n    assert True\n```"
+        if url == URLS["security_url"]:
+            return '```json\n{"blocking": false}\n```'
+        return f"```json\n{_DESIGN_ONE_FILE}\n```"
+
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _mock_exec
+    await run_pipeline(
+        prompt="Build a calculator app",
+        workspace=str(temp_workspace),
+        flow="custom",
+        **URLS,
+    )
+    assert devops_prompts
+    assert "File budget (FIXED by the approved design)" in devops_prompts[0]
+    assert "foo.py" in devops_prompts[0]
+    assert "Do NOT propose creating" in devops_prompts[0]
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
 async def test_designed_test_wave_skipped_when_impl_wave_failed(
     mock_exec, mock_call_api, temp_workspace
 ):

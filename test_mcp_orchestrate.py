@@ -633,6 +633,38 @@ async def test_orchestrate_approval_gates_pause_and_resume(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_job_journals_terminal_state(tmp_path):
+    """Invariant: finished_at set => status is terminal. CancelledError is a
+    BaseException that bypasses `except Exception`, and a live manifest ended
+    up journaled as status "running" WITH a finished_at; the finally block
+    now repairs the state before journaling."""
+    started = asyncio.Event()
+
+    async def hanging_pipeline(prompt, workspace=None, stage_gate=None, flow="sequential"):
+        started.set()
+        await asyncio.Event().wait()  # hangs until cancelled
+
+    before = set(mcp_server._ORCHESTRATION_TASKS)
+    with patch("orchestrator.run_pipeline", new=AsyncMock(side_effect=hanging_pipeline)):
+        out = await mcp_server.dispatch_tool(
+            "orchestrate", {"prompt": "hang", "workspace": str(tmp_path)}
+        )
+        job_id = json.loads(out)["job_id"]
+        await asyncio.wait_for(started.wait(), timeout=5.0)
+        (task,) = set(mcp_server._ORCHESTRATION_TASKS) - before
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    job = mcp_server.ORCHESTRATION_JOBS[job_id]
+    assert job["status"] == "failed"
+    assert job["finished_at"] is not None
+    assert "cancelled" in job["error"]
+    manifest = json.loads((tmp_path / "job.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    assert manifest["finished_at"] is not None
+
+
+@pytest.mark.asyncio
 async def test_orchestrate_reject_fails_job(tmp_path):
     async def fake_pipeline(prompt, workspace=None, stage_gate=None, flow="sequential"):
         await stage_gate("research")

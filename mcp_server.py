@@ -666,6 +666,18 @@ async def _run_orchestration(
         job["status"] = "failed"
         job["error"] = str(e)
     finally:
+        # Invariant: a job with finished_at set must be TERMINAL. A
+        # CancelledError (client disconnect / server shutdown mid-run) is a
+        # BaseException that bypasses the except above — a live manifest
+        # ended up journaled as status "running" WITH a finished_at. Repair
+        # the state BEFORE journaling (both writes below are synchronous, so
+        # they complete even while this task is being cancelled).
+        if job.get("status") not in ("completed", "failed"):
+            job["status"] = "failed"
+            job["error"] = job.get("error") or (
+                "The orchestration task was cancelled before the pipeline "
+                "finished (client disconnect or server shutdown)."
+            )
         job["finished_at"] = time.time()
         _journal_job(job)
         watcher.cancel()

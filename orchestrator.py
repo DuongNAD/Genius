@@ -2961,6 +2961,26 @@ async def run_pipeline(
             # Retrieve from MessageBus
             audit_art = message_bus.retrieve(consolidated_art_id)
             devops_prompt = audit_art["content"] if audit_art else consolidated_audit
+            # The design's file set is a HARD budget the deploy guidance must
+            # respect: a live deploy.md proposed a fifth file
+            # (requirements-ci.txt) for an "exactly four files" request —
+            # anyone applying it would break the user's constraint.
+            _designed_list = ", ".join(
+                sorted(
+                    str(f.get("path"))
+                    for f in files_to_implement
+                    if f.get("path")
+                )
+            )
+            if _designed_list:
+                devops_prompt += (
+                    "\n\nFile budget (FIXED by the approved design): the "
+                    f"project consists of EXACTLY these files — {_designed_list}. "
+                    "Do NOT propose creating, renaming or adding any other "
+                    "file; express deployment/CI improvements INSIDE the "
+                    "existing files (e.g. pin versions directly in the "
+                    "workflow command: pip install pytest==<version>)."
+                )
 
             try:
                 proj_scanner = ProjectScanner(
