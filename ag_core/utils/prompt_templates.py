@@ -48,7 +48,9 @@ ARCHITECT_OUTPUT_CONTRACT = (
     "algorithm cannot honor. "
     "(2) MINIMAL LAYOUT — plan the smallest natural file set for the scope: a tiny utility is one module "
     "plus its test at the project root; introduce src/ layouts, conftest.py, packaging or config files ONLY "
-    "when the request or scale genuinely needs them. "
+    "when the request or scale genuinely needs them. The same restraint applies to runtime behavior: when "
+    "input size is unbounded, prefer a streaming/incremental algorithm over inventing an arbitrary size cap "
+    "the request never asked for; whichever you choose, record it under Assumptions. "
     "(3) TEST-LOCKED CLAIMS — every capability the plan claims gets REQUIRED test cases, never 'optional' "
     "ones (claiming Unicode support obliges Unicode positive, negative, and case-mapping cases); if a claim "
     "is not worth its tests, narrow the claim instead. "
@@ -85,7 +87,10 @@ CODER_PROMPT = _role(
     # One unambiguous output contract: the old wording stated it twice and
     # once allowed "the appropriate language" fence, which nudged models
     # into non-```python fences that extract_code de-prioritizes (feeding
-    # the self-heal loop for no reason).
+    # the self-heal loop for no reason). For non-Python targets the
+    # orchestrator now appends an explicit per-file override built from
+    # fence_hint() (ag_core/utils/code_extract.py), and extraction is
+    # file-type aware — so this default stays Python-only on purpose.
     "Do NOT run tests, commands, or tools. Respond with ONLY the complete contents of the target file in "
     "exactly one ```python fenced block — it is written verbatim to the source file. No explanations, no "
     "prose, no markdown headers, no test logs, and no commentary before or after the block.",

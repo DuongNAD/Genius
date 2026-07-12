@@ -3,7 +3,7 @@ from typing import Any
 from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
-from ag_core.utils.code_extract import extract_code
+from ag_core.utils.code_extract import extract_code, fence_hint
 from ag_core.utils.cli_runner import communicate_with_timeout, test_timeout
 
 # Imported into THIS namespace (not used via BaseAgent._log_usage): tests
@@ -257,7 +257,7 @@ class CodexReviewerAgent(BaseAgent):
                     f"Test logs:\n{pytest_logs}\n\n"
                     f"Please fix the bugs in the code. Original prompt: {user_prompt}\n\n"
                     "Do NOT run tests, commands, or tools. Output ONLY the "
-                    "complete file content in a single ```python fenced block."
+                    f"complete file content in a single {fence_hint(target_file)}."
                 )
                 response = await self.provider.send_prompt(
                     retry_prompt, system=CODER_PROMPT, effort=effort
@@ -270,7 +270,7 @@ class CodexReviewerAgent(BaseAgent):
                     completion_tokens=usage.get("completion_tokens", 0),
                 )
 
-                code_to_write = extract_code(content)
+                code_to_write = extract_code(content, filename=target_file)
                 if target_file:
                     # realpath (not abspath) so an in-tree symlink can't point
                     # the write outside root_dir.

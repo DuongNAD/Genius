@@ -68,7 +68,7 @@ class TesterAgent(BaseAgent):
         if output_file != "None":
             # Self-healing loop
             for attempt in range(1, self.max_retries + 1):
-                code_to_write = extract_code(content)
+                code_to_write = extract_code(content, filename=output_file)
                 self.write_output(output_file, code_to_write)
 
                 import sys
@@ -126,7 +126,7 @@ class TesterAgent(BaseAgent):
                     self._log_usage(usage)
 
             # Make sure the final clean code without evidence remains written in output_file
-            code_to_write = extract_code(content)
+            code_to_write = extract_code(content, filename=output_file)
             self.write_output(output_file, code_to_write)
 
             # Append the test execution evidence (pytest stdout/stderr) to the returned markdown response
