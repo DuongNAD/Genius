@@ -28,10 +28,27 @@
 > `tests/test_conftest.py` for pytest-infra files, `_workspace_is_usable`
 > rejected valid workspaces, and the control panel/MCP HTTP server only
 > warned (or did nothing) on a public bind without a token.
+>
+> Second 2026-07-12 pass (external live-job audit; suite now
+> **1062 passed, 3 skipped, flake8 clean**): `orchestrate_status` now
+> advertises job-scoped `genius://artifacts/<job_id>/<name>` resource URIs
+> (a stale root artifact / concurrent job could shadow bare-name reads),
+> `extract_code` is file-type aware (a README.md wrapped in a ```python
+> fence was truncated at its first nested fence — 1485→368 bytes — yet the
+> job completed), a parsed blocking final-review verdict now FAILS the
+> custom pipeline (`GENIUS_FINAL_REVIEW_STRICT`, default strict), and the
+> custom approval-gate order is research → design → code → review → devops
+> with the review checkpoint listed in `stages`.
 
 ---
 
 # Genius Project Comprehensive Evaluation Report
+
+> **⚠️ ARCHIVED SNAPSHOT (2026-06-29).** Everything below this line — including
+> every test count (457 collected / 360 passed / 96 failed) and every finding —
+> describes an incomplete checkout from 2026-06-29 and is **superseded by the
+> banner at the top of this file**. Do not quote numbers or re-fix findings
+> from this section; the current gate is the banner's latest figures.
 
 This report presents a detailed evaluation of the **Genius (Antigravity 2.0)** distributed agent orchestration framework, focusing on architectural design, code quality, performance bottlenecks, security risks, and the test suite's quality and coverage.
 
