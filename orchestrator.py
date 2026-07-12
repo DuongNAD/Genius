@@ -31,6 +31,9 @@ from ag_core.utils.cli_runner import (
 )
 from ag_core.runtime import under_pytest
 from ag_core.directives import parse_directives
+from ag_core.utils.prompt_templates import (
+    CRITIC_QUALITY_CHECKLIST as _CRITIC_QUALITY_CHECKLIST,
+)
 from collections import OrderedDict
 
 
@@ -363,6 +366,46 @@ def _write_text(path: str, content: str) -> None:
     some stages warn-and-continue on a failed write, others abort the run."""
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+
+
+def lint_design_plan(files_to_implement: list, design_text: str = "") -> tuple:
+    """Deterministic (no-LLM) checks on a parsed DesignPlan.
+
+    Returns ``(blocking, warnings)``. Blocking issues make the plan
+    unbuildable and must stop the run BEFORE any coder tokens are spent: a
+    duplicate path double-implements the same file concurrently, an empty
+    specification gives the coder nothing to translate, and an
+    absolute/escaping path would only explode later inside ``safe_join``.
+    Warnings never stop the run — today that is an unresolved
+    ``[NEEDS CLARIFICATION: ...]`` marker, which the architect contract tells
+    the model to emit instead of guessing (a human should read design.md).
+    """
+    blocking, warnings = [], []
+    seen = set()
+    for entry in files_to_implement or []:
+        path = str(entry.get("path") or "").strip()
+        spec = str(entry.get("specification") or "").strip()
+        if not path:
+            blocking.append("a files[] entry has an empty path")
+            continue
+        norm = path.replace("\\", "/")
+        # Windows drive paths (C:\x) are not isabs() on POSIX — check both.
+        if os.path.isabs(path) or (len(path) > 1 and path[1] == ":"):
+            blocking.append(f"absolute path not allowed: '{path}'")
+        elif any(part == ".." for part in norm.split("/")):
+            blocking.append(f"path escapes the project root: '{path}'")
+        key = norm.lower()
+        if key in seen:
+            blocking.append(f"duplicate file path: '{path}'")
+        seen.add(key)
+        if not spec:
+            blocking.append(f"empty specification for '{path}'")
+    if "[NEEDS CLARIFICATION" in (design_text or ""):
+        warnings.append(
+            "the plan contains unresolved [NEEDS CLARIFICATION] marker(s) — "
+            "review design.md before trusting the build"
+        )
+    return blocking, warnings
 
 
 def parse_design_for_files(design_content: str) -> list:
@@ -2113,7 +2156,8 @@ async def run_pipeline(
                 critic_prompt = (
                     "You are CriticReviewer, a critic agent. Analyze the following draft architecture plan proposed by Claude.\n"
                     "Identify potential architectural flaws, security risks, missing requirements, or execution challenges.\n"
-                    "Provide constructive criticism and suggest concrete improvements. If the draft architecture plan is correct, complete, and needs no further improvements, include `[APPROVED]` in your response.\n\n"
+                    + _CRITIC_QUALITY_CHECKLIST
+                    + "Provide constructive criticism and suggest concrete improvements. If the draft architecture plan is correct, complete, and needs no further improvements, include `[APPROVED]` in your response.\n\n"
                     f"Draft Architecture Plan:\n{claude_content}\n\n"
                     f"Original Research and Context:\n{claude_prompt}"
                 )
@@ -2284,6 +2328,58 @@ async def run_pipeline(
                     "format retries; aborting. See design.md and logs/raw/ for "
                     "the raw architect output."
                 )
+
+        # Deterministic design lint (production only, same convention as the
+        # format self-heal): catch plan defects no LLM check reliably does —
+        # duplicate paths, empty specifications, escaping paths — BEFORE any
+        # coder tokens are spent. One corrective re-prompt, then fail loudly.
+        if files_to_implement and design_selfheal_enabled():
+            lint_blocking, lint_warnings = lint_design_plan(
+                files_to_implement, claude_content
+            )
+            for warning in lint_warnings:
+                logger.warning(f"Design lint: {warning}")
+            if lint_blocking:
+                logger.warning(
+                    "Design lint found blocking issues; re-prompting the "
+                    f"architect once: {'; '.join(lint_blocking)}"
+                )
+                lint_retry_prompt = (
+                    "Your design parsed as a DesignPlan but failed these "
+                    "deterministic checks:\n- "
+                    + "\n- ".join(lint_blocking)
+                    + "\n\nFix ONLY these issues, keeping everything else "
+                    "unchanged. Respond with EXACTLY ONE ```json fenced block "
+                    "conforming to the DesignPlan schema and NOTHING else.\n\n"
+                    f"Original design request:\n{claude_prompt}\n\n"
+                    f"Your previous response:\n{truncate_log(claude_content)}"
+                )
+                retry_content = await call_api(
+                    claude_url,
+                    api_key,
+                    lint_retry_prompt,
+                    context=scanned_files,
+                    client=client,
+                    poll_timeout=poll_timeout,
+                )
+                save_raw_response(project_dir, "design_lint_retry1", retry_content)
+                retry_files = parse_design_for_files(retry_content)
+                if retry_files:
+                    lint_blocking, retry_warnings = lint_design_plan(
+                        retry_files, retry_content
+                    )
+                    for warning in retry_warnings:
+                        logger.warning(f"Design lint: {warning}")
+                    if not lint_blocking:
+                        claude_content = retry_content
+                        files_to_implement = retry_files
+                        _write_design_files(claude_content)
+                if lint_blocking:
+                    raise PipelineError(
+                        "Design failed deterministic lint after a corrective "
+                        f"retry: {'; '.join(lint_blocking)}. See design.md and "
+                        "logs/raw/ for the raw architect output."
+                    )
 
         if files_to_implement:
             logger.info(
@@ -2988,7 +3084,8 @@ async def run_e2e_pipeline(
                 critic_prompt = (
                     "You are CriticReviewer, a critic agent. Analyze the following draft plan proposed by Claude.\n"
                     "Identify potential flaws, security risks, missing requirements, or execution challenges.\n"
-                    "Provide constructive criticism and suggest concrete improvements. If the draft plan is correct, complete, and needs no further improvements, include `[APPROVED]` in your response.\n\n"
+                    + _CRITIC_QUALITY_CHECKLIST
+                    + "Provide constructive criticism and suggest concrete improvements. If the draft plan is correct, complete, and needs no further improvements, include `[APPROVED]` in your response.\n\n"
                     f"Draft Plan:\n{claude_content}\n\n"
                     f"Original Prompt:\n{prompt}"
                 )
@@ -3084,6 +3181,22 @@ async def run_e2e_pipeline(
                     "re-run."
                 )
             return claude_content
+
+        # Deterministic plan lint (production only). The e2e variant has no
+        # format-retry loop, so blocking lint findings fail fast the same way
+        # an unparseable plan does — before any coder tokens are spent.
+        if design_selfheal_enabled():
+            lint_blocking, lint_warnings = lint_design_plan(
+                files_to_implement, claude_content
+            )
+            for warning in lint_warnings:
+                logger.warning(f"Design lint: {warning}")
+            if lint_blocking:
+                raise PipelineError(
+                    "E2E plan failed deterministic lint: "
+                    f"{'; '.join(lint_blocking)}. See plan.md for the raw "
+                    "architect output."
+                )
 
         logger.info(
             f"Parsed {len(files_to_implement)} files from plan to implement: {[f['path'] for f in files_to_implement]}"

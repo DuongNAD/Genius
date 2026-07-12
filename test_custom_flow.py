@@ -288,6 +288,42 @@ async def test_custom_flow_review_role_env_routes_to_security(
 @pytest.mark.asyncio
 @patch("orchestrator.call_api", new_callable=MagicMock)
 @patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_debate_critic_prompt_carries_quality_checklist(
+    mock_exec, mock_call_api, temp_workspace
+):
+    """Every debate round hands the critic the design-quality checklist (the
+    five gates mirrored from the architect contract), so the debate hunts for
+    contract/algorithm mismatches, layout bloat and unlocked claims."""
+    critic_prompts = []
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        if "You are CriticReviewer" in prompt:
+            critic_prompts.append(prompt)
+            return "Looks good [APPROVED]"
+        if prompt.startswith("/code"):
+            return "```python\ndef foo():\n    return 1\n```"
+        if url == URLS["tester_url"]:
+            return "```python\ndef test_foo():\n    assert True\n```"
+        if url == URLS["security_url"]:
+            return '```json\n{"blocking": false}\n```'
+        return f"```json\n{_DESIGN_ONE_FILE}\n```"
+
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _mock_exec
+    await run_pipeline(
+        prompt="Build a calculator app",
+        workspace=str(temp_workspace),
+        max_debate_rounds=1,
+        **URLS,
+    )
+    assert critic_prompts
+    assert "Contract-algorithm consistency" in critic_prompts[0]
+    assert "Test-locked claims" in critic_prompts[0]
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
 async def test_custom_flow_nonblocking_review_skips_claude_fix_plan(
     mock_exec, mock_call_api, temp_workspace
 ):

@@ -164,6 +164,28 @@ async def test_tester_retry_sees_previous_test_failures(
     assert "abc 1" in testgen[1]  # the actual failing log reached the tester
 
 
+# --- architect design-quality gates -------------------------------------------
+
+
+def test_architect_contract_has_design_quality_gates():
+    """The architect's system prompt carries the five design-quality gates
+    distilled from a real external review of a generated plan (contract vs
+    algorithm mismatch on Unicode casing, an unnecessary conftest.py, claimed
+    capabilities left as 'optional' tests, no assumptions traceability, and
+    heavy repetition)."""
+    from ag_core.agents.claude_architect import ARCHITECT_SYSTEM_PROMPT
+
+    for marker in (
+        "DESIGN QUALITY GATES",
+        "CONTRACT-ALGORITHM CONSISTENCY",
+        "MINIMAL LAYOUT",
+        "TEST-LOCKED CLAIMS",
+        "TRACEABILITY",
+        "NO REPETITION",
+    ):
+        assert marker in ARCHITECT_SYSTEM_PROMPT, marker
+
+
 # --- save_raw_response --------------------------------------------------------
 
 

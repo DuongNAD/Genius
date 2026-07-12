@@ -201,6 +201,31 @@ Hai đường:
 
 ---
 
+## Muốn bản plan TỐT NHẤT từ Opus (effort max)?
+
+Architect hiện bị ràng buộc bởi **5 design-quality gate** (trong system
+prompt) và debate critic soát đúng 5 lỗi đó: (1) nhất quán contract ↔ thuật
+toán (phải chốt semantics edge-case: Unicode casing/normalization, float,
+timezone...), (2) layout tối giản (không `src/`/`conftest.py`/packaging cho
+tiện ích nhỏ), (3) mọi capability đã tuyên bố phải có test khóa — không có
+test "optional" cho hành vi thuộc contract, (4) tách "Assumptions" (điều
+architect tự thêm) khỏi yêu cầu gốc của bạn, (5) không lặp nội dung. Phía
+prompt, để vắt kiệt chất lượng:
+
+1. **Cho plan chạy ở max**: dùng biến thể Detailed (prompt ≥ 600 ký tự) —
+   adaptive effort chỉ hạ effort cho prompt ngắn. Prompt ngắn mà vẫn muốn
+   max: tắt `GENIUS_ADAPTIVE_EFFORT` hoặc hạ `GENIUS_ADAPTIVE_EFFORT_THRESHOLD`.
+2. **Chốt semantics khó ngay trong prompt** — hoặc ủy quyền tường minh:
+   "Choose and document EXACT Unicode semantics (casefold vs lower,
+   normalization) and lock them with required tests" thay vì để mặc định.
+3. **Nêu layout mong muốn** nếu bạn có ý kiến ("two files at repo root; no
+   src/, no packaging") — không nêu thì gate Minimal Layout tự chọn nhỏ nhất.
+4. **Duyệt plan trước khi đốt tiền code**: `require_approval: true`, đọc
+   `design.md` lúc pause, lệch thì `genius_orchestrate_reject` kèm `reason`
+   rồi sửa prompt chạy lại.
+5. Mục **Assumptions** trong plan là chỗ soi nhanh nhất: mọi thứ architect
+   tự bịa thêm nằm ở đó — cắt scope thừa từ đây trước khi approve.
+
 ## Tra nhanh: chọn cấp nào?
 
 | Việc | Cấp | Tool | Cờ nên dùng |

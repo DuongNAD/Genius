@@ -960,6 +960,24 @@ async def test_debate_runs_critique_refine_rounds():
 
 
 @pytest.mark.asyncio
+async def test_debate_critic_prompt_carries_quality_checklist():
+    """The MCP debate tool's critic prompt includes the same design-quality
+    checklist as the pipeline debates."""
+    calls = []
+
+    async def fake_execute(agent_name, prompt, context=None):
+        calls.append((agent_name, prompt))
+        return "[APPROVED]"
+
+    with patch("mcp_server.execute_agent", new=AsyncMock(side_effect=fake_execute)):
+        await mcp_server.dispatch_tool("debate", {"design": "draft", "rounds": 1})
+    assert calls
+    critic_prompt = calls[0][1]
+    assert "Contract-algorithm consistency" in critic_prompt
+    assert "Test-locked claims" in critic_prompt
+
+
+@pytest.mark.asyncio
 async def test_debate_early_exits_on_approved_marker():
     runner = AsyncMock(return_value="Looks great. [APPROVED]")
     with patch("mcp_server.execute_agent", new=runner):

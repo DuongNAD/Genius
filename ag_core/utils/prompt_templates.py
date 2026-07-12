@@ -37,12 +37,45 @@ ARCHITECT_OUTPUT_CONTRACT = (
     "decisions and algorithm, NOT source code); and HOW to test it (concrete cases: happy path, edge cases, and "
     "the error contract). "
     "Mark any genuine ambiguity as [NEEDS CLARIFICATION: <question>] rather than guessing. "
-    "Do NOT put source code inside the specification. Plan only; do not implement code."
+    "Do NOT put source code inside the specification. Plan only; do not implement code. "
+    "Before emitting, verify these DESIGN QUALITY GATES: "
+    "(1) CONTRACT-ALGORITHM CONSISTENCY — every guarantee you state must actually be delivered by the "
+    "algorithm you prescribe; where behavior has edge-case families (Unicode casing/normalization, float "
+    "equality, timezones, locales, concurrency), explicitly CHOOSE and state the exact semantics (e.g. "
+    "'ASCII-only' vs 'casefold() + NFKD, compared per character') instead of claiming broad support the "
+    "algorithm cannot honor. "
+    "(2) MINIMAL LAYOUT — plan the smallest natural file set for the scope: a tiny utility is one module "
+    "plus its test at the project root; introduce src/ layouts, conftest.py, packaging or config files ONLY "
+    "when the request or scale genuinely needs them. "
+    "(3) TEST-LOCKED CLAIMS — every capability the plan claims gets REQUIRED test cases, never 'optional' "
+    "ones (claiming Unicode support obliges Unicode positive, negative, and case-mapping cases); if a claim "
+    "is not worth its tests, narrow the claim instead. "
+    "(4) TRACEABILITY — in the description, add a brief 'Assumptions:' clause separating decisions you "
+    "introduced from the user's stated requirements, so a reviewer can trim invented scope. "
+    "(5) NO REPETITION — state each fact exactly once in its proper section; the plan is a build "
+    "instruction, not documentation."
 )
 ARCHITECT_PROMPT = _role(
     "You are a senior software architect. You design the high-level structure and decompose the work into files. "
     "Separate planning from implementation: you plan only.",
     ARCHITECT_OUTPUT_CONTRACT,
+)
+
+# Checklist injected into every plan-debate critic prompt (the orchestrator's
+# sequential/e2e debates and the MCP debate tool). Mirrors the architect's
+# DESIGN QUALITY GATES above so the critic hunts for exactly the failure
+# modes those gates are meant to prevent.
+CRITIC_QUALITY_CHECKLIST = (
+    "Check these specifically, beyond anything else you notice:\n"
+    "1) Contract-algorithm consistency: does the prescribed algorithm really deliver EVERY stated "
+    "guarantee? Hunt for edge-case families (Unicode casing/normalization, float equality, timezones, "
+    "locales, concurrency) where the claim and the algorithm disagree.\n"
+    "2) Minimal layout: is every planned file necessary at this scope (no src/, conftest.py, or "
+    "packaging for a tiny utility)?\n"
+    "3) Test-locked claims: is every claimed capability covered by REQUIRED test cases (no 'optional' "
+    "tests for contractual behavior)?\n"
+    "4) Traceability: are architect-added assumptions separated from the user's stated requirements?\n"
+    "5) Concision: flag content repeated across the description and specifications.\n"
 )
 
 CODER_PROMPT = _role(

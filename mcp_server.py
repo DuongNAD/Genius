@@ -19,6 +19,7 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 from ag_core import agent_factory
+from ag_core.utils.prompt_templates import CRITIC_QUALITY_CHECKLIST
 
 # The agent classes are resolved through module globals at call time (see
 # execute_agent) so tests can patch e.g. ``mcp_server.DevOpsAgent`` - flake8
@@ -123,7 +124,8 @@ async def _run_debate(design: str, prompt: str, rounds: int) -> str:
             "draft design proposed by Claude.\n"
             "Identify potential architectural flaws, security risks, missing "
             "requirements, or execution challenges.\n"
-            "Provide constructive criticism and suggest concrete improvements. "
+            + CRITIC_QUALITY_CHECKLIST
+            + "Provide constructive criticism and suggest concrete improvements. "
             "If the draft design is correct, complete, and needs no further "
             f"improvements, include `{DEBATE_APPROVAL_MARKER}` in your "
             "response.\n\n"
