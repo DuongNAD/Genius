@@ -13,6 +13,14 @@ from unittest.mock import patch, AsyncMock, MagicMock
 import mcp_server
 
 
+@pytest.fixture(autouse=True)
+def _isolated_jobs_dir(tmp_path, monkeypatch):
+    """Point GENIUS_JOBS_DIR at a per-test tmp dir: orchestrate journals a
+    job.json into its workspace at submit time, which would otherwise write
+    real dirs under the repo's .genius_jobs during the suite."""
+    monkeypatch.setenv("GENIUS_JOBS_DIR", str(tmp_path / "jobs"))
+
+
 # --- MCP JSON-RPC handshake -------------------------------------------------
 
 
@@ -275,6 +283,197 @@ async def test_orchestrate_keeps_usable_absolute_workspace(tmp_path):
         await asyncio.sleep(0)
     data = json.loads(out)
     assert mcp_server.ORCHESTRATION_JOBS[data["job_id"]]["workspace"] == ws_in
+
+
+def test_workspace_existing_writable_dir_ignores_readonly_parent(tmp_path):
+    """An EXISTING writable workspace is usable even when its parent is
+    read-only (e.g. /opt/<user-owned-dir>): only the dir's own writability
+    matters, run_pipeline never needs to create it."""
+    parent = tmp_path / "locked"
+    ws = parent / "ws"
+    ws.mkdir(parents=True)
+    parent.chmod(0o555)
+    try:
+        assert mcp_server._workspace_is_usable(str(ws))
+    finally:
+        parent.chmod(0o755)
+
+
+def test_workspace_deep_uncreated_path_is_usable(tmp_path):
+    """A not-yet-existing path several levels deep is usable: run_pipeline
+    creates it with os.makedirs, which only needs the deepest EXISTING
+    ancestor to be writable."""
+    assert mcp_server._workspace_is_usable(str(tmp_path / "a" / "b" / "ws"))
+
+
+def test_workspace_existing_regular_file_is_not_usable(tmp_path):
+    """A path that exists but is a regular file can never hold artifacts."""
+    f = tmp_path / "occupied.txt"
+    f.write_text("x")
+    assert not mcp_server._workspace_is_usable(str(f))
+
+
+# --- status view: workspace + current_stage ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_status_reports_workspace_and_current_stage():
+    """Antigravity needs to know WHERE files land and WHAT the pipeline is
+    doing right now — before this, the first minutes of a job showed only an
+    empty stages list."""
+    with patch("mcp_server._run_orchestration", new=AsyncMock()):
+        out = await mcp_server.dispatch_tool("orchestrate", {"prompt": "build x"})
+        await asyncio.sleep(0)
+    job_id = json.loads(out)["job_id"]
+    st = json.loads(
+        await mcp_server.dispatch_tool("orchestrate_status", {"job_id": job_id})
+    )
+    assert st["workspace"] == mcp_server.ORCHESTRATION_JOBS[job_id]["workspace"]
+    # No artifact exists yet, so the current stage is the first checkpoint.
+    assert st["current_stage"] == mcp_server._PIPELINE_STAGES["sequential"][0][0]
+
+
+# --- job journal + recovery ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_job_manifest_journaled_and_recovered_as_interrupted(tmp_path):
+    """A running job's manifest is journaled at submit; after a server restart
+    (simulated by dropping the in-memory job) orchestrate_status recovers it
+    from disk and reports it as interrupted instead of 'Unknown job_id'."""
+    with patch("mcp_server._run_orchestration", new=AsyncMock()):
+        out = await mcp_server.dispatch_tool("orchestrate", {"prompt": "build x"})
+        await asyncio.sleep(0)
+    job_id = json.loads(out)["job_id"]
+    ws = mcp_server.ORCHESTRATION_JOBS[job_id]["workspace"]
+    assert os.path.isfile(os.path.join(ws, "job.json"))
+
+    saved = mcp_server.ORCHESTRATION_JOBS.pop(job_id)
+    try:
+        st = json.loads(
+            await mcp_server.dispatch_tool("orchestrate_status", {"job_id": job_id})
+        )
+    finally:
+        mcp_server.ORCHESTRATION_JOBS[job_id] = saved
+    assert st["recovered_from_journal"] is True
+    assert st["status"] == "interrupted"  # the manifest said "running"
+    assert st["workspace"] == ws
+    assert "no longer running" in st["error"]
+
+
+@pytest.mark.asyncio
+async def test_completed_job_recovered_from_journal_with_artifacts(
+    tmp_path, monkeypatch
+):
+    """A finished job remains queryable across restarts: status, elapsed time,
+    stages and artifacts all come back from the journal + the workspace."""
+    jobs_root = tmp_path / "jobs"
+    monkeypatch.setenv("GENIUS_JOBS_DIR", str(jobs_root))
+    job_id = "a" * 32
+    ws = jobs_root / job_id
+    ws.mkdir(parents=True)
+    (ws / "design.md").write_text("the design", encoding="utf-8")
+    manifest = {
+        "job_id": job_id,
+        "status": "completed",
+        "pipeline": "sequential",
+        "prompt": "x",
+        "error": None,
+        "workspace": str(ws),
+        "started_at": 1.0,
+        "finished_at": 5.0,
+        "require_approval": False,
+        "awaiting_stage": None,
+    }
+    (ws / "job.json").write_text(json.dumps(manifest), encoding="utf-8")
+    st = json.loads(
+        await mcp_server.dispatch_tool("orchestrate_status", {"job_id": job_id})
+    )
+    assert st["status"] == "completed"
+    assert st["recovered_from_journal"] is True
+    assert st["elapsed_seconds"] == 4.0
+    assert st["artifacts"]["design"] == "the design"
+    assert any(
+        s["stage"] == "design" and s["state"] == "done" for s in st["stages"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_status_invalid_job_id_never_recovers_from_disk():
+    """A non-uuid4-hex job_id (e.g. a path-traversal attempt) is rejected
+    without touching the filesystem."""
+    with pytest.raises(ValueError, match="Unknown job_id"):
+        await mcp_server.dispatch_tool(
+            "orchestrate_status", {"job_id": "../../etc/passwd"}
+        )
+
+
+# --- jobs-root retention -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_jobs_root_pruned_to_max_jobs(tmp_path, monkeypatch):
+    """Old finished job dirs beyond GENIUS_JOBS_MAX_JOBS are removed on the
+    next orchestrate; live jobs and non-job entries are never touched."""
+    jobs_root = tmp_path / "jobs"
+    jobs_root.mkdir()
+    monkeypatch.setenv("GENIUS_JOBS_DIR", str(jobs_root))
+    monkeypatch.setenv("GENIUS_JOBS_MAX_JOBS", "2")
+
+    old = time.time() - 3600
+    stale_ids = [f"{i:032x}" for i in range(3)]
+    for i, jid in enumerate(stale_ids):
+        d = jobs_root / jid
+        d.mkdir()
+        os.utime(d, (old + i, old + i))
+
+    (jobs_root / "user-notes").mkdir()  # non-job entry: untouchable
+
+    live_id = "f" * 32  # oldest of all, but unfinished in memory: untouchable
+    live_dir = jobs_root / live_id
+    live_dir.mkdir()
+    os.utime(live_dir, (old - 9999, old - 9999))
+    mcp_server.ORCHESTRATION_JOBS[live_id] = {"job_id": live_id, "status": "running"}
+
+    try:
+        with patch("mcp_server._run_orchestration", new=AsyncMock()):
+            out = await mcp_server.dispatch_tool("orchestrate", {"prompt": "build x"})
+            await asyncio.sleep(0)
+    finally:
+        mcp_server.ORCHESTRATION_JOBS.pop(live_id, None)
+
+    new_id = json.loads(out)["job_id"]
+    survivors = {p.name for p in jobs_root.iterdir()}
+    assert "user-notes" in survivors
+    assert live_id in survivors
+    assert new_id in survivors
+    # Cap 2 keeps the two newest prunable dirs; the oldest stale one is gone.
+    assert stale_ids[0] not in survivors
+    assert stale_ids[1] in survivors and stale_ids[2] in survivors
+
+
+@pytest.mark.asyncio
+async def test_jobs_root_pruned_by_age(tmp_path, monkeypatch):
+    jobs_root = tmp_path / "jobs"
+    jobs_root.mkdir()
+    monkeypatch.setenv("GENIUS_JOBS_DIR", str(jobs_root))
+    monkeypatch.setenv("GENIUS_JOBS_MAX_JOBS", "0")  # cap off
+    monkeypatch.setenv("GENIUS_JOBS_RETENTION_DAYS", "1")
+
+    ancient = jobs_root / ("b" * 32)
+    ancient.mkdir()
+    two_days = time.time() - 2 * 86400
+    os.utime(ancient, (two_days, two_days))
+    fresh = jobs_root / ("c" * 32)
+    fresh.mkdir()
+
+    with patch("mcp_server._run_orchestration", new=AsyncMock()):
+        await mcp_server.dispatch_tool("orchestrate", {"prompt": "build x"})
+        await asyncio.sleep(0)
+
+    survivors = {p.name for p in jobs_root.iterdir()}
+    assert ancient.name not in survivors
+    assert fresh.name in survivors
 
 
 # --- approval gates ---------------------------------------------------------

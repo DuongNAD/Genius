@@ -1,9 +1,11 @@
 import os
+import re
 import sys
 import json
 import time
 import uuid
 import hmac
+import shutil
 import asyncio
 import logging
 import traceback
@@ -506,6 +508,7 @@ async def _run_orchestration(
                 job["status"] = "awaiting_approval"
                 job["artifacts"] = _collect_artifacts(workspace or os.getcwd())
                 job["approval_event"].clear()
+                _journal_job(job)
                 try:
                     await asyncio.wait_for(
                         job["approval_event"].wait(), timeout=_approval_timeout()
@@ -544,6 +547,7 @@ async def _run_orchestration(
         job["error"] = str(e)
     finally:
         job["finished_at"] = time.time()
+        _journal_job(job)
 
 
 def _jobs_root() -> str:
@@ -553,9 +557,170 @@ def _jobs_root() -> str:
     )
 
 
+# Orchestration job state lives in ORCHESTRATION_JOBS (this process's RAM), so
+# a stdio client disconnect or server restart used to lose every job_id — a
+# poller got "Unknown job_id" for a job whose artifacts sit on disk. Each job
+# therefore journals a small manifest into its workspace on every state
+# transition; orchestrate_status falls back to that manifest for ids it no
+# longer holds in memory.
+_JOB_MANIFEST = "job.json"
+# uuid4().hex — anything else is never looked up on disk (also blocks path
+# traversal via a crafted job_id).
+_JOB_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _journal_job(job: Dict[str, Any]) -> None:
+    """Best-effort persist of the job manifest; never fails the pipeline."""
+    workspace = job.get("workspace")
+    if not workspace:
+        return
+    manifest = {
+        k: job.get(k)
+        for k in (
+            "job_id",
+            "status",
+            "pipeline",
+            "prompt",
+            "error",
+            "workspace",
+            "started_at",
+            "finished_at",
+            "require_approval",
+            "awaiting_stage",
+        )
+    }
+    try:
+        os.makedirs(workspace, exist_ok=True)
+        tmp = os.path.join(workspace, _JOB_MANIFEST + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        # Atomic swap so a status poll never reads a torn manifest.
+        os.replace(tmp, os.path.join(workspace, _JOB_MANIFEST))
+    except OSError as e:
+        print(
+            f"[MCP] job journal write failed for {job.get('job_id')}: {e}",
+            file=sys.stderr,
+        )
+
+
+def _load_journaled_job(job_id: str):
+    """Rebuild an orchestrate_status view from a job's on-disk manifest.
+
+    Only jobs under the DEFAULT jobs dir are discoverable by id (a
+    caller-supplied workspace holds its manifest too, but there is no index
+    from id to that path). A manifest that says running/awaiting_approval
+    describes a pipeline that died with the previous server process, so it is
+    reported as ``interrupted`` — the artifacts of every completed stage are
+    still on disk and listed via ``stages``/``artifacts_ready``.
+    """
+    if not _JOB_ID_RE.fullmatch(job_id or ""):
+        return None
+    path = os.path.join(_jobs_root(), job_id, _JOB_MANIFEST)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict) or manifest.get("job_id") != job_id:
+        return None
+    status = manifest.get("status")
+    interrupted = status in ("running", "awaiting_approval")
+    view = {
+        "job_id": job_id,
+        "status": "interrupted" if interrupted else status,
+        "pipeline": manifest.get("pipeline"),
+        "error": manifest.get("error"),
+        "workspace": manifest.get("workspace"),
+        "recovered_from_journal": True,
+    }
+    if interrupted:
+        view["error"] = (
+            "The MCP server restarted while this job was in flight; the "
+            "pipeline is no longer running. Artifacts of the stages that "
+            "finished are still in the workspace — re-submit orchestrate "
+            "to build again."
+        )
+    started = manifest.get("started_at")
+    finished = manifest.get("finished_at")
+    if started is not None and finished is not None:
+        view["elapsed_seconds"] = round(finished - started, 1)
+    stages, ready = _stage_progress(manifest)
+    view["stages"] = stages
+    view["artifacts_ready"] = ready
+    if status == "completed":
+        view["artifacts"] = _collect_artifacts(manifest.get("workspace") or "")
+    return view
+
+
+def _jobs_retention():
+    """(max_jobs, max_age_days) for pruning old per-job workspaces.
+
+    ``GENIUS_JOBS_MAX_JOBS`` keeps only the newest N job dirs (default 50,
+    ``0`` disables). ``GENIUS_JOBS_RETENTION_DAYS`` additionally drops job
+    dirs older than N days (default 0 = off). Blank/junk -> default, matching
+    the DB retention knobs.
+    """
+
+    def _ival(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None or str(raw).strip() == "":
+            return default
+        try:
+            return max(int(raw), 0)
+        except (TypeError, ValueError):
+            return default
+
+    return (
+        _ival("GENIUS_JOBS_MAX_JOBS", 50),
+        _ival("GENIUS_JOBS_RETENTION_DAYS", 0),
+    )
+
+
+def _prune_jobs_root() -> None:
+    """Bound ``.genius_jobs`` growth: every orchestrate job adds a workspace
+    dir that was never reclaimed. Runs on each orchestrate call.
+
+    Never touches: entries whose name is not a 32-hex job id (user files),
+    and jobs currently unfinished in ORCHESTRATION_JOBS. Deletion is
+    best-effort (``ignore_errors``) — retention must never fail a new job.
+    """
+    max_jobs, max_age_days = _jobs_retention()
+    if max_jobs <= 0 and max_age_days <= 0:
+        return
+    entries = []
+    try:
+        with os.scandir(_jobs_root()) as it:
+            for entry in it:
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if not _JOB_ID_RE.fullmatch(entry.name):
+                        continue
+                    live = ORCHESTRATION_JOBS.get(entry.name)
+                    if live and live.get("status") not in ("completed", "failed"):
+                        continue
+                    entries.append(
+                        (entry.stat(follow_symlinks=False).st_mtime, entry.path)
+                    )
+                except OSError:
+                    continue
+    except OSError:
+        return
+    doomed = set()
+    if max_age_days > 0:
+        cutoff = time.time() - max_age_days * 86400
+        doomed.update(p for m, p in entries if m < cutoff)
+    if max_jobs > 0:
+        entries.sort(reverse=True)  # newest first by mtime
+        doomed.update(p for _m, p in entries[max_jobs:])
+    for path in doomed:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def _workspace_is_usable(workspace: str) -> bool:
     """A caller-supplied workspace is safe only when it is an ABSOLUTE path
-    whose parent directory is writable.
+    that either already exists as a writable directory, or can be created
+    (``os.makedirs``-style) under a writable existing ancestor.
 
     A GUI launcher (e.g. Antigravity) starts the MCP server with cwd ``/``, so a
     relative workspace like ``"test"`` resolves to the read-only ``/test`` and a
@@ -565,7 +730,22 @@ def _workspace_is_usable(workspace: str) -> bool:
     """
     if not workspace or not os.path.isabs(workspace):
         return False
-    parent = os.path.dirname(os.path.abspath(workspace)) or os.sep
+    path = os.path.abspath(workspace)
+    if os.path.isdir(path):
+        # Existing directory: its own writability is what matters (the parent
+        # may legitimately be read-only, e.g. /opt/<user-owned-dir>).
+        return os.access(path, os.W_OK)
+    if os.path.exists(path):
+        # Exists but is not a directory (a regular file): unusable.
+        return False
+    # Not created yet: run_pipeline will os.makedirs() it, which only needs the
+    # DEEPEST EXISTING ancestor to be a writable directory.
+    parent = os.path.dirname(path) or os.sep
+    while not os.path.exists(parent):
+        nxt = os.path.dirname(parent)
+        if nxt == parent:  # filesystem root
+            break
+        parent = nxt
     return os.path.isdir(parent) and os.access(parent, os.W_OK)
 
 
@@ -622,7 +802,9 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             "rejected": False,
             "reject_reason": None,
         }
+        _journal_job(ORCHESTRATION_JOBS[job_id])
         _prune_finished_jobs()
+        _prune_jobs_root()
         task = asyncio.create_task(
             _run_orchestration(job_id, prompt, pipeline, workspace, require_approval)
         )
@@ -644,8 +826,14 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         job_id = arguments.get("job_id", "")
         job = ORCHESTRATION_JOBS.get(job_id)
         if job is None:
-            raise ValueError(f"Unknown job_id: {job_id}")
+            # Not in this process's memory (server restarted / job evicted):
+            # fall back to the on-disk manifest the job journaled.
+            recovered = _load_journaled_job(job_id)
+            if recovered is None:
+                raise ValueError(f"Unknown job_id: {job_id}")
+            return json.dumps(recovered)
         view = {k: job[k] for k in ("job_id", "status", "pipeline", "error")}
+        view["workspace"] = job.get("workspace")
         started = job.get("started_at")
         if started is not None:
             end = job.get("finished_at") or time.time()
@@ -653,6 +841,14 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         stages, ready = _stage_progress(job)
         view["stages"] = stages
         view["artifacts_ready"] = ready
+        if job["status"] == "running":
+            # The pipeline works the checkpoints in order, so the first
+            # not-yet-done stage is what it is working on now.
+            current = next(
+                (s["stage"] for s in stages if s["state"] != "done"), None
+            )
+            if current:
+                view["current_stage"] = current
         if job.get("awaiting_stage"):
             view["awaiting_stage"] = job["awaiting_stage"]
         # Expose artifacts while paused too, so the reviewer can read the
@@ -681,6 +877,7 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         job["awaiting_stage"] = None
         job["status"] = "running"
         job["approval_event"].set()
+        _journal_job(job)
         return json.dumps(
             {
                 "job_id": job_id,
@@ -741,6 +938,25 @@ def _require_http_auth(authorization: str) -> None:
     provided = header[7:].strip() if header.lower().startswith("bearer ") else header
     if not (provided and hmac.compare_digest(provided, expected)):
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _enforce_public_bind_token(host: str) -> None:
+    """Fail closed at startup (same policy as dashboard.py): ``/tools/call``
+    drives local vendor CLIs, the full pipeline, and filesystem writes, so a
+    non-loopback bind without GENIUS_MCP_TOKEN would expose an unauthenticated
+    remote-execution endpoint to the network. ``_require_http_auth`` only
+    enforces the token when one is set, so the missing-token-on-public-bind
+    case must be refused here."""
+    loopback_hosts = {"127.0.0.1", "::1", "localhost", ""}
+    if host.strip() in loopback_hosts:
+        return
+    if not (os.environ.get("GENIUS_MCP_TOKEN") or "").strip():
+        sys.exit(
+            f"Refusing to start: GENIUS_MCP_HOST={host!r} exposes /tools/call "
+            "beyond loopback, but GENIUS_MCP_TOKEN is not set. /tools/call "
+            "runs local CLIs and writes files. Set GENIUS_MCP_TOKEN=<secret> "
+            "to require a bearer token, or bind 127.0.0.1."
+        )
 
 
 @app.post("/tools/call")
@@ -1076,4 +1292,5 @@ if __name__ == "__main__":
             or "127.0.0.1"
         )
         port = int(os.environ.get("GENIUS_MCP_PORT") or 8000)
+        _enforce_public_bind_token(host)
         uvicorn.run("mcp_server:app", host=host, port=port)

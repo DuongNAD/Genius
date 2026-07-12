@@ -185,7 +185,14 @@ TOOLS = [
         "name": "orchestrate_status",
         "description": (
             "Poll the status of a pipeline started by orchestrate. Returns status "
-            "(running|completed|failed) and, when completed, the generated artifacts."
+            "(running|completed|failed|awaiting_approval|interrupted), the "
+            "workspace directory the files land in, current_stage (what the "
+            "pipeline is working on right now — the code stage is the long one), "
+            "per-stage progress, and, when completed, the generated artifacts. "
+            "Job state survives MCP server restarts: an id from a previous "
+            "session is recovered from its on-disk journal (interrupted = the "
+            "server restarted mid-run; finished stages' artifacts remain in the "
+            "workspace)."
         ),
         "input_schema": {
             "type": "object",
