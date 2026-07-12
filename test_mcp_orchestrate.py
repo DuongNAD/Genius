@@ -408,6 +408,101 @@ async def test_status_invalid_job_id_never_recovers_from_disk():
         )
 
 
+# --- MCP progress notifications ------------------------------------------------
+
+
+class _FakeSession:
+    """Records send_log_message calls like the SDK ServerSession would."""
+
+    def __init__(self):
+        self.events = []
+
+    async def send_log_message(self, level, data, logger=None, related_request_id=None):
+        self.events.append((level, data, logger))
+
+
+@pytest.mark.asyncio
+async def test_notify_without_session_is_noop(monkeypatch):
+    monkeypatch.setattr(mcp_server, "_MCP_LOG_SESSION", None)
+    await mcp_server._notify_progress({"event": "x"})  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_notify_respects_client_log_level(monkeypatch):
+    session = _FakeSession()
+    monkeypatch.setattr(mcp_server, "_MCP_LOG_SESSION", session)
+    monkeypatch.setattr(mcp_server, "_MCP_MIN_LOG_LEVEL", "warning")
+    await mcp_server._notify_progress({"event": "suppressed"})  # info < warning
+    assert session.events == []
+    await mcp_server._notify_progress({"event": "kept"}, level="error")
+    assert len(session.events) == 1
+
+
+@pytest.mark.asyncio
+async def test_watcher_pushes_stage_done_events(tmp_path, monkeypatch):
+    """When an artifact lands on disk the watcher pushes a stage_done
+    notification (logger genius.orchestrate) without any client poll."""
+    session = _FakeSession()
+    monkeypatch.setattr(mcp_server, "_MCP_LOG_SESSION", session)
+    monkeypatch.setenv("GENIUS_PROGRESS_POLL_SECONDS", "0.01")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    job = {
+        "job_id": "d" * 32,
+        "status": "running",
+        "pipeline": "sequential",
+        "workspace": str(ws),
+        "started_at": time.time() - 10,
+        "awaiting_stage": None,
+    }
+    watcher = asyncio.create_task(mcp_server._watch_job_progress(job))
+    (ws / "research.md").write_text("r", encoding="utf-8")
+    await asyncio.sleep(0.08)
+    job["status"] = "completed"  # ends the watcher loop
+    await asyncio.wait_for(watcher, timeout=2)
+    stage_events = [d for _l, d, _lg in session.events if d["event"] == "stage_done"]
+    assert any(e["stage"] == "research" for e in stage_events)
+    assert all(lg == "genius.orchestrate" for _l, _d, lg in session.events)
+
+
+@pytest.mark.asyncio
+async def test_run_orchestration_emits_terminal_status(tmp_path, monkeypatch):
+    """The job's finally block pushes the terminal status notification."""
+    session = _FakeSession()
+    monkeypatch.setattr(mcp_server, "_MCP_LOG_SESSION", session)
+    monkeypatch.setenv("GENIUS_PROGRESS_POLL_SECONDS", "0.01")
+    job_id = "e" * 32
+    ws = str(tmp_path / "ws")
+    mcp_server.ORCHESTRATION_JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "running",
+        "pipeline": "sequential",
+        "prompt": "x",
+        "error": None,
+        "artifacts": None,
+        "workspace": ws,
+        "started_at": time.time(),
+        "finished_at": None,
+        "require_approval": False,
+        "awaiting_stage": None,
+        "approval_event": asyncio.Event(),
+        "rejected": False,
+        "reject_reason": None,
+    }
+    try:
+        with (
+            patch("mcp_server._ensure_skill_servers", new=AsyncMock()),
+            patch("orchestrator.run_pipeline", new=AsyncMock()),
+        ):
+            await mcp_server._run_orchestration(job_id, "x", "sequential", ws, False)
+    finally:
+        mcp_server.ORCHESTRATION_JOBS.pop(job_id, None)
+    assert session.events, "expected at least the terminal status notification"
+    _level, data, _logger = session.events[-1]
+    assert data["event"] == "status"
+    assert data["status"] == "completed"
+
+
 # --- jobs-root retention -------------------------------------------------------
 
 

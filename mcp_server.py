@@ -479,6 +479,97 @@ async def _ensure_skill_servers(wait_seconds: float = 45.0) -> None:
         )
 
 
+# --- MCP progress notifications (proposal #3) --------------------------------
+#
+# Stage progress used to be pull-only (clients poll orchestrate_status every
+# 15-20s). When the stdio transport is live, a per-job watcher additionally
+# PUSHES each stage completion / status change as a spec-standard
+# ``notifications/message`` log notification (logger "genius.orchestrate"),
+# so a client that renders MCP log messages shows progress in real time.
+# Pull polling still works unchanged — the watcher is purely additive.
+
+# The live stdio ServerSession, captured on each SDK tool call (there is no
+# public hook for "session started" on the lowlevel Server). None under HTTP
+# mode and in tests -> every notify is a silent no-op.
+_MCP_LOG_SESSION = None
+# RFC-5424 order used by MCP logging setLevel.
+_LOG_LEVELS = (
+    "debug",
+    "info",
+    "notice",
+    "warning",
+    "error",
+    "critical",
+    "alert",
+    "emergency",
+)
+_MCP_MIN_LOG_LEVEL = "info"
+
+
+def _progress_poll_seconds() -> float:
+    """How often the job watcher checks artifacts for stage completions.
+    GENIUS_PROGRESS_POLL_SECONDS overrides; blank/junk -> 5s."""
+    try:
+        val = float(os.environ.get("GENIUS_PROGRESS_POLL_SECONDS") or 5.0)
+        return val if val > 0 else 5.0
+    except (TypeError, ValueError):
+        return 5.0
+
+
+async def _notify_progress(data: Dict[str, Any], level: str = "info") -> None:
+    """Best-effort MCP log notification to the connected stdio client.
+
+    No session (HTTP mode, tests) or a client-requested level above ours ->
+    no-op; a transport error is swallowed — progress reporting must never
+    break the pipeline."""
+    session = _MCP_LOG_SESSION
+    if session is None:
+        return
+    try:
+        if _LOG_LEVELS.index(level) < _LOG_LEVELS.index(_MCP_MIN_LOG_LEVEL):
+            return
+    except ValueError:
+        pass
+    try:
+        await session.send_log_message(level, data, logger="genius.orchestrate")
+    except Exception:  # noqa: BLE001 - notification loss is acceptable
+        pass
+
+
+async def _watch_job_progress(job: Dict[str, Any]) -> None:
+    """Push a notification for every stage completion and status change while
+    the job is alive. Runs alongside ``_run_orchestration``; cancelled in its
+    ``finally`` (which also emits the terminal status)."""
+    seen_done = set()
+    last_status = job.get("status")
+    while job.get("status") in ("running", "awaiting_approval"):
+        stages, _ready = _stage_progress(job)
+        for s in stages:
+            if s["state"] == "done" and s["stage"] not in seen_done:
+                seen_done.add(s["stage"])
+                await _notify_progress(
+                    {
+                        "event": "stage_done",
+                        "job_id": job["job_id"],
+                        "stage": s["stage"],
+                        "artifact": s["artifact"],
+                        "stages_done": sorted(seen_done),
+                    }
+                )
+        status = job.get("status")
+        if status != last_status:
+            last_status = status
+            payload = {
+                "event": "status",
+                "job_id": job["job_id"],
+                "status": status,
+            }
+            if job.get("awaiting_stage"):
+                payload["awaiting_stage"] = job["awaiting_stage"]
+            await _notify_progress(payload)
+        await asyncio.sleep(_progress_poll_seconds())
+
+
 async def _run_orchestration(
     job_id: str,
     prompt: str,
@@ -487,6 +578,7 @@ async def _run_orchestration(
     require_approval: bool = False,
 ) -> None:
     job = ORCHESTRATION_JOBS[job_id]
+    watcher = asyncio.create_task(_watch_job_progress(job))
     try:
         # Imported lazily so the MCP server boots fast (initialize/tools-list
         # must respond before Antigravity's connect timeout).
@@ -548,6 +640,19 @@ async def _run_orchestration(
     finally:
         job["finished_at"] = time.time()
         _journal_job(job)
+        watcher.cancel()
+        try:
+            await watcher
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        terminal = {
+            "event": "status",
+            "job_id": job_id,
+            "status": job["status"],
+        }
+        if job.get("error"):
+            terminal["error"] = job["error"]
+        await _notify_progress(terminal)
 
 
 def _jobs_root() -> str:
@@ -1197,9 +1302,26 @@ def _build_sdk_server():
     # from list_tools — which is the whole point.
     @server.call_tool(validate_input=False)
     async def _sdk_call_tool(name, arguments):
+        # Capture the live session so background jobs can push progress
+        # notifications (the lowlevel Server has no session-started hook;
+        # any tool call — orchestrate itself at the latest — sets it before
+        # the job's watcher needs it).
+        global _MCP_LOG_SESSION
+        try:
+            _MCP_LOG_SESSION = server.request_context.session
+        except LookupError:
+            pass
         engine = name[len(WIRE_PREFIX):] if name.startswith(WIRE_PREFIX) else name
         text = await dispatch_tool(engine, arguments or {})
         return [types.TextContent(type="text", text=text)]
+
+    @server.set_logging_level()
+    async def _sdk_set_logging_level(level):
+        # Declares the ``logging`` capability (capabilities derive from the
+        # registered handlers) and lets the client raise the floor for the
+        # genius.orchestrate progress notifications.
+        global _MCP_MIN_LOG_LEVEL
+        _MCP_MIN_LOG_LEVEL = str(level)
 
     @server.list_resources()
     async def _sdk_list_resources():
