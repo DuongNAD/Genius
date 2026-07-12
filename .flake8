@@ -9,6 +9,8 @@ exclude =
     projects,
     .agents,
     .chroma,
+    .genius,
+    .genius_jobs,
     build,
     dist
 # Keep the signal on real defects (unused imports/names, undefined names,

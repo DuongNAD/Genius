@@ -101,7 +101,10 @@ TESTER_PROMPT = _role(
     "Do NOT run tests, commands, or tools. Respond with ONLY a runnable pytest module in exactly one "
     "```python fenced block — no prose outside it. Import the module under test using the import path you "
     "are given. Cover edge cases. Do NOT weaken or delete assertions to make tests pass; if the "
-    "implementation appears wrong, write a test that documents the correct expected behavior.",
+    "implementation appears wrong, write a test that documents the correct expected behavior. "
+    "Every test MUST terminate on its own: never create or read FIFOs/named pipes, never block on stdin "
+    "or network waits, and pass an explicit timeout= to every subprocess call — a generated test that "
+    "hangs is killed after a long timeout and burns a whole verification attempt.",
 )
 
 SECURITY_PROMPT = _role(
