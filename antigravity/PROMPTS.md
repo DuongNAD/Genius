@@ -11,14 +11,22 @@ gần như không thể hiểu sai.
 - **KHÔNG liệt kê file test trong FILES** — pipeline tự sinh `tests/` + chạy
   chúng + security audit + final review cho bạn. File cap trong prompt chỉ áp
   cho file sản phẩm.
-- Con số thời gian tham khảo (config hiện tại, plan = Claude Opus effort max):
-  cấp 2 ≈ 15–20 phút, phần lớn nằm ở stage code+test. `current_stage` trong
-  `genius_orchestrate_status` cho biết pipeline đang làm gì.
+- **Độ dài prompt quyết định effort của stage plan** (adaptive effort đang
+  bật): prompt **dưới ~600 ký tự** → plan chạy effort `high` (nhanh); prompt
+  dài/chi tiết → plan chạy `max` như config (chậm hơn nhưng xứng đáng với spec
+  lớn). Muốn nới ngưỡng: `GENIUS_ADAPTIVE_EFFORT_THRESHOLD` trong
+  `mcp_config.json`. `@deep` luôn thắng heuristic này.
+- Theo dõi tiến độ: `current_stage` trong `genius_orchestrate_status` cho biết
+  pipeline đang làm gì; server cũng **push** thông báo `stage_done`/`status`
+  qua MCP log notifications (logger `genius.orchestrate`) nên client hiển thị
+  log sẽ thấy tiến độ realtime không cần đợi poll.
 - Thêm `@deep` vào đầu prompt khi bài toán khó/nhiều ràng buộc (đẩy effort của
   agent lên cao nhất). Thêm `require_approval: true` khi bạn muốn duyệt từng
   stage (research → design → code) trước khi chạy tiếp.
 - Kết quả nằm trong `workspace` mà status trả về
-  (`.genius_jobs/<job_id>/projects/<slug>/`).
+  (`.genius_jobs/<job_id>/projects/<slug>/`); job sống sót qua restart nhờ
+  `job.json` (status `interrupted` = server restart giữa chừng, artifact các
+  stage đã xong vẫn còn nguyên).
 
 ---
 
@@ -53,7 +61,16 @@ security audit + final review.
 
 ## Cấp 2 — Tiện ích nhỏ, 1–3 file sản phẩm (mặc định nên dùng)
 
-Template (điền vào `<...>`, xóa dòng không cần):
+Hai biến thể, chọn theo mức chi tiết bạn cần:
+
+- **Compact (khuyên dùng cho tiện ích nhỏ)** — một đoạn văn gọn **dưới 600 ký
+  tự**, đủ: goal + public API + cap file + "Done when". Plan chạy effort
+  `high` → nhanh (đã đo: research+design xong sau ~1 phút thay vì ~3 phút).
+- **Detailed** — dùng template đầy đủ bên dưới khi hành vi có nhiều edge case
+  cần chốt chính xác; prompt sẽ vượt ngưỡng và plan chạy `max` (chậm hơn
+  nhưng spec càng chặt thì càng đáng).
+
+Template detailed (điền vào `<...>`, xóa dòng không cần):
 
 ```
 Build a small <language> utility '<name>': <one-sentence goal>.
@@ -76,7 +93,9 @@ ACCEPTANCE (done when):
 NON-GOALS: <what must NOT be built — flags, configs, features to skip>.
 ```
 
-Ví dụ đã điền (run thật, điểm eval 5/5):
+Ví dụ compact đã điền (cả hai đều là run thật, eval 5/5; txtstats chạy 17
+phút khi plan còn ở effort max, linestat chạy **~6 phút** với adaptive
+effort — research+design xong sau ~75 giây):
 
 ```
 Build a tiny Python utility project 'txtstats': a single module txtstats.py
@@ -86,8 +105,20 @@ Keep the design to AT MOST 2 small files (txtstats.py and README.md).
 No external dependencies.
 ```
 
+```
+Build a tiny Python utility 'linestat': a single module linestat.py exposing
+top_words(text: str, n: int = 3) -> list[tuple[str, int]] returning the n most
+frequent lowercase words (ties broken alphabetically), plus a main() reading a
+file path and optional n from sys.argv and printing one 'word count' line per
+result. AT MOST 2 small files: linestat.py and README.md. Standard library
+only. Done when: `python -m doctest linestat.py` exits 0; a missing path
+prints usage to stderr and exits 2; an unreadable file prints an error and
+exits 1.
+```
+
 Mẹo: cap số file chặt (như trên) khiến kiến trúc sư tự chuyển test sang
-doctest nhúng — gọn và vẫn kiểm chứng được.
+doctest nhúng — gọn và vẫn kiểm chứng được; câu "Done when" liệt kê được cả
+exit code là thứ giúp coder không hiểu sai hành vi lỗi.
 
 ---
 
