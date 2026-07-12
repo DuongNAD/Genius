@@ -170,9 +170,10 @@ async def test_e2e_skips_testgen_for_nonpython_infra_and_test_modules(
     assert len(testgen) == 1, testgen
     assert "src/gamma.py" in testgen[0]
 
-    # Only gamma's generated test module exists on disk.
+    # Only gamma's generated test module exists on disk — under the
+    # pipeline-internal dir, not in the deliverable project.
     tests_dir = os.path.join(
-        str(tmp_path), "projects", "build_mixed_files", "tests"
+        str(tmp_path), ".genius", "build_mixed_files", "tests"
     )
     generated = {
         name

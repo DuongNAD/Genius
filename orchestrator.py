@@ -22,7 +22,7 @@ from tenacity import (
 
 # Re-exported so existing `from orchestrator import extract_code` callers (and
 # tests) keep working after the helper moved to a shared module.
-from ag_core.utils.code_extract import extract_code
+from ag_core.utils.code_extract import extract_code, fence_hint
 from ag_core.utils.cli_runner import (
     cli_timeout,
     test_timeout,
@@ -148,7 +148,7 @@ def save_raw_response(project_dir: str, name: str, content: str) -> None:
     diagnosing a rejected stage means re-driving the agents by hand.
     """
     try:
-        raw_dir = os.path.join(project_dir, "logs", "raw")
+        raw_dir = os.path.join(pipeline_internal_dir(project_dir), "logs", "raw")
         os.makedirs(raw_dir, exist_ok=True)
         safe = re.sub(r"[^A-Za-z0-9_.\-]+", "_", name)
         _write_text(os.path.join(raw_dir, f"{safe}.md"), content or "")
@@ -164,6 +164,37 @@ def design_selfheal_enabled() -> bool:
     design calls — same convention as the debate-rounds default.
     """
     return not under_pytest()
+
+
+def final_review_strict() -> bool:
+    """Whether a BLOCKING custom final-review verdict fails the pipeline.
+
+    Strict by default: a parsed ``{"blocking": true}`` verdict raises
+    ``PipelineError`` after the Claude fix plan is recorded in review.md, so a
+    job whose final review found real issues can never report ``completed``.
+    ``GENIUS_FINAL_REVIEW_STRICT=0`` demotes the gate to the historical
+    advisory behavior (record the fix plan, continue to deploy). Unparseable
+    reviews stay advisory either way — only an explicit blocking verdict fails.
+    """
+    raw = (os.environ.get("GENIUS_FINAL_REVIEW_STRICT") or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "no", "off")
+
+
+def full_suite_gate_enabled() -> bool:
+    """Whether a failing whole-project pytest run FAILS the custom pipeline.
+
+    Strict by default: the per-file loops verified each file in isolation, so
+    only this run can catch cross-file conflicts — a job whose assembled
+    project cannot pass one plain ``pytest`` must not report ``completed``.
+    ``GENIUS_FULL_SUITE_GATE=0`` demotes the gate to report-only (the run
+    still happens and its log still lands in review.md).
+    """
+    raw = (os.environ.get("GENIUS_FULL_SUITE_GATE") or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "no", "off")
 
 
 def degraded_mode() -> bool:
@@ -489,6 +520,54 @@ def flatten_rel_path(rel_path: str) -> str:
     return re.sub(r"[\\/]+", "_", no_ext).strip("_") or "file"
 
 
+def pipeline_internal_dir(project_dir: str) -> str:
+    """Directory for pipeline internals kept OUT of the deliverable.
+
+    The project directory hands over ONLY the designed files; logs, raw
+    traces, the message-bus DB and tester-GENERATED test modules live here
+    instead: ``<workspace>/.genius/<slug>/`` when the project sits in the
+    standard ``<workspace>/projects/<slug>/`` layout, else
+    ``<project_dir>/.genius/`` (a dot-dir, so pytest collection and the
+    conformance walk skip it either way).
+    """
+    abs_dir = os.path.abspath(project_dir)
+    parent = os.path.dirname(abs_dir)
+    if os.path.basename(parent) == "projects":
+        return os.path.join(
+            os.path.dirname(parent), ".genius", os.path.basename(abs_dir)
+        )
+    return os.path.join(abs_dir, ".genius")
+
+
+def designed_basenames_of(files) -> set:
+    """Basenames of every file in a design's file list (collision lookup)."""
+    return {
+        os.path.basename(str(f.get("path", "")).replace("\\", "/"))
+        for f in (files or [])
+        if isinstance(f, dict) and f.get("path")
+    }
+
+
+def generated_test_path(
+    project_dir: str, flat_name: str, designed_basenames: set = None
+) -> str:
+    """Path of the tester-GENERATED module verifying one implemented file.
+
+    Generated modules are pipeline INTERNALS: they live under
+    ``pipeline_internal_dir()/tests/``, not in the deliverable (the per-file
+    loop runs them in isolation with PYTHONPATH=project_dir, and the
+    whole-project gate intentionally sees only the designed files). The
+    ``_gen`` suffix still dodges basename collisions with DESIGNED test files
+    (pytest cannot collect two modules named ``test_foo`` in one run — a real
+    job completed with that collision and only bare ``pytest`` at the project
+    root exposed it).
+    """
+    name = f"test_{flat_name}.py"
+    if designed_basenames and name in designed_basenames:
+        name = f"test_{flat_name}_gen.py"
+    return os.path.join(pipeline_internal_dir(project_dir), "tests", name)
+
+
 async def run_subprocess(cmd: list, env: dict = None) -> tuple[int, str]:
     process = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
@@ -510,6 +589,111 @@ async def run_subprocess(cmd: list, env: dict = None) -> tuple[int, str]:
         + stderr.decode("utf-8", errors="replace")
     )
     return process.returncode, output
+
+
+async def _run_project_pytest(project_dir: str) -> tuple[int, str]:
+    """Run pytest ONCE over the whole generated project (cwd = project root).
+
+    The per-file self-heal loops execute each test module in isolation, so
+    they can never see cross-file conflicts — duplicate test-module basenames,
+    import clashes, fixture collisions. Returns (exit_code, tail_of_output);
+    exit code 5 ("no tests collected") is a valid outcome for docs-only
+    projects and is treated as a pass by the caller.
+    """
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.path.pathsep.join(
+        [project_dir, os.path.join(project_dir, "src"), env.get("PYTHONPATH", "")]
+    ).strip(os.path.pathsep)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            cwd=project_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await communicate_with_timeout(
+            process, timeout=test_timeout(), cli_name="whole-project pytest"
+        )
+    except CLITimeoutError as e:
+        return 124, str(e)
+    except Exception as e:  # noqa: BLE001 - report, don't crash the pipeline
+        return -999, f"Failed to run whole-project pytest: {e}"
+    output = (
+        stdout.decode("utf-8", errors="replace")
+        + "\n"
+        + stderr.decode("utf-8", errors="replace")
+    )
+    return process.returncode, truncate_log(output)
+
+
+# The pipeline no longer writes its artifacts into the project directory
+# (they live at the workspace root; logs/generated tests live under
+# pipeline_internal_dir()), but stale copies from pre-separation runs and
+# tool caches must still never count as "extra" product files.
+_PIPELINE_OWNED_BASENAMES = {
+    "research.md",
+    "design.md",
+    "review.md",
+    "audit.md",
+    "deploy.md",
+    "plan.md",
+}
+_PIPELINE_OWNED_DIRS = {"logs", "__pycache__", ".pytest_cache", ".git", ".genius"}
+
+
+def _design_conformance_report(project_dir: str, files_to_implement) -> str:
+    """Compare the design's file list against what is actually on disk.
+
+    Missing designed files and files beyond the design (excluding the
+    pipeline's own artifacts and generated test modules) are listed so the
+    final reviewer — and the operator — can see scope drift at a glance.
+    """
+    designed = {
+        str(f.get("path", "")).replace("\\", "/")
+        for f in (files_to_implement or [])
+        if isinstance(f, dict) and f.get("path")
+    }
+    expected_generated = set()
+    for path in designed:
+        if not path.endswith(".py") or is_test_module(path) or is_pytest_infra(path):
+            continue
+        flat = flatten_rel_path(path)
+        expected_generated.add(f"tests/test_{flat}.py")
+        expected_generated.add(f"tests/test_{flat}_gen.py")
+    actual = set()
+    for root, dirs, names in os.walk(project_dir):
+        dirs[:] = [d for d in dirs if d not in _PIPELINE_OWNED_DIRS]
+        for name in names:
+            rel = os.path.relpath(os.path.join(root, name), project_dir)
+            actual.add(rel.replace("\\", "/"))
+    missing = sorted(designed - actual)
+    extra = sorted(
+        rel
+        for rel in actual - designed - expected_generated
+        if os.path.basename(rel) not in _PIPELINE_OWNED_BASENAMES
+        and not rel.endswith((".bak", ".pyc"))
+    )
+    lines = [
+        f"Designed files: {len(designed)}; present on disk: "
+        f"{len(designed) - len(missing)}/{len(designed)}."
+    ]
+    if missing:
+        lines.append("MISSING designed files: " + ", ".join(missing))
+    if extra:
+        lines.append(
+            "Files beyond the design (excluding pipeline artifacts and "
+            "generated test modules): " + ", ".join(extra)
+        )
+    else:
+        lines.append(
+            "No files beyond the design (excluding pipeline artifacts and "
+            "generated test modules)."
+        )
+    return "\n".join(lines)
 
 
 # Setup logger to output to stdout
@@ -1382,6 +1566,7 @@ async def process_single_file(
     design_plan_content="",
     flow: str = "sequential",
     claude_url: str = None,
+    designed_basenames: set = None,
 ):
     from ag_core.utils.message_bus import Artifact
 
@@ -1401,9 +1586,14 @@ async def process_single_file(
             # tests-for-tests and don't security-audit test code.
             test_file_path = target_file_path
         else:
-            test_file_path = os.path.join(project_dir, "tests", f"test_{flat_name}.py")
-        audit_log_path = os.path.join(project_dir, "logs", f"audit_{flat_name}.md")
-        test_log_path = os.path.join(project_dir, "logs", f"test_{flat_name}.log")
+            test_file_path = generated_test_path(
+                project_dir, flat_name, designed_basenames
+            )
+            os.makedirs(os.path.dirname(test_file_path), exist_ok=True)
+        _internal_logs = os.path.join(pipeline_internal_dir(project_dir), "logs")
+        os.makedirs(_internal_logs, exist_ok=True)
+        audit_log_path = os.path.join(_internal_logs, f"audit_{flat_name}.md")
+        test_log_path = os.path.join(_internal_logs, f"test_{flat_name}.log")
 
         success = False
         test_failures_logs = ""
@@ -1419,6 +1609,17 @@ async def process_single_file(
 
             # 1. Call Codex API /code
             codex_req_prompt = f"/code Implement the file '{file_path}' according to this specification:\n{specification}"
+            if not file_is_python:
+                # Non-Python target: override the coder contract's default
+                # ```python fence with the file type's own fence so extraction
+                # can recover the FULL content — a README.md answered inside a
+                # ```python fence once truncated at its first nested fence.
+                codex_req_prompt += (
+                    "\n\nThis target file is NOT a Python module. Respond with "
+                    f"ONLY the complete contents of '{file_path}' in a single "
+                    f"{fence_hint(file_path)}; this overrides any instruction "
+                    "to use a ```python block."
+                )
             if attempt > 1:
                 raw_feedback = (
                     f"\n\nPrevious implementation attempt failed check.\n"
@@ -1465,7 +1666,7 @@ async def process_single_file(
                     codex_req_prompt += raw_feedback
                 codex_req_prompt += (
                     "\n\nDo NOT run tests, commands, or tools. Output ONLY the "
-                    "complete file content in a single ```python fenced block."
+                    f"complete file content in a single {fence_hint(file_path)}."
                 )
 
             try:
@@ -1506,7 +1707,7 @@ async def process_single_file(
             save_raw_response(
                 project_dir, f"codex_{flat_name}_attempt{attempt}", codex_code_raw
             )
-            code_to_write = extract_code(codex_code_raw)
+            code_to_write = extract_code(codex_code_raw, filename=file_path)
 
             # Never write non-Python garbage (pytest logs, prose) into a .py
             # file: fail the attempt and steer the next prompt instead. Not
@@ -1667,7 +1868,9 @@ async def process_single_file(
                     f"security_{flat_name}_attempt{attempt}",
                     security_report,
                 )
-                test_code_to_write = extract_code(tester_tests_raw)
+                test_code_to_write = extract_code(
+                    tester_tests_raw, filename=test_file_path
+                )
 
                 # Same hygiene for the generated pytest module.
                 feedback = invalid_python_feedback(
@@ -1855,6 +2058,9 @@ async def run_pipeline(
     ``stage_gate`` is an optional ``async def gate(stage: str)`` awaited after
     the research, design and code stages complete; it may pause (human
     approval) or raise to abort. None (the default) runs straight through.
+    The custom flow adds two more gates — "review" (after the final review)
+    and "devops" (after deploy) — so its full order is research -> design ->
+    code -> review -> devops.
 
     ``flow`` selects the pipeline variant: ``"sequential"`` (default, the path
     above) or ``"custom"`` — the opt-in user-tailored flow (plan-first, codex
@@ -1880,10 +2086,15 @@ async def run_pipeline(
         )
 
     project_dir = os.path.join(workspace, "projects", project_name)
-    os.makedirs(os.path.join(project_dir, "src"), exist_ok=True)
-    os.makedirs(os.path.join(project_dir, "tests"), exist_ok=True)
-    os.makedirs(os.path.join(project_dir, "logs"), exist_ok=True)
-    os.makedirs(os.path.join(project_dir, "docker"), exist_ok=True)
+    # The project directory IS the deliverable: only designed files land in
+    # it (their parent dirs are created per-write). Pipeline internals —
+    # logs, raw traces, the message-bus DB, generated test modules — live
+    # under pipeline_internal_dir(); artifact copies stay at the workspace
+    # root only. Empty src/tests/logs/docker dirs used to pollute handover.
+    os.makedirs(project_dir, exist_ok=True)
+    os.makedirs(
+        os.path.join(pipeline_internal_dir(project_dir), "logs"), exist_ok=True
+    )
 
     # Resolve absolute paths for context sharing files under workspace (root of the workspace directory) by default
     research_file = os.path.join(workspace, "research.md")
@@ -2014,7 +2225,9 @@ async def run_pipeline(
         from ag_core.utils.message_bus import MessageBus, Artifact
 
         message_bus = MessageBus(
-            db_path=os.path.join(project_dir, "logs", "message_bus.db")
+            db_path=os.path.join(
+                pipeline_internal_dir(project_dir), "logs", "message_bus.db"
+            )
         )
 
         # CUSTOM plan-first: Claude drafts the plan from the RAW prompt BEFORE
@@ -2072,9 +2285,9 @@ async def run_pipeline(
         )
 
         try:
+            # Workspace-root copy only: the project directory is the
+            # deliverable and must not carry pipeline artifacts.
             _write_text(research_file, research_content)
-            proj_research_file = os.path.join(project_dir, "research.md")
-            _write_text(proj_research_file, research_content)
         except Exception as e:
             logger.warning(f"Failed to write research debug output: {e}")
         validate_file(research_file, "Research", is_input=False)
@@ -2114,7 +2327,6 @@ async def run_pipeline(
             and again after the debate refines it."""
             try:
                 _write_text(design_file, content)
-                _write_text(os.path.join(project_dir, "design.md"), content)
             except Exception as e:
                 logger.warning(f"Failed to write Claude debug output: {e}")
 
@@ -2405,6 +2617,9 @@ async def run_pipeline(
             # per-file artifacts that would evict it from the in-memory bus.
             design_art = message_bus.retrieve(claude_art_id)
             design_plan_content = design_art["content"] if design_art else ""
+            # Basenames of every designed file, so generated test modules can
+            # dodge collisions with designed ones (generated_test_path).
+            fanout_designed_basenames = designed_basenames_of(files_to_implement)
 
             async def handle_file(file_info):
                 file_path = file_info["path"]
@@ -2428,6 +2643,7 @@ async def run_pipeline(
                         design_plan_content=design_plan_content,
                         flow=flow,
                         claude_url=claude_url,
+                        designed_basenames=fanout_designed_basenames,
                     )
                     status_dict[file_path] = "completed"
                     update_progress_md(status_dict)
@@ -2438,10 +2654,31 @@ async def run_pipeline(
                     update_progress_md(status_dict)
                     return file_path, None, e
 
-            tasks_list = [handle_file(f) for f in files_to_implement]
-            results = await asyncio.gather(*tasks_list)
+            # Two-phase fan-out: DESIGNED TEST MODULES run in a second wave,
+            # only after every implementation file is FINAL. They execute
+            # directly against the real modules, so racing a mid-rewrite
+            # target burns their whole retry budget on stale code — a real
+            # run failed exactly this way (the designed test exhausted 3
+            # attempts against in-flight wordfreq.py versions; the final
+            # implementation was correct and would have passed).
+            impl_wave = [
+                f
+                for f in files_to_implement
+                if not is_test_module(str(f.get("path", "")))
+            ]
+            test_wave = [
+                f
+                for f in files_to_implement
+                if is_test_module(str(f.get("path", "")))
+            ]
+            results = list(
+                await asyncio.gather(*[handle_file(f) for f in impl_wave])
+            )
+            results.extend(
+                await asyncio.gather(*[handle_file(f) for f in test_wave])
+            )
 
-            for file_info, (file_path, result, err) in zip(files_to_implement, results):
+            for file_path, result, err in results:
                 if err is not None:
                     failed_files.append(file_path)
                 else:
@@ -2449,8 +2686,18 @@ async def run_pipeline(
 
             all_failed = len(failed_files) == len(files_to_implement)
             if failed_files and not (degraded_mode() and not all_failed):
+                hint = ""
+                if any(is_test_module(f) for f in failed_files):
+                    hint = (
+                        " A DESIGNED test module that fails after the "
+                        "implementation wave usually means an implementation "
+                        "it exercises violates the spec (and its own "
+                        "generated tests were too weak to catch it) — see "
+                        "logs/test_<module>.log in the project directory."
+                    )
                 raise PipelineError(
-                    f"Self-healing loop failed to implement and verify files: {', '.join(failed_files)}"
+                    f"Self-healing loop failed to implement and verify files: "
+                    f"{', '.join(failed_files)}.{hint}"
                 )
             if failed_files:
                 logger.warning(
@@ -2471,6 +2718,40 @@ async def run_pipeline(
                 )
             else:
                 review_content = "All files successfully implemented and verified through self-healing loop."
+
+            # CUSTOM: whole-project verification. The per-file loops execute
+            # each test module in isolation, so they can never see cross-file
+            # conflicts (a real job completed while bare `pytest` at its root
+            # failed collection on duplicate test basenames). Run pytest ONCE
+            # from the project root + report design-vs-disk conformance; both
+            # sections land in review.md and feed the final reviewer. A
+            # failing suite FAILS the job below (full_suite_gate_enabled,
+            # default strict).
+            full_suite_failed = False
+            full_suite_rc = None
+            if flow == "custom":
+                conformance = _design_conformance_report(
+                    project_dir, files_to_implement
+                )
+                review_content += (
+                    "\n\n## File conformance (design vs disk)\n" + conformance
+                )
+                if not failed_files:
+                    full_suite_rc, full_suite_log = await _run_project_pytest(
+                        project_dir
+                    )
+                    # Exit 5 = "no tests collected": valid for docs-only
+                    # projects, not a failure.
+                    full_suite_failed = full_suite_rc not in (0, 5)
+                    logger.info(
+                        "Whole-project pytest exit code: %s", full_suite_rc
+                    )
+                    review_content += (
+                        "\n\n## Whole-project pytest\n"
+                        f"exit code: {full_suite_rc}"
+                        f"\n\n```\n{full_suite_log.strip()}\n```"
+                    )
+
             review_art_id = await message_bus.publish_async(
                 Artifact(
                     name="review_data",
@@ -2481,9 +2762,17 @@ async def run_pipeline(
             )
             try:
                 _write_text(review_file, review_content)
-                _write_text(os.path.join(project_dir, "review.md"), review_content)
             except Exception as e:
                 logger.warning(f"Failed to write review.md: {e}")
+
+            if full_suite_failed and full_suite_gate_enabled():
+                raise PipelineError(
+                    f"Whole-project pytest failed (exit {full_suite_rc}) after "
+                    "per-file verification — a cross-file conflict or "
+                    "integration failure the per-file loops cannot see; the "
+                    "log is recorded in review.md. Set GENIUS_FULL_SUITE_GATE=0 "
+                    "to demote this gate to report-only."
+                )
 
             # Aggregate audit report
             consolidated_audit = (
@@ -2501,16 +2790,21 @@ async def run_pipeline(
             )
             try:
                 _write_text(audit_file, consolidated_audit)
-                _write_text(os.path.join(project_dir, "audit.md"), consolidated_audit)
             except Exception as e:
                 logger.warning(f"Failed to write audit.md: {e}")
 
+            if stage_gate is not None:
+                await stage_gate("code")
+
             # CUSTOM: a final reviewer (codex/gpt-5.6 per config) audits the
-            # implemented project against its design + audit; if it does not
-            # emit [APPROVED], Claude analyses the review and prescribes fixes,
-            # recorded in review.md (user's flow: "review -> route issues back
-            # to Claude"). A full automatic re-code loop is intentionally
-            # deferred; the fix plan is surfaced for the operator/next run.
+            # implemented project against its design + audit, AFTER the code
+            # gate; if it does not emit [APPROVED], Claude analyses the review
+            # and prescribes fixes, recorded in review.md (user's flow:
+            # "review -> route issues back to Claude"). An explicitly BLOCKING
+            # verdict then FAILS the pipeline (final_review_strict, default
+            # strict) so a job with known-bad output can never report
+            # completed; the automatic re-code loop is still deferred — the
+            # fix plan is the input for the operator/next run.
             if flow == "custom" and review_target_url:
                 # Gather the ACTUAL implemented files so the reviewer audits real
                 # code, not just design+audit. Without this the reviewer never
@@ -2540,6 +2834,17 @@ async def run_pipeline(
                     if _code_sections
                     else "(no files were implemented)"
                 )
+                review_blocking = False
+
+                def _record_final_review(suffix: str) -> None:
+                    # The workspace-root review.md is the single canonical
+                    # copy (what the genius:// artifact serves); the project
+                    # directory is the deliverable and carries no artifacts.
+                    try:
+                        _write_text(review_file, review_content + suffix)
+                    except Exception:
+                        pass
+
                 try:
                     final_review = await call_api(
                         review_target_url,
@@ -2549,6 +2854,9 @@ async def run_pipeline(
                         "include [APPROVED]. Otherwise list concrete issues.\n\n"
                         f"Design:\n{claude_content}\n\n"
                         f"Implemented code:\n{implemented_code}\n\n"
+                        "Verification summary (per-file self-heal, file "
+                        "conformance, whole-project pytest):\n"
+                        f"{review_content}\n\n"
                         f"Consolidated audit:\n{consolidated_audit}",
                         context={},
                         client=client,
@@ -2562,21 +2870,20 @@ async def run_pipeline(
                         # security service) = approved with optional hardening
                         # notes. Record them but spend NO Claude fix plan (user's
                         # flow: route to Claude only on real, blocking issues).
-                        try:
-                            _write_text(
-                                os.path.join(project_dir, "review.md"),
-                                review_content
-                                + "\n\n## Final review (non-blocking)\n"
-                                + final_review,
-                            )
-                        except Exception:
-                            pass
+                        _record_final_review(
+                            "\n\n## Final review (non-blocking)\n" + final_review
+                        )
                         logger.info(
                             "Custom final review returned a non-blocking verdict "
                             "(%d suggestion(s)); no Claude fix plan.",
                             len(_verdict.get("findings") or []),
                         )
                     elif claude_url:
+                        # Only a PARSED blocking verdict arms the strict gate;
+                        # unparseable non-approved reviews stay advisory.
+                        review_blocking = _verdict is not None and bool(
+                            _verdict.get("blocking")
+                        )
                         fix_plan = await call_api(
                             claude_url,
                             api_key,
@@ -2587,28 +2894,36 @@ async def run_pipeline(
                             client=client,
                             poll_timeout=poll_timeout,
                         )
-                        try:
-                            _write_text(
-                                os.path.join(project_dir, "review.md"),
-                                review_content
-                                + "\n\n## Final review\n"
-                                + final_review
-                                + "\n\n## Claude fix plan\n"
-                                + fix_plan,
-                            )
-                        except Exception:
-                            pass
+                        _record_final_review(
+                            "\n\n## Final review\n"
+                            + final_review
+                            + "\n\n## Claude fix plan\n"
+                            + fix_plan
+                        )
                         logger.info(
                             "Custom final review raised issues; Claude fix plan "
                             "recorded in review.md."
                         )
+                    else:
+                        # No Claude service to draft a fix plan: still record
+                        # the review and arm the gate on a blocking verdict.
+                        review_blocking = _verdict is not None and bool(
+                            _verdict.get("blocking")
+                        )
+                        _record_final_review(
+                            "\n\n## Final review\n" + final_review
+                        )
                 except Exception as e:
                     logger.warning("Custom final review failed (%s); continuing.", e)
+                if review_blocking and final_review_strict():
+                    raise PipelineError(
+                        "Custom final review returned a BLOCKING verdict; the "
+                        "Claude fix plan (when available) is recorded in "
+                        "review.md. Set GENIUS_FINAL_REVIEW_STRICT=0 to demote "
+                        "this gate to advisory."
+                    )
                 if stage_gate is not None:
                     await stage_gate("review")
-
-            if stage_gate is not None:
-                await stage_gate("code")
 
             # Run DevOps deployment (Step 7)
             logger.info("--- Running Step: DevOps ---")
@@ -2661,7 +2976,6 @@ async def run_pipeline(
             )
             try:
                 _write_text(deploy_file, devops_content)
-                _write_text(os.path.join(project_dir, "deploy.md"), devops_content)
             except Exception as e:
                 raise PipelineError(
                     f"Failed to write DevOps output to {deploy_file}: {e}"
@@ -3001,12 +3315,16 @@ async def run_e2e_pipeline(
         )
 
     project_dir = os.path.join(workspace, "projects", project_name)
-    os.makedirs(os.path.join(project_dir, "src"), exist_ok=True)
-    os.makedirs(os.path.join(project_dir, "tests"), exist_ok=True)
-    os.makedirs(os.path.join(project_dir, "logs"), exist_ok=True)
+    # Same deliverable rule as run_pipeline: only designed files in the
+    # project dir; internals under pipeline_internal_dir().
+    os.makedirs(project_dir, exist_ok=True)
+    os.makedirs(
+        os.path.join(pipeline_internal_dir(project_dir), "logs"), exist_ok=True
+    )
 
     # Paths for context sharing files
     plan_file = os.path.join(workspace, "plan.md")
+    # Stale project-dir copies from pre-separation runs are still cleaned.
     proj_plan_file = os.path.join(project_dir, "plan.md")
 
     # 1. Clean up old output files
@@ -3063,7 +3381,6 @@ async def run_e2e_pipeline(
             and again after the debate refines it."""
             try:
                 _write_text(plan_file, content)
-                _write_text(proj_plan_file, content)
             except Exception as e:
                 raise PipelineError(f"Failed to write Claude plan to {plan_file}: {e}")
 
@@ -3225,9 +3542,12 @@ async def run_e2e_pipeline(
 
                 flat_name = flatten_rel_path(file_path)
 
-                test_file_path = os.path.join(
-                    project_dir, "tests", f"test_{flat_name}.py"
+                test_file_path = generated_test_path(
+                    project_dir,
+                    flat_name,
+                    designed_basenames_of(files_to_implement),
                 )
+                os.makedirs(os.path.dirname(test_file_path), exist_ok=True)
 
                 file_is_python = target_file_path.endswith(".py")
 
@@ -3259,12 +3579,20 @@ async def run_e2e_pipeline(
                     )
 
                     codex_prompt = f"/code Implement the file '{file_path}' according to this specification:\n{specification}"
+                    if not file_path.endswith(".py"):
+                        codex_prompt += (
+                            "\n\nThis target file is NOT a Python module. "
+                            "Respond with ONLY the complete contents of "
+                            f"'{file_path}' in a single {fence_hint(file_path)}; "
+                            "this overrides any instruction to use a "
+                            "```python block."
+                        )
                     if attempt > 1:
                         codex_prompt += f"\n\nPrevious implementation attempt failed verification.\nErrors/Logs:\n{truncate_log(codex_error_log)}"
                         codex_prompt += (
                             "\n\nDo NOT run tests, commands, or tools. Output "
                             "ONLY the complete file content in a single "
-                            "```python fenced block."
+                            f"{fence_hint(file_path)}."
                         )
 
                     # An API/agent failure inside an attempt must not abort the
@@ -3285,7 +3613,7 @@ async def run_e2e_pipeline(
                         )
                         codex_error_log = f"Codex agent call failed: {e}"
                         continue
-                    code_content = extract_code(codex_raw)
+                    code_content = extract_code(codex_raw, filename=file_path)
 
                     # Never write non-Python garbage (pytest logs, prose) into
                     # a .py file: fail the attempt and steer the next prompt,
@@ -3445,7 +3773,9 @@ async def run_e2e_pipeline(
                         )
                         tester_error_log = f"Tester agent call failed: {e}"
                         continue
-                    test_code_content = extract_code(tester_raw)
+                    test_code_content = extract_code(
+                        tester_raw, filename=test_file_path
+                    )
 
                     # Same hygiene for the generated pytest module.
                     feedback = invalid_python_feedback(
@@ -3493,10 +3823,28 @@ async def run_e2e_pipeline(
                 status_dict[file_path] = "completed"
                 update_progress_md(status_dict)
 
-        tasks_list = [process_e2e_file(f) for f in files_to_implement]
+        # Same two-phase ordering as the sequential fan-out: designed test
+        # modules only run once the implementations they exercise are final.
+        e2e_impl_wave = [
+            f for f in files_to_implement if not is_test_module(str(f.get("path", "")))
+        ]
+        e2e_test_wave = [
+            f for f in files_to_implement if is_test_module(str(f.get("path", "")))
+        ]
         if degraded_mode():
-            results = await asyncio.gather(*tasks_list, return_exceptions=True)
-            paths = [f["path"] for f in files_to_implement]
+            results = list(
+                await asyncio.gather(
+                    *[process_e2e_file(f) for f in e2e_impl_wave],
+                    return_exceptions=True,
+                )
+            )
+            results.extend(
+                await asyncio.gather(
+                    *[process_e2e_file(f) for f in e2e_test_wave],
+                    return_exceptions=True,
+                )
+            )
+            paths = [f["path"] for f in e2e_impl_wave + e2e_test_wave]
             failed, summary = resolve_degraded_outcome(paths, results, "E2E Pipeline")
             if failed:
                 logger.warning(
@@ -3508,7 +3856,8 @@ async def run_e2e_pipeline(
                 )
                 return summary
         else:
-            await gather_or_raise(*tasks_list)
+            await gather_or_raise(*[process_e2e_file(f) for f in e2e_impl_wave])
+            await gather_or_raise(*[process_e2e_file(f) for f in e2e_test_wave])
 
         logger.info(
             "E2E Pipeline executed successfully and all files implemented, verified, and tested."

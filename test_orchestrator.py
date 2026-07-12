@@ -111,14 +111,19 @@ async def test_pipeline_sequencing_and_success(
     assert mock_exec.call_count == 1
 
     project_dir = temp_workspace / "projects" / "build_a_calculator_app"
-    research_path = project_dir / "research.md"
-    design_path = project_dir / "design.md"
+    # Artifacts live at the WORKSPACE ROOT only: the project directory is the
+    # deliverable (the app/review/test copies below are the pytest-only
+    # legacy single-file branch's own outputs).
+    research_path = temp_workspace / "research.md"
+    design_path = temp_workspace / "design.md"
     app_path = project_dir / "app.py"
     review_path = project_dir / "review.md"
     test_generated_path = project_dir / "test_generated.py"
 
     assert research_path.exists()
     assert design_path.exists()
+    assert not (project_dir / "research.md").exists()
+    assert not (project_dir / "design.md").exists()
     assert app_path.exists()
     assert review_path.exists()
     assert test_generated_path.exists()
@@ -223,14 +228,19 @@ async def test_pipeline_stdout_redirection(
     )
 
     project_dir = temp_workspace / "projects" / "build_a_calculator_app"
-    research_path = project_dir / "research.md"
-    design_path = project_dir / "design.md"
+    # Artifacts live at the WORKSPACE ROOT only: the project directory is the
+    # deliverable (the app/review/test copies below are the pytest-only
+    # legacy single-file branch's own outputs).
+    research_path = temp_workspace / "research.md"
+    design_path = temp_workspace / "design.md"
     app_path = project_dir / "app.py"
     review_path = project_dir / "review.md"
     test_generated_path = project_dir / "test_generated.py"
 
     assert research_path.exists()
     assert design_path.exists()
+    assert not (project_dir / "research.md").exists()
+    assert not (project_dir / "design.md").exists()
     assert app_path.exists()
     assert review_path.exists()
     assert test_generated_path.exists()
@@ -675,7 +685,7 @@ async def test_interactive_design_review_loop(
             prompt="Build a game", workspace=str(temp_workspace), interactive=True
         )
 
-        design_path = temp_workspace / "projects" / "build_a_game" / "design.md"
+        design_path = temp_workspace / "design.md"
         assert design_path.exists()
         assert "Design Version 2" in design_path.read_text(encoding="utf-8")
         assert mock_input.call_count == 3
@@ -786,9 +796,11 @@ async def test_self_healing_loop_success_after_retry(
     assert exec_call_count == 2
 
     proj_dir = temp_workspace / "projects" / "build_a_self_healer"
+    internal = temp_workspace / ".genius" / "build_a_self_healer"
     # Generated test/audit/log names derive from the flattened relative path
-    # (src/app.py -> src_app) so files with the same basename can't collide.
+    # (src/app.py -> src_app) so files with the same basename can't collide;
+    # they are pipeline internals, kept OUT of the deliverable project dir.
     assert (proj_dir / "src" / "app.py").exists()
-    assert (proj_dir / "tests" / "test_src_app.py").exists()
-    assert (proj_dir / "logs" / "audit_src_app.md").exists()
-    assert (proj_dir / "logs" / "test_src_app.log").exists()
+    assert (internal / "tests" / "test_src_app.py").exists()
+    assert (internal / "logs" / "audit_src_app.md").exists()
+    assert (internal / "logs" / "test_src_app.log").exists()

@@ -308,7 +308,9 @@ async def test_design_lint_retry_fixes_duplicate_paths(tmp_path, monkeypatch):
     assert "duplicate file path" in calls[2]
     project_dirs = list((tmp_path / "projects").iterdir())
     assert (project_dirs[0] / "src" / "thing.py").is_file()
-    raw_names = os.listdir(project_dirs[0] / "logs" / "raw")
+    raw_names = os.listdir(
+        tmp_path / ".genius" / project_dirs[0].name / "logs" / "raw"
+    )
     assert any(n.startswith("design_lint_retry1") for n in raw_names)
 
 
@@ -344,7 +346,9 @@ async def test_design_lint_exhaustion_raises(tmp_path, monkeypatch):
 
 def test_save_raw_response_writes_sanitized_file(tmp_path):
     save_raw_response(str(tmp_path), "codex a/b:attempt#1", "payload")
-    raw_dir = tmp_path / "logs" / "raw"
+    # tmp_path is not a projects/<slug> dir, so the internal fallback
+    # layout (<project>/.genius/) applies.
+    raw_dir = tmp_path / ".genius" / "logs" / "raw"
     files = list(raw_dir.iterdir())
     assert len(files) == 1
     assert files[0].suffix == ".md"
@@ -421,7 +425,9 @@ async def test_design_retry_reprompts_architect_then_succeeds(tmp_path, monkeypa
     assert len(project_dirs) == 1
     assert (project_dirs[0] / "src" / "thing.py").is_file()
     # Raw responses were captured for the retry and the codex attempt.
-    raw_names = os.listdir(project_dirs[0] / "logs" / "raw")
+    raw_names = os.listdir(
+        tmp_path / ".genius" / project_dirs[0].name / "logs" / "raw"
+    )
     assert any(n.startswith("design_retry1") for n in raw_names)
     assert any(n.startswith("codex_") for n in raw_names)
 

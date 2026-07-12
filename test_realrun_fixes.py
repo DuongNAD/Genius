@@ -266,8 +266,9 @@ async def test_design_md_survives_strict_debate_failure(
     assert (temp_workspace / "design.md").read_text(
         encoding="utf-8"
     ) == "Claude design v1"
+    # The deliverable project dir carries no artifact copy.
     proj_design = temp_workspace / "projects" / "build_a_calculator_app" / "design.md"
-    assert proj_design.read_text(encoding="utf-8") == "Claude design v1"
+    assert not proj_design.exists()
 
 
 @pytest.mark.asyncio
@@ -316,8 +317,9 @@ async def test_e2e_plan_md_survives_strict_debate_failure(
             max_debate_rounds=2,
         )
     assert (temp_workspace / "plan.md").read_text(encoding="utf-8") == "Claude plan v1"
+    # The deliverable project dir carries no artifact copy.
     proj_plan = temp_workspace / "projects" / "build_x" / "plan.md"
-    assert proj_plan.read_text(encoding="utf-8") == "Claude plan v1"
+    assert not proj_plan.exists()
 
 
 @pytest.mark.asyncio
@@ -663,7 +665,7 @@ async def test_self_heal_rejects_garbage_tester_output(
     assert state["tester"] == 2
     test_file = (
         temp_workspace
-        / "projects"
+        / ".genius"
         / "build_a_self_healer"
         / "tests"
         / "test_src_app.py"

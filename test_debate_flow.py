@@ -78,7 +78,7 @@ async def test_debate_flow_sequence_no_approval(
         "Claude design v3 (final)"
         in open(
             os.path.join(
-                str(temp_workspace), "projects", "build_a_calculator_app", "design.md"
+                str(temp_workspace), "design.md"
             ),
             "r",
             encoding="utf-8",
@@ -137,7 +137,7 @@ async def test_debate_flow_instant_approval(mock_exec, mock_call_api, temp_works
     # Check that design.md contains the initial design v1 (unmodified)
     design_content = open(
         os.path.join(
-            str(temp_workspace), "projects", "build_a_calculator_app", "design.md"
+            str(temp_workspace), "design.md"
         ),
         "r",
         encoding="utf-8",
@@ -199,7 +199,7 @@ async def test_debate_flow_round_2_approval(mock_exec, mock_call_api, temp_works
     # Check that design.md contains the design v2 (refined from round 1)
     design_content = open(
         os.path.join(
-            str(temp_workspace), "projects", "build_a_calculator_app", "design.md"
+            str(temp_workspace), "design.md"
         ),
         "r",
         encoding="utf-8",

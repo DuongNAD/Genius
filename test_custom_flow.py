@@ -14,7 +14,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from orchestrator import run_pipeline, process_single_file  # noqa: E402
+from orchestrator import run_pipeline, process_single_file, PipelineError  # noqa: E402
 from ag_core.config import load_config  # noqa: E402
 from ag_core.utils.message_bus import MessageBus  # noqa: E402
 
@@ -202,9 +202,9 @@ async def test_custom_flow_final_review_and_per_stage_gates(
         stage_gate=gate,
         **URLS,
     )
-    # Custom flow gates after EVERY stage, incl. the new review + devops.
-    assert "review" in gates
-    assert "devops" in gates
+    # Custom flow gates after EVERY stage, in execution order: the final
+    # review runs AFTER the code gate, then devops closes the run.
+    assert gates == ["research", "design", "code", "review", "devops"]
     # The final review ran on the codex reviewer.
     assert review_calls and review_calls[0] == URLS["codex_url"]
 
@@ -358,3 +358,328 @@ async def test_custom_flow_nonblocking_review_skips_claude_fix_plan(
     )
     # Non-blocking verdict => approved => the "raised issues" Claude call is skipped.
     assert fix_plan_calls == []
+
+
+def _blocking_review_mock():
+    """call_api mock whose final review returns an explicit BLOCKING verdict."""
+    urls = []
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        urls.append(url)
+        if prompt.startswith("/code"):
+            return "```python\ndef foo():\n    return 1\n```"
+        if prompt.startswith("A reviewer raised issues"):
+            return "1. fix the truncated README"
+        if "You are CriticReviewer" in prompt:
+            return "Looks good [APPROVED]"
+        if "Review the implemented project" in prompt:
+            return (
+                '```json\n{"blocking": true, "findings": '
+                '[{"severity": "high", "issue": "README is truncated"}]}\n```'
+            )
+        if url == URLS["tester_url"]:
+            return "```python\ndef test_foo():\n    assert True\n```"
+        if url == URLS["security_url"]:
+            return '```json\n{"blocking": false}\n```'
+        return f"```json\n{_DESIGN_ONE_FILE}\n```"
+
+    return urls, impl
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_custom_flow_blocking_review_fails_pipeline_by_default(
+    mock_exec, mock_call_api, temp_workspace
+):
+    """A parsed {"blocking": true} final-review verdict is a REAL quality gate:
+    the Claude fix plan is recorded in review.md, then the pipeline fails
+    (default GENIUS_FINAL_REVIEW_STRICT) instead of deploying and reporting
+    completed with known-bad output."""
+    urls, impl = _blocking_review_mock()
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _mock_exec
+    with pytest.raises(PipelineError, match="BLOCKING"):
+        await run_pipeline(
+            prompt="Build a calculator app",
+            workspace=str(temp_workspace),
+            max_debate_rounds=1,
+            flow="custom",
+            **URLS,
+        )
+    # The fix plan WAS produced and recorded (workspace-root review.md is the
+    # single canonical copy; the project dir is the artifact-free deliverable)
+    review_md = os.path.join(str(temp_workspace), "review.md")
+    with open(review_md, encoding="utf-8") as f:
+        review = f.read()
+    assert "## Claude fix plan" in review
+    assert "fix the truncated README" in review
+    # ...and the deploy stage never ran.
+    assert URLS["devops_url"] not in urls
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_custom_flow_blocking_review_advisory_when_strict_disabled(
+    mock_exec, mock_call_api, temp_workspace, monkeypatch
+):
+    """GENIUS_FINAL_REVIEW_STRICT=0 restores the historical advisory behavior:
+    the fix plan is recorded and the pipeline continues to deploy."""
+    monkeypatch.setenv("GENIUS_FINAL_REVIEW_STRICT", "0")
+    urls, impl = _blocking_review_mock()
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _mock_exec
+    await run_pipeline(
+        prompt="Build a calculator app",
+        workspace=str(temp_workspace),
+        max_debate_rounds=1,
+        flow="custom",
+        **URLS,
+    )
+    review_md = os.path.join(str(temp_workspace), "review.md")
+    with open(review_md, encoding="utf-8") as f:
+        review = f.read()
+    assert "## Claude fix plan" in review
+    assert URLS["devops_url"] in urls  # deploy still ran
+
+
+# --- whole-project pytest gate + conformance + collision-safe test names ----
+
+
+def _happy_impl(review_response='```json\n{"blocking": false, "findings": []}\n```'):
+    """call_api mock for a clean custom run; final review response injectable."""
+    urls = []
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        urls.append(url)
+        if prompt.startswith("/code"):
+            return "```python\ndef foo():\n    return 1\n```"
+        if "Review the implemented project" in prompt:
+            return review_response
+        if url == URLS["tester_url"]:
+            return "```python\ndef test_foo():\n    assert True\n```"
+        if url == URLS["security_url"]:
+            return '```json\n{"blocking": false}\n```'
+        return f"```json\n{_DESIGN_ONE_FILE}\n```"
+
+    return urls, impl
+
+
+def _exec_side_with_full_suite_rc(returncode):
+    """Subprocess mock: the whole-project pytest run (the only call passing
+    cwd=) gets ``returncode``; per-file pytest runs keep succeeding."""
+
+    async def side(*args, **kwargs):
+        if kwargs.get("cwd"):
+            proc = MagicMock()
+
+            async def _comm():
+                return (b"whole-project pytest output", b"")
+
+            proc.communicate = _comm
+            proc.returncode = returncode
+            return proc
+        return await _mock_exec(*args, **kwargs)
+
+    return side
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_custom_full_suite_gate_fails_job(
+    mock_exec, mock_call_api, temp_workspace
+):
+    """Per-file verification can pass while the ASSEMBLED project fails one
+    plain pytest run (e.g. duplicate test-module basenames). The custom flow
+    now runs pytest once from the project root and fails the job (default
+    strict) — a false-positive 'completed' shipped exactly this way."""
+    urls, impl = _happy_impl()
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _exec_side_with_full_suite_rc(1)
+    from orchestrator import PipelineError as PE
+
+    with pytest.raises(PE, match="Whole-project pytest"):
+        await run_pipeline(
+            prompt="Build a calculator app",
+            workspace=str(temp_workspace),
+            flow="custom",
+            **URLS,
+        )
+    # Evidence recorded in the canonical workspace-root review.md before the
+    # gate fired; the deliverable project dir carries no artifact copy.
+    review_md = os.path.join(str(temp_workspace), "review.md")
+    with open(review_md, encoding="utf-8") as f:
+        review = f.read()
+    assert "## Whole-project pytest" in review
+    assert "exit code: 1" in review
+    assert not os.path.exists(
+        os.path.join(
+            str(temp_workspace), "projects", "build_a_calculator_app", "review.md"
+        )
+    )
+    # The job stopped before deploy.
+    assert URLS["devops_url"] not in urls
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_custom_full_suite_gate_report_only_when_disabled(
+    mock_exec, mock_call_api, temp_workspace, monkeypatch
+):
+    monkeypatch.setenv("GENIUS_FULL_SUITE_GATE", "0")
+    urls, impl = _happy_impl(review_response="All good [APPROVED]")
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _exec_side_with_full_suite_rc(1)
+    await run_pipeline(
+        prompt="Build a calculator app",
+        workspace=str(temp_workspace),
+        flow="custom",
+        **URLS,
+    )
+    review_md = os.path.join(str(temp_workspace), "review.md")
+    with open(review_md, encoding="utf-8") as f:
+        review = f.read()
+    assert "exit code: 1" in review  # still reported
+    assert URLS["devops_url"] in urls  # but the run continued
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_custom_full_suite_exit_5_no_tests_is_a_pass(
+    mock_exec, mock_call_api, temp_workspace
+):
+    """pytest exit 5 = nothing collected (docs-only project): not a failure."""
+    urls, impl = _happy_impl(review_response="All good [APPROVED]")
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _exec_side_with_full_suite_rc(5)
+    await run_pipeline(
+        prompt="Build a calculator app",
+        workspace=str(temp_workspace),
+        flow="custom",
+        **URLS,
+    )
+    assert URLS["devops_url"] in urls
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_custom_workspace_review_md_carries_conformance_and_final_review(
+    mock_exec, mock_call_api, temp_workspace
+):
+    """The workspace-root review.md (what the genius:// artifact serves) must
+    tell the same story as the project copy: conformance report, whole-project
+    pytest result AND the final-review section (a real run's root copy held
+    only the one-line base summary)."""
+    urls, impl = _happy_impl(
+        review_response='```json\n{"blocking": false, "findings": [{"issue": "note"}]}\n```'
+    )
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _exec_side_with_full_suite_rc(0)
+    await run_pipeline(
+        prompt="Build a calculator app",
+        workspace=str(temp_workspace),
+        flow="custom",
+        **URLS,
+    )
+    with open(os.path.join(str(temp_workspace), "review.md"), encoding="utf-8") as f:
+        root_review = f.read()
+    assert "## File conformance (design vs disk)" in root_review
+    assert "## Whole-project pytest" in root_review
+    assert "## Final review (non-blocking)" in root_review
+    # Sequential default keeps the historical one-line review (byte-compat):
+    # covered by the default-flow tests above, which never see these sections.
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_designed_test_modules_run_after_implementation_wave(
+    mock_exec, mock_call_api, temp_workspace
+):
+    """Designed test modules execute directly against the real modules, so
+    they fan out in a SECOND wave: a real run burned the designed test's
+    whole retry budget racing mid-rewrite implementations (the final
+    implementation was correct and would have passed)."""
+    design = (
+        '{"project_name":"p","description":"d","files":['
+        '{"path":"test_foo.py","specification":"tests for foo"},'
+        '{"path":"foo.py","specification":"make foo"}]}'
+    )
+    code_order = []
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        if prompt.startswith("/code"):
+            name = prompt.split("'")[1]
+            code_order.append(name)
+            if name == "test_foo.py":
+                return "```python\ndef test_foo():\n    assert True\n```"
+            return "```python\ndef foo():\n    return 1\n```"
+        if "Review the implemented project" in prompt:
+            return "All good [APPROVED]"
+        if url == URLS["tester_url"]:
+            return "```python\ndef test_gen():\n    assert True\n```"
+        if url == URLS["security_url"]:
+            return '```json\n{"blocking": false}\n```'
+        return f"```json\n{design}\n```"
+
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _mock_exec
+    await run_pipeline(
+        prompt="Build a calculator app",
+        workspace=str(temp_workspace),
+        flow="custom",
+        **URLS,
+    )
+    # The design lists test_foo.py FIRST, yet foo.py is implemented first.
+    assert code_order == ["foo.py", "test_foo.py"]
+    # Bonus cross-check: foo.py's generated test dodged the designed
+    # test_foo.py basename AND lives in the internal dir, not the deliverable.
+    internal = os.path.join(
+        str(temp_workspace), ".genius", "build_a_calculator_app"
+    )
+    assert os.path.exists(os.path.join(internal, "tests", "test_foo_gen.py"))
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_generated_test_module_dodges_designed_basename_collision(
+    mock_exec, mock_call_api, temp_workspace
+):
+    """When the design itself ships test_foo.py, the tester-generated module
+    for foo.py must NOT reuse that basename (pytest 'import file mismatch' /
+    silent overwrite): it becomes tests/test_foo_gen.py."""
+    calls, impl = _happy_impl()
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _mock_exec
+    proj = str(temp_workspace / "proj")
+    await process_single_file(
+        **_psf_args(proj, calls),
+        designed_basenames={"foo.py", "test_foo.py"},
+    )
+    # Fallback internal layout (proj is not a projects/<slug> dir).
+    gen_tests = os.path.join(proj, ".genius", "tests")
+    assert os.path.exists(os.path.join(gen_tests, "test_foo_gen.py"))
+    assert not os.path.exists(os.path.join(gen_tests, "test_foo.py"))
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_generated_test_module_keeps_legacy_name_without_collision(
+    mock_exec, mock_call_api, temp_workspace
+):
+    calls, impl = _happy_impl()
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _mock_exec
+    proj = str(temp_workspace / "proj2")
+    await process_single_file(
+        **_psf_args(proj, calls),
+        designed_basenames={"foo.py"},
+    )
+    assert os.path.exists(os.path.join(proj, ".genius", "tests", "test_foo.py"))
