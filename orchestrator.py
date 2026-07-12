@@ -173,6 +173,61 @@ def degraded_mode() -> bool:
     return os.getenv("GENIUS_DEGRADED_MODE", "").lower() in ("1", "true", "yes")
 
 
+# Claude Code's reasoning-effort scale (mirrors _CLAUDE_EFFORT_LEVELS in
+# ag_core/providers/anthropic_provider.py — the provider re-validates anyway).
+_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+_ADAPTIVE_EFFORT_DEFAULT_THRESHOLD = 600
+_ADAPTIVE_EFFORT_DEFAULT_SMALL = "high"
+
+
+def _adaptive_effort(cleaned_prompt: str):
+    """Small-project effort downgrade (opt-in via ``GENIUS_ADAPTIVE_EFFORT``).
+
+    The design/plan stage runs at the Claude service's configured effort (e.g.
+    ``GENIUS_CLAUDE_EFFORT_CLAUDE=max``) regardless of project size — a real
+    2-file run spent ~3 minutes planning at max. When enabled and the
+    @modifier-stripped pipeline prompt is shorter than
+    ``GENIUS_ADAPTIVE_EFFORT_THRESHOLD`` characters (default 600), the
+    pipeline-wide effort becomes ``GENIUS_ADAPTIVE_EFFORT_SMALL`` (default
+    ``high``), riding the same per-task contextvar as ``@deep`` — so it
+    overrides the per-role env efforts for claude/codex, while agy-backed
+    stages accept-and-ignore it as usual. A prompt at/over the threshold
+    returns None (byte-identical requests), and the caller lets an explicit
+    ``@deep`` win over this heuristic.
+    """
+    if os.getenv("GENIUS_ADAPTIVE_EFFORT", "").lower() not in ("1", "true", "yes"):
+        return None
+    try:
+        threshold = int(
+            os.getenv("GENIUS_ADAPTIVE_EFFORT_THRESHOLD", "").strip()
+            or _ADAPTIVE_EFFORT_DEFAULT_THRESHOLD
+        )
+    except (TypeError, ValueError):
+        threshold = _ADAPTIVE_EFFORT_DEFAULT_THRESHOLD
+    if threshold <= 0 or len(cleaned_prompt) >= threshold:
+        return None
+    small = (
+        os.getenv("GENIUS_ADAPTIVE_EFFORT_SMALL", "").strip().lower()
+        or _ADAPTIVE_EFFORT_DEFAULT_SMALL
+    )
+    if small not in _EFFORT_LEVELS:
+        logger.warning(
+            "GENIUS_ADAPTIVE_EFFORT_SMALL=%r is not one of %s; using %r",
+            small,
+            list(_EFFORT_LEVELS),
+            _ADAPTIVE_EFFORT_DEFAULT_SMALL,
+        )
+        small = _ADAPTIVE_EFFORT_DEFAULT_SMALL
+    logger.info(
+        "Adaptive effort: prompt is %d chars (< %d); running the pipeline at "
+        "effort %r instead of the per-role defaults.",
+        len(cleaned_prompt),
+        threshold,
+        small,
+    )
+    return small
+
+
 def eval_gate_enabled() -> bool:
     """Whether the R5 post-run eval gate runs at the end of a pipeline.
 
@@ -295,7 +350,12 @@ def _resolve_pipeline_setup(prompt, workspace, max_debate_rounds):
     if workspace is None:
         workspace = os.getcwd()
 
-    return project_name, workspace, max_debate_rounds, cleaned, directives.effort
+    # An explicit @deep always wins; otherwise the small-prompt heuristic may
+    # supply a pipeline effort (None when disabled or the prompt is large —
+    # byte-identical requests, same as before).
+    effort = directives.effort or _adaptive_effort(cleaned)
+
+    return project_name, workspace, max_debate_rounds, cleaned, effort
 
 
 def _write_text(path: str, content: str) -> None:

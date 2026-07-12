@@ -53,6 +53,62 @@ def test_setup_plain_prompt_unchanged():
     assert effort is None
 
 
+# --- adaptive effort (GENIUS_ADAPTIVE_EFFORT) --------------------------------
+
+
+def test_adaptive_effort_off_by_default(monkeypatch):
+    monkeypatch.delenv("GENIUS_ADAPTIVE_EFFORT", raising=False)
+    _, _, _, _, effort = _resolve_pipeline_setup("build a tiny tool", None, 0)
+    assert effort is None
+
+
+def test_adaptive_effort_small_prompt_gets_high(monkeypatch):
+    monkeypatch.setenv("GENIUS_ADAPTIVE_EFFORT", "1")
+    _, _, _, _, effort = _resolve_pipeline_setup("build a tiny tool", None, 0)
+    assert effort == "high"
+
+
+def test_adaptive_effort_large_prompt_stays_none(monkeypatch):
+    """At/over the threshold nothing changes: requests stay byte-identical to
+    the pre-adaptive behaviour."""
+    monkeypatch.setenv("GENIUS_ADAPTIVE_EFFORT", "1")
+    big = "build a service with many requirements " * 30  # >> 600 chars
+    _, _, _, _, effort = _resolve_pipeline_setup(big, None, 0)
+    assert effort is None
+
+
+def test_adaptive_effort_explicit_deep_wins(monkeypatch):
+    """@deep is an explicit user request; the heuristic never overrides it."""
+    monkeypatch.setenv("GENIUS_ADAPTIVE_EFFORT", "1")
+    monkeypatch.setenv("GENIUS_ADAPTIVE_EFFORT_SMALL", "low")
+    _, _, _, _, effort = _resolve_pipeline_setup("@deep build a tiny tool", None, 0)
+    assert effort == "high"  # DEEP_EFFORT, not the adaptive small value
+
+
+def test_adaptive_effort_threshold_and_level_tunable(monkeypatch):
+    monkeypatch.setenv("GENIUS_ADAPTIVE_EFFORT", "1")
+    monkeypatch.setenv("GENIUS_ADAPTIVE_EFFORT_THRESHOLD", "10")
+    monkeypatch.setenv("GENIUS_ADAPTIVE_EFFORT_SMALL", "medium")
+    _, _, _, _, effort = _resolve_pipeline_setup("tiny", None, 0)
+    assert effort == "medium"
+    _, _, _, _, effort = _resolve_pipeline_setup("longer than ten chars", None, 0)
+    assert effort is None
+
+
+def test_adaptive_effort_junk_level_falls_back_to_high(monkeypatch):
+    monkeypatch.setenv("GENIUS_ADAPTIVE_EFFORT", "1")
+    monkeypatch.setenv("GENIUS_ADAPTIVE_EFFORT_SMALL", "turbo")
+    _, _, _, _, effort = _resolve_pipeline_setup("build a tiny tool", None, 0)
+    assert effort == "high"
+
+
+def test_adaptive_effort_junk_threshold_falls_back(monkeypatch):
+    monkeypatch.setenv("GENIUS_ADAPTIVE_EFFORT", "1")
+    monkeypatch.setenv("GENIUS_ADAPTIVE_EFFORT_THRESHOLD", "not-a-number")
+    _, _, _, _, effort = _resolve_pipeline_setup("build a tiny tool", None, 0)
+    assert effort == "high"  # default 600-char threshold applies
+
+
 # --- routing strip: @modifier before /cmd still routes ----------------------
 
 
