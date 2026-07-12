@@ -1,3 +1,5 @@
 # Current Progress
 
-- src/app.py: completed
+- slugify.py: completed
+- conftest.py: completed
+- tests/test_slugify.py: completed

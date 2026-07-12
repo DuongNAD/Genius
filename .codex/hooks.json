@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py '/Users/duongnad/Documents/project/Genius/.codex/hooks/black_format.py'",
+            "statusMessage": "Formatting with black..."
+          }
+        ]
+      }
+    ]
+  }
+}
