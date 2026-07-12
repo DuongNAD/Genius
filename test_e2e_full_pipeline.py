@@ -100,7 +100,7 @@ async def test_e2e_happy_path(mock_run_subproc, mock_get, mock_post, temp_worksp
     mock_get.side_effect = get_side_effect
 
     # 3. Mock run_subprocess to always succeed
-    async def subproc_happy(cmd, env=None):
+    async def subproc_happy(cmd, env=None, cwd=None):
         return (0, "Success/Pass output")
 
     mock_run_subproc.side_effect = subproc_happy
@@ -189,7 +189,7 @@ async def test_e2e_codex_self_healing_success(
     # Tester runs pytest. Let's make it pass.
     subproc_calls = []
 
-    async def subproc_side_effect(cmd, env=None):
+    async def subproc_side_effect(cmd, env=None, cwd=None):
         subproc_calls.append(cmd)
         if "flake8" in cmd[2]:
             if len(subproc_calls) == 1:
@@ -253,7 +253,7 @@ async def test_e2e_codex_self_healing_failure(
     mock_get.side_effect = get_side_effect
 
     # Subprocess runs always fail for flake8
-    async def subproc_fail(cmd, env=None):
+    async def subproc_fail(cmd, env=None, cwd=None):
         return (1, "Persistent Flake8 Error")
 
     mock_run_subproc.side_effect = subproc_fail
@@ -321,7 +321,7 @@ async def test_e2e_tester_self_healing_success(
     # Tester pytest 2nd run (retry) passes.
     subproc_calls = []
 
-    async def subproc_side_effect(cmd, env=None):
+    async def subproc_side_effect(cmd, env=None, cwd=None):
         subproc_calls.append(cmd)
         if "flake8" in cmd[2]:
             return (0, "")
@@ -386,7 +386,7 @@ async def test_e2e_tester_self_healing_failure(
     mock_get.side_effect = get_side_effect
 
     # Flake8 passes, pytest fails persistently
-    async def subproc_side_effect(cmd, env=None):
+    async def subproc_side_effect(cmd, env=None, cwd=None):
         if "flake8" in cmd[2]:
             return (0, "")
         return (1, "Persistent AssertionError")
@@ -448,7 +448,7 @@ async def test_e2e_pythonpath_setting(
 
     subproc_envs = []
 
-    async def subproc_side_effect(cmd, env=None):
+    async def subproc_side_effect(cmd, env=None, cwd=None):
         subproc_envs.append(env)
         return (0, "Success")
 

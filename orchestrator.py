@@ -568,9 +568,15 @@ def generated_test_path(
     return os.path.join(pipeline_internal_dir(project_dir), "tests", name)
 
 
-async def run_subprocess(cmd: list, env: dict = None) -> tuple[int, str]:
+async def run_subprocess(
+    cmd: list, env: dict = None, cwd: str = None
+) -> tuple[int, str]:
     process = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+        cwd=cwd,
     )
     cli_name = " ".join(str(c) for c in cmd[:2]) if cmd else "subprocess"
     try:
@@ -1798,6 +1804,13 @@ async def process_single_file(
                 tester_req_prompt = (
                     f"/unit-test Generate comprehensive pytest unit tests for the file '{file_path}'. "
                     f"Import the code under test as the module `{module_path}` (e.g. `from {module_path} import ...`).\n\n"
+                    "LOCATION CONTRACT: the test module is stored OUTSIDE the "
+                    "project directory and executed with cwd = the project "
+                    "root (PYTHONPATH includes it). To reference project "
+                    "files (README, configs, the module's source), use the "
+                    "imported module's location (e.g. "
+                    f"Path({module_path}.__file__).parent) or plain relative "
+                    "paths from cwd — NEVER the test file's own __file__.\n\n"
                     f"Code:\n\n{code_to_write}"
                 )
                 # Feed the previous attempt's pytest failures to the TESTER
@@ -1950,6 +1963,12 @@ async def process_single_file(
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                         env=env,
+                        # cwd = the project root: generated tests live OUTSIDE
+                        # the deliverable (pipeline_internal_dir), so cwd- or
+                        # __file__-relative lookups of product files (a real
+                        # test hunted README.md via its own parents) only work
+                        # from the project directory.
+                        cwd=project_dir,
                     )
                     # Bounded: a generated test with an infinite loop or a
                     # blocking call would otherwise hang this file's task (and
@@ -2678,6 +2697,7 @@ async def run_pipeline(
                 await asyncio.gather(*[handle_file(f) for f in impl_wave])
             )
             impl_wave_failed = [fp for fp, _, err in results if err is not None]
+            skipped_test_paths = set()
             if test_wave and impl_wave_failed and not degraded_mode():
                 # The job is already doomed (strict mode fails on any file):
                 # designed tests exercise those very implementations, so
@@ -2692,6 +2712,7 @@ async def run_pipeline(
                 )
                 for f in test_wave:
                     status_dict[f["path"]] = "failed"
+                    skipped_test_paths.add(f["path"])
                     results.append(
                         (
                             f["path"],
@@ -2716,13 +2737,20 @@ async def run_pipeline(
             all_failed = len(failed_files) == len(files_to_implement)
             if failed_files and not (degraded_mode() and not all_failed):
                 hint = ""
-                if any(is_test_module(f) for f in failed_files):
+                # Only a designed test that actually RAN and failed implicates
+                # its implementation; wave-skipped tests are collateral of an
+                # implementation failure that is already listed.
+                if any(
+                    is_test_module(f)
+                    for f in failed_files
+                    if f not in skipped_test_paths
+                ):
                     hint = (
                         " A DESIGNED test module that fails after the "
                         "implementation wave usually means an implementation "
                         "it exercises violates the spec (and its own "
                         "generated tests were too weak to catch it) — see "
-                        "logs/test_<module>.log in the project directory."
+                        "the internal logs/test_<module>.log."
                     )
                 raise PipelineError(
                     f"Self-healing loop failed to implement and verify files: "
@@ -3720,7 +3748,7 @@ async def run_e2e_pipeline(
                     if file_is_python and os.path.exists(test_file_path):
                         pytest_cmd = [sys.executable, "-m", "pytest", test_file_path]
                         pytest_code, pytest_out = await run_subprocess(
-                            pytest_cmd, env=env
+                            pytest_cmd, env=env, cwd=project_dir
                         )
                     else:
                         pytest_code, pytest_out = 0, "No test for this file yet."
@@ -3847,9 +3875,12 @@ async def run_e2e_pipeline(
                             f"Failed to write test code to {test_file_path}: {e}"
                         )
 
-                    # Run pytest on the generated test file
+                    # Run pytest on the generated test file (cwd = project
+                    # root: the generated module lives outside the deliverable)
                     pytest_cmd = [sys.executable, "-m", "pytest", test_file_path]
-                    pytest_code, pytest_out = await run_subprocess(pytest_cmd, env=env)
+                    pytest_code, pytest_out = await run_subprocess(
+                        pytest_cmd, env=env, cwd=project_dir
+                    )
 
                     if pytest_code == 0:
                         logger.info(

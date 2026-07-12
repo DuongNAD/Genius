@@ -467,11 +467,12 @@ def _happy_impl(review_response='```json\n{"blocking": false, "findings": []}\n`
 
 
 def _exec_side_with_full_suite_rc(returncode):
-    """Subprocess mock: the whole-project pytest run (the only call passing
-    cwd=) gets ``returncode``; per-file pytest runs keep succeeding."""
+    """Subprocess mock: the whole-project pytest run (bare ``pytest -q`` with
+    no file argument — every per-file run ends with a test-module path) gets
+    ``returncode``; per-file pytest runs keep succeeding."""
 
     async def side(*args, **kwargs):
-        if kwargs.get("cwd"):
+        if args and args[-1] == "-q":
             proc = MagicMock()
 
             async def _comm():
@@ -752,6 +753,51 @@ async def test_generated_test_module_dodges_designed_basename_collision(
     gen_tests = os.path.join(proj, ".genius", "tests")
     assert os.path.exists(os.path.join(gen_tests, "test_foo_gen.py"))
     assert not os.path.exists(os.path.join(gen_tests, "test_foo.py"))
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_per_file_pytest_runs_from_project_root_with_location_contract(
+    mock_exec, mock_call_api, temp_workspace
+):
+    """Generated tests live outside the deliverable, so (a) their pytest run
+    sets cwd = the project root (a real generated test hunted README.md via
+    its own __file__ parents and failed 3/3 from the internal dir) and (b)
+    the tester prompt carries the location contract."""
+    tester_prompts = []
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        if url == URLS["tester_url"]:
+            tester_prompts.append(prompt)
+            return "```python\ndef test_gen():\n    assert True\n```"
+        if prompt.startswith("/code"):
+            return "```python\ndef foo():\n    return 1\n```"
+        if url == URLS["security_url"]:
+            return '```json\n{"blocking": false}\n```'
+        return f"```json\n{_DESIGN_ONE_FILE}\n```"
+
+    exec_kwargs = []
+
+    async def exec_side(*args, **kwargs):
+        exec_kwargs.append((args, kwargs))
+        return await _mock_exec(*args, **kwargs)
+
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = exec_side
+    proj = str(temp_workspace / "proj3")
+    await process_single_file(**_psf_args(proj, []))
+
+    assert tester_prompts
+    assert "LOCATION CONTRACT" in tester_prompts[0]
+    assert "NEVER the test file's own __file__" in tester_prompts[0]
+    pytest_calls = [
+        (args, kwargs)
+        for args, kwargs in exec_kwargs
+        if any(str(a).endswith(".py") and "pytest" in map(str, args) for a in args)
+    ]
+    assert pytest_calls
+    assert all(kwargs.get("cwd") == proj for _, kwargs in pytest_calls)
 
 
 @pytest.mark.asyncio

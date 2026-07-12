@@ -69,7 +69,7 @@ async def test_e2e_pytest_is_scoped_per_file(mock_sub, mock_get, mock_post, tmp_
 
     pytest_targets = []
 
-    async def sub_record(cmd, env=None):
+    async def sub_record(cmd, env=None, cwd=None):
         # cmd: [python, "-m", "pytest"|"flake8", <target>]
         if "pytest" in cmd:
             pytest_targets.append(cmd[-1])
@@ -152,7 +152,7 @@ async def test_e2e_skips_testgen_for_nonpython_infra_and_test_modules(
 
     mock_get.side_effect = get_side_effect
 
-    async def sub_ok(cmd, env=None):
+    async def sub_ok(cmd, env=None, cwd=None):
         return (0, "ok")
 
     mock_sub.side_effect = sub_ok
