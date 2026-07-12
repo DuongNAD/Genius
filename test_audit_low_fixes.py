@@ -163,3 +163,71 @@ def test_grok_null_usage_does_not_crash():
         assert resp["usage"]["total_tokens"] == 0
 
     asyncio.run(run())
+
+
+# --- fail-closed public binds: MCP HTTP server + control panel ---------------
+#
+# dashboard.py already refuses a non-loopback bind without its token; the MCP
+# HTTP server (/tools/call runs CLIs and writes files) and the control panel
+# (can start pipeline jobs) must apply the same policy instead of a warning
+# (control panel) or nothing (MCP).
+
+
+def test_mcp_public_bind_without_token_refuses_to_start(monkeypatch):
+    import mcp_server
+
+    monkeypatch.delenv("GENIUS_MCP_TOKEN", raising=False)
+    with pytest.raises(SystemExit):
+        mcp_server._enforce_public_bind_token("0.0.0.0")
+
+
+def test_mcp_public_bind_with_token_is_allowed(monkeypatch):
+    import mcp_server
+
+    monkeypatch.setenv("GENIUS_MCP_TOKEN", "s3cret")
+    mcp_server._enforce_public_bind_token("0.0.0.0")  # must not raise
+
+
+def test_mcp_loopback_bind_needs_no_token(monkeypatch):
+    import mcp_server
+
+    monkeypatch.delenv("GENIUS_MCP_TOKEN", raising=False)
+    for host in ("127.0.0.1", "localhost", "::1", ""):
+        mcp_server._enforce_public_bind_token(host)  # must not raise
+
+
+def test_panel_public_bind_without_token_refuses_to_start(monkeypatch):
+    from unittest.mock import patch
+
+    import control_panel
+
+    monkeypatch.setenv("GENIUS_PANEL_HOST", "0.0.0.0")
+    monkeypatch.delenv("GENIUS_PANEL_TOKEN", raising=False)
+    with patch("uvicorn.run") as mock_run:
+        with pytest.raises(SystemExit):
+            control_panel.main()
+        mock_run.assert_not_called()
+
+
+def test_panel_public_bind_with_token_starts(monkeypatch):
+    from unittest.mock import patch
+
+    import control_panel
+
+    monkeypatch.setenv("GENIUS_PANEL_HOST", "0.0.0.0")
+    monkeypatch.setenv("GENIUS_PANEL_TOKEN", "s3cret")
+    with patch("uvicorn.run") as mock_run:
+        control_panel.main()
+        mock_run.assert_called_once()
+
+
+def test_panel_loopback_bind_needs_no_token(monkeypatch):
+    from unittest.mock import patch
+
+    import control_panel
+
+    monkeypatch.setenv("GENIUS_PANEL_HOST", "127.0.0.1")
+    monkeypatch.delenv("GENIUS_PANEL_TOKEN", raising=False)
+    with patch("uvicorn.run") as mock_run:
+        control_panel.main()
+        mock_run.assert_called_once()

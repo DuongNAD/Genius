@@ -434,12 +434,18 @@ def main() -> None:
 
     host = os.getenv("GENIUS_PANEL_HOST") or "127.0.0.1"
     port = int(os.getenv("GENIUS_PANEL_PORT") or "8090")
-    if host not in ("127.0.0.1", "localhost", "::1") and not _panel_token():
-        print(
-            f"WARNING: binding the control panel to a non-loopback host ({host}) "
-            "without GENIUS_PANEL_TOKEN set — anyone who can reach this port can "
-            "start pipeline jobs and read your config. Set GENIUS_PANEL_TOKEN and "
-            "open /?token=<token>."
+    # Fail closed (same policy as dashboard.py and the MCP HTTP server): the
+    # panel can START pipeline jobs and read the config, and
+    # require_panel_auth only enforces the token when one is set, so a
+    # missing token on a public bind must be refused at startup rather than
+    # just warned about.
+    if host.strip() not in ("127.0.0.1", "localhost", "::1", "") and not _panel_token():
+        sys.exit(
+            f"Refusing to start: GENIUS_PANEL_HOST={host!r} exposes the "
+            "control panel beyond loopback, but GENIUS_PANEL_TOKEN is not "
+            "set. Anyone who can reach this port could start pipeline jobs "
+            "and read your config. Set GENIUS_PANEL_TOKEN=<secret> and open "
+            "/?token=<token>, or bind 127.0.0.1."
         )
     print(f"Genius Control Panel -> http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning")
