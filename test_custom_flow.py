@@ -360,6 +360,26 @@ async def test_custom_flow_nonblocking_review_skips_claude_fix_plan(
     assert fix_plan_calls == []
 
 
+def test_sweep_runtime_caches_removes_only_caches(tmp_path):
+    """The deliverable sweep strips __pycache__/.pytest_cache anywhere in the
+    tree and touches nothing else."""
+    from orchestrator import sweep_runtime_caches
+
+    (tmp_path / "pkg" / "__pycache__").mkdir(parents=True)
+    (tmp_path / "pkg" / "__pycache__" / "m.pyc").write_text("x")
+    (tmp_path / ".pytest_cache").mkdir()
+    (tmp_path / ".pytest_cache" / "CACHEDIR.TAG").write_text("x")
+    (tmp_path / "pkg" / "mod.py").write_text("print(1)")
+    (tmp_path / "README.md").write_text("# hi")
+
+    sweep_runtime_caches(str(tmp_path))
+
+    assert not (tmp_path / "pkg" / "__pycache__").exists()
+    assert not (tmp_path / ".pytest_cache").exists()
+    assert (tmp_path / "pkg" / "mod.py").exists()
+    assert (tmp_path / "README.md").exists()
+
+
 def _blocking_review_mock():
     """call_api mock whose final review returns an explicit BLOCKING verdict."""
     urls = []

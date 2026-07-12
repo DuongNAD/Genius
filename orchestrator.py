@@ -653,6 +653,22 @@ _PIPELINE_OWNED_BASENAMES = {
 _PIPELINE_OWNED_DIRS = {"logs", "__pycache__", ".pytest_cache", ".git", ".genius"}
 
 
+def sweep_runtime_caches(project_dir: str) -> None:
+    """Remove regenerable Python runtime caches from the deliverable.
+
+    The pipeline's own pytest runs write no bytecode
+    (PYTHONDONTWRITEBYTECODE), but a designed conftest, a pytest plugin or
+    any tool invoked during verification can still drop __pycache__ /
+    .pytest_cache into the project directory — and the deliverable must hand
+    over ONLY the designed files. Best-effort: never fails the run.
+    """
+    for root, dirs, _names in os.walk(project_dir):
+        for d in list(dirs):
+            if d in ("__pycache__", ".pytest_cache"):
+                shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                dirs.remove(d)
+
+
 def _design_conformance_report(project_dir: str, files_to_implement) -> str:
     """Compare the design's file list against what is actually on disk.
 
@@ -3068,6 +3084,10 @@ async def run_pipeline(
             if flow == "custom" and stage_gate is not None:
                 await stage_gate("devops")
 
+            # Hand over ONLY the designed files: strip any runtime caches the
+            # verification steps (or a designed conftest/plugin) left behind.
+            sweep_runtime_caches(project_dir)
+
             logger.info(
                 "Pipeline executed successfully and all files implemented, verified, and deployed."
             )
@@ -3939,6 +3959,9 @@ async def run_e2e_pipeline(
         else:
             await gather_or_raise(*[process_e2e_file(f) for f in e2e_impl_wave])
             await gather_or_raise(*[process_e2e_file(f) for f in e2e_test_wave])
+
+        # Same deliverable rule as run_pipeline: no runtime caches hand over.
+        sweep_runtime_caches(project_dir)
 
         logger.info(
             "E2E Pipeline executed successfully and all files implemented, verified, and tested."

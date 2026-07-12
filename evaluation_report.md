@@ -1,10 +1,12 @@
 > **⚠️ RE-VERIFIED 2026-07-12 — the findings below are STALE.**
 >
 > This report was generated on 2026-06-29 against an incomplete workspace
-> snapshot. Re-running the full quality gate on the actual repo today:
-> **992 passed, 3 skipped, flake8 clean** (the report's "96 failures /
-> missing `.agents/skills/`" reflected a checkout without the untracked
-> service wrappers, and the suite has since grown from 457 to 995 tests).
+> snapshot. Re-running the full quality gate on the actual repo on
+> 2026-07-12 (morning): **992 passed, 3 skipped, flake8 clean** (the
+> report's "96 failures / missing `.agents/skills/`" reflected a checkout
+> without the untracked service wrappers). All test counts in this file are
+> POINT-IN-TIME — the authoritative number is whatever `python -m pytest`
+> prints today (end of 2026-07-12: **1078 passed, 3 skipped**).
 > Point-by-point status of the findings:
 >
 > | Finding (2026-06-29) | Status today |
@@ -29,8 +31,9 @@
 > rejected valid workspaces, and the control panel/MCP HTTP server only
 > warned (or did nothing) on a public bind without a token.
 >
-> Second 2026-07-12 pass (external live-job audit; suite now
-> **1062 passed, 3 skipped, flake8 clean**): `orchestrate_status` now
+> Second 2026-07-12 pass (external live-job audit; suite at that point
+> **1062 passed** — later same-day passes grew it 1074 → 1078 as the
+> verification-layer fixes landed): `orchestrate_status` now
 > advertises job-scoped `genius://artifacts/<job_id>/<name>` resource URIs
 > (a stale root artifact / concurrent job could shadow bare-name reads),
 > `extract_code` is file-type aware (a README.md wrapped in a ```python

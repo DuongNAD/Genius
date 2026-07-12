@@ -785,6 +785,22 @@ def _load_journaled_job(job_id: str):
             "finished are still in the workspace — re-submit orchestrate "
             "to build again."
         )
+        # Read-repair the journal too: a manifest stuck on "running" (or the
+        # pre-invariant bug: "running" WITH a finished_at) would stay
+        # self-inconsistent on disk forever. Persist the normalized terminal
+        # state so later reads — and humans inspecting job.json — see the
+        # truth. Best-effort: a failed write never breaks the status poll.
+        try:
+            manifest["status"] = "interrupted"
+            manifest["error"] = view["error"]
+            if manifest.get("finished_at") is None:
+                manifest["finished_at"] = time.time()
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(manifest, f)
+            os.replace(tmp, path)
+        except OSError:
+            pass
     started = manifest.get("started_at")
     finished = manifest.get("finished_at")
     if started is not None and finished is not None:

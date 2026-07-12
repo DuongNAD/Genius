@@ -665,6 +665,40 @@ async def test_cancelled_job_journals_terminal_state(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_interrupted_manifest_is_read_repaired_on_disk(tmp_path, monkeypatch):
+    """A journal stuck on "running" (incl. the pre-invariant bug: running
+    WITH finished_at) is normalized to a terminal state ON DISK the first
+    time it is recovered, not just in the returned view."""
+    jid = "e" * 32
+    ws = tmp_path / "jobs" / jid  # the autouse GENIUS_JOBS_DIR
+    ws.mkdir(parents=True)
+    manifest = {
+        "job_id": jid,
+        "status": "running",
+        "pipeline": "custom",
+        "prompt": "p",
+        "error": None,
+        "workspace": str(ws),
+        "started_at": 1000.0,
+        "finished_at": 2000.0,  # impossible with status=running
+    }
+    (ws / "job.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    view = mcp_server._load_journaled_job(jid)
+    assert view["status"] == "interrupted"
+
+    on_disk = json.loads((ws / "job.json").read_text(encoding="utf-8"))
+    assert on_disk["status"] == "interrupted"
+    assert on_disk["finished_at"] is not None
+    assert "restarted" in on_disk["error"]
+
+    # A second recovery sees the already-consistent manifest.
+    again = mcp_server._load_journaled_job(jid)
+    assert again["status"] == "interrupted"
+    assert again["recovered_from_journal"] is True
+
+
+@pytest.mark.asyncio
 async def test_orchestrate_reject_fails_job(tmp_path):
     async def fake_pipeline(prompt, workspace=None, stage_gate=None, flow="sequential"):
         await stage_gate("research")
