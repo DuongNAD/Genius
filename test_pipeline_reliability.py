@@ -101,6 +101,69 @@ async def test_root_conftest_skips_testgen_and_pytest_run(
     assert os.path.exists(os.path.join(proj, "conftest.py"))
 
 
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_tester_retry_sees_previous_test_failures(
+    mock_exec, mock_call_api, tmp_path, monkeypatch
+):
+    """When verification fails, the NEXT tester prompt must carry the failing
+    pytest log: the coder alone cannot fix a WRONG generated test (a real run
+    failed 3/3 attempts on an over-mocked test asserting per-chunk I/O
+    internals against correct code)."""
+    monkeypatch.chdir(tmp_path)
+    prompts = []
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        prompts.append(prompt)
+        if prompt.startswith("/code"):
+            return "```python\ndef f():\n    return 1\n```"
+        if prompt.startswith("/unit-test"):
+            return "```python\ndef test_f():\n    assert True\n```"
+        return '```json\n{"blocking": false}\n```'  # security audit
+
+    mock_call_api.side_effect = impl
+
+    rcs = iter([1, 0])  # first pytest run fails, second passes
+
+    async def exec_side_effect(*args, **kwargs):
+        proc = MagicMock()
+        proc.returncode = next(rcs)
+
+        async def comm():
+            return (b"FAILED tests/test_foo.py::test_chunk - assert 'abc 1'", b"")
+
+        proc.communicate = comm
+        return proc
+
+    mock_exec.side_effect = exec_side_effect
+
+    proj = str(tmp_path)
+    os.makedirs(os.path.join(proj, "logs"), exist_ok=True)
+    os.makedirs(os.path.join(proj, "tests"), exist_ok=True)  # run_pipeline's job
+    mb = MessageBus(db_path=os.path.join(proj, "logs", "mb.db"))
+    await orchestrator.process_single_file(
+        file_info={"path": "foo.py", "specification": "make foo"},
+        project_dir=proj,
+        config=load_config(),
+        codex_url="http://codex",
+        tester_url="http://tester",
+        security_url="http://security",
+        api_key="key",
+        client=MagicMock(),
+        poll_timeout=60.0,
+        max_retries=2,
+        semaphore=asyncio.Semaphore(1),
+        message_bus=mb,
+        parent_art_id=None,
+    )
+    testgen = [p for p in prompts if p.startswith("/unit-test")]
+    assert len(testgen) == 2
+    assert "Previous failures" not in testgen[0]
+    assert "Previous failures" in testgen[1]
+    assert "abc 1" in testgen[1]  # the actual failing log reached the tester
+
+
 # --- save_raw_response --------------------------------------------------------
 
 

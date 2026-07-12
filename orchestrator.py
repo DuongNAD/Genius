@@ -1554,6 +1554,25 @@ async def process_single_file(
                     f"Import the code under test as the module `{module_path}` (e.g. `from {module_path} import ...`).\n\n"
                     f"Code:\n\n{code_to_write}"
                 )
+                # Feed the previous attempt's pytest failures to the TESTER
+                # too (the e2e loop already does): the coder gets this
+                # feedback but cannot fix a WRONG generated test. A real run
+                # failed 3/3 attempts because the tester kept regenerating an
+                # over-mocked test asserting per-chunk I/O internals against
+                # correct code — without seeing its own failure it repeats
+                # the same systematic mistake every attempt.
+                if attempt > 1 and test_failures_logs:
+                    tester_req_prompt += (
+                        "\n\nA previously generated test suite for this file "
+                        "FAILED verification with the log below. If a failure "
+                        "shows the TEST itself was wrong (over-mocking, "
+                        "asserting internal call patterns or per-chunk I/O, "
+                        "wrong expected values), write corrected tests that "
+                        "verify the documented PUBLIC behavior (return "
+                        "values, stdout/stderr, exit codes) instead of "
+                        "repeating it.\nPrevious failures:\n"
+                        f"{truncate_log(test_failures_logs)}"
+                    )
                 security_req_prompt = f"/audit Audit the following code for security vulnerabilities in file '{file_path}':\n\n{code_to_write}"
 
                 # Reuse this attempt's pre-Codex scan instead of a second
