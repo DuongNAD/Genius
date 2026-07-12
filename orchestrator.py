@@ -1595,10 +1595,17 @@ async def process_single_file(
 
             # 6. Run pytest projects/[project_name]/tests/test_[file_name].py
             # (nothing to execute for non-Python files — their verification is
-            # the security audit alone).
-            if not file_is_python:
+            # the security audit alone — nor for pytest infrastructure outside
+            # tests/ (root conftest.py, package __init__.py): no test module
+            # was generated for them, so running pytest on that never-written
+            # path would exit 4 and doom the self-heal loop).
+            if not file_is_python or (not file_is_test and is_pytest_infra(file_path)):
                 pytest_exit_code = 0
-                test_failures_logs = "(pytest skipped: not a Python file)"
+                test_failures_logs = (
+                    "(pytest skipped: not a Python file)"
+                    if not file_is_python
+                    else "(pytest skipped: pytest infrastructure file)"
+                )
             else:
                 pytest_cmd = [sys.executable, "-m", "pytest", test_file_path]
                 logger.info(f"Running pytest command: {' '.join(pytest_cmd)}")
@@ -3030,6 +3037,8 @@ async def run_e2e_pipeline(
                     project_dir, "tests", f"test_{flat_name}.py"
                 )
 
+                file_is_python = target_file_path.endswith(".py")
+
                 # --- Codex Implementation & Self-healing loop ---
                 codex_success = False
                 codex_error_log = ""
@@ -3117,7 +3126,6 @@ async def run_e2e_pipeline(
                     # target (README.md, Dockerfile, JSON, ...) linted as Python
                     # yields a spurious E999 SyntaxError that fails every attempt
                     # and dooms the whole e2e run; its content is written as-is.
-                    file_is_python = target_file_path.endswith(".py")
                     if file_is_python:
                         flake8_cmd = [sys.executable, "-m", "flake8", target_file_path]
                         flake8_code, flake8_out = await run_subprocess(
@@ -3171,6 +3179,26 @@ async def run_e2e_pipeline(
                     )
 
                 # --- Tester Unit Test Generation & Self-healing loop ---
+                # Same guards as the sequential pipeline: no generated tests
+                # for non-Python files (a pytest module "importing" README.md
+                # can never pass, so its 3 doomed self-heal attempts fail the
+                # whole run), for files that ARE pytest modules (no
+                # tests-for-tests), or for pytest infrastructure
+                # (conftest.py/__init__.py). Their implementation was already
+                # verified above (flake8 + AST hygiene for Python targets).
+                if (
+                    not file_is_python
+                    or is_test_module(file_path)
+                    or is_pytest_infra(file_path)
+                ):
+                    logger.info(
+                        f"{file_path}: skipping E2E test generation (non-Python "
+                        "file, pytest module, or pytest infrastructure)."
+                    )
+                    status_dict[file_path] = "completed"
+                    update_progress_md(status_dict)
+                    return
+
                 tester_success = False
                 tester_error_log = ""
 

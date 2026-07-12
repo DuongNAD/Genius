@@ -1,4 +1,4 @@
-﻿"""Tests for provider fallback chains (ag_core/provider_factory.py):
+"""Tests for provider fallback chains (ag_core/provider_factory.py):
 chain resolution env knobs, the lazy sticky FallbackProvider, the rewired
 construction sites (MCP path), and the doctor's chain report."""
 
@@ -26,6 +26,7 @@ _ENV_VARS = [f"GENIUS_PROVIDER_{r.upper()}" for r in DEFAULT_CHAINS] + [
     "GENIUS_PROVIDER_FALLBACK",
     # Legacy spelling for the researcher role (old role id "grok").
     "GENIUS_PROVIDER_GROK",
+    "GENIUS_AGY_PATH",
 ]
 
 

@@ -102,3 +102,83 @@ async def test_e2e_pytest_is_scoped_per_file(mock_sub, mock_get, mock_post, tmp_
     bases = {os.path.basename(t) for t in pytest_targets}
     assert "test_src_alpha.py" in bases
     assert "test_src_beta.py" in bases
+
+
+@pytest.mark.asyncio
+@patch("httpx.AsyncClient.post", new_callable=MagicMock)
+@patch("httpx.AsyncClient.get", new_callable=MagicMock)
+@patch("orchestrator.run_subprocess", new_callable=MagicMock)
+async def test_e2e_skips_testgen_for_nonpython_infra_and_test_modules(
+    mock_sub, mock_get, mock_post, tmp_path
+):
+    """The E2E Tester loop must generate tests ONLY for regular Python
+    sources: never for non-Python files (a pytest module "importing" README.md
+    can never pass and dooms the run), pytest modules (no tests-for-tests), or
+    pytest infrastructure (conftest.py/__init__.py)."""
+    prompts = []
+
+    async def post_side_effect(url, **kwargs):
+        payload = json.loads(kwargs.get("content", b"{}").decode("utf-8"))
+        prompt = payload.get("prompt", "")
+        prompts.append(prompt)
+        if "plan" in prompt:
+            tid = "claude-plan"
+        elif "unit-test" in prompt:
+            tid = "tester-test"
+        else:
+            tid = "codex-code"
+        return _resp({"status": "processing", "task_id": tid})
+
+    mock_post.side_effect = post_side_effect
+
+    plan = {
+        "files": [
+            {"path": "README.md", "specification": "project readme"},
+            {"path": "conftest.py", "specification": "shared fixtures"},
+            {"path": "tests/test_gamma.py", "specification": "gamma checks"},
+            {"path": "src/gamma.py", "specification": "gamma module"},
+        ]
+    }
+
+    async def get_side_effect(url, **kwargs):
+        u = str(url)
+        if "claude-plan" in u:
+            content = "```json\n" + json.dumps(plan) + "\n```"
+        elif "codex-code" in u:
+            content = "```python\ndef f():\n    return 1\n```"
+        else:  # tester-test
+            content = "```python\ndef test_f():\n    assert True\n```"
+        return _resp({"status": "completed", "result": content})
+
+    mock_get.side_effect = get_side_effect
+
+    async def sub_ok(cmd, env=None):
+        return (0, "ok")
+
+    mock_sub.side_effect = sub_ok
+
+    result = await run_e2e_pipeline(
+        prompt="build mixed files",
+        workspace=str(tmp_path),
+        max_debate_rounds=0,
+        max_retries=2,
+    )
+    assert result == "E2E Pipeline execution completed successfully."
+
+    # Exactly one Tester call, and it targets the regular Python source.
+    testgen = [p for p in prompts if p.startswith("/unit-test")]
+    assert len(testgen) == 1, testgen
+    assert "src/gamma.py" in testgen[0]
+
+    # Only gamma's generated test module exists on disk.
+    tests_dir = os.path.join(
+        str(tmp_path), "projects", "build_mixed_files", "tests"
+    )
+    generated = {
+        name
+        for name in os.listdir(tests_dir)
+        # The plan's own tests/test_gamma.py lives here too; generated
+        # modules are the flattened test_<path>.py names.
+        if name.startswith("test_") and name != "test_gamma.py"
+    }
+    assert generated == {"test_src_gamma.py"}

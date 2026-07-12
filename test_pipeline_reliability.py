@@ -2,11 +2,12 @@
 (production-only self-heal), the tests-for-tests skip, and raw response
 capture."""
 
+import asyncio
 import json
 import os
 
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 
 import orchestrator
 from orchestrator import (
@@ -15,6 +16,8 @@ from orchestrator import (
     save_raw_response,
     PipelineError,
 )
+from ag_core.config import load_config
+from ag_core.utils.message_bus import MessageBus
 
 
 # --- is_test_module ----------------------------------------------------------
@@ -48,6 +51,54 @@ def test_is_pytest_infra_ignores_regular_sources():
     assert not is_pytest_infra("src/main.py")
     assert not is_pytest_infra("palindrome.py")
     assert not is_pytest_infra("test_conftest.py")  # a real test module, not infra
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_root_conftest_skips_testgen_and_pytest_run(
+    mock_exec, mock_call_api, tmp_path, monkeypatch
+):
+    """A root conftest.py (pytest infra outside tests/) gets NO generated test
+    module AND NO pytest execution: running pytest on the never-written
+    tests/test_conftest.py exits 4 and dooms the self-heal loop. Verification
+    is the security audit alone (like non-Python files)."""
+    monkeypatch.chdir(tmp_path)
+    prompts = []
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        prompts.append(prompt)
+        if prompt.startswith("/code"):
+            return "```python\nimport pytest  # noqa: F401\n```"
+        return '```json\n{"blocking": false}\n```'  # security audit
+
+    mock_call_api.side_effect = impl
+
+    proj = str(tmp_path)
+    os.makedirs(os.path.join(proj, "logs"), exist_ok=True)
+    mb = MessageBus(db_path=os.path.join(proj, "logs", "mb.db"))
+    await orchestrator.process_single_file(
+        file_info={"path": "conftest.py", "specification": "shared fixtures"},
+        project_dir=proj,
+        config=load_config(),
+        codex_url="http://codex",
+        tester_url="http://tester",
+        security_url="http://security",
+        api_key="key",
+        client=MagicMock(),
+        poll_timeout=60.0,
+        max_retries=1,
+        semaphore=asyncio.Semaphore(1),
+        message_bus=mb,
+        parent_art_id=None,
+    )
+    # The audit ran; the tester never did; no pytest subprocess was spawned on
+    # the never-written test module; the file itself was written.
+    assert any(p.startswith("/audit") for p in prompts)
+    assert not any(p.startswith("/unit-test") for p in prompts)
+    mock_exec.assert_not_called()
+    assert not os.path.exists(os.path.join(proj, "tests", "test_conftest.py"))
+    assert os.path.exists(os.path.join(proj, "conftest.py"))
 
 
 # --- save_raw_response --------------------------------------------------------
