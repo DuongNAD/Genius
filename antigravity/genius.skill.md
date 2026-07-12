@@ -5,11 +5,18 @@ description: Build or refactor a request end-to-end with the Genius multi-agent 
 
 # /genius — drive the Genius multi-agent pipeline
 
-Treat everything after `/genius` as the build request. Orchestrate it through the
-**Genius** MCP server's **custom** pipeline and report back — do NOT implement the
-work yourself; Genius builds it, your job is to drive it and summarize.
+Treat everything after `/genius` as the request. FIRST pick the mode from the
+user's message, then follow that mode's steps. Do NOT implement build work
+yourself; Genius builds it, your job is to drive it and summarize.
 
-Steps:
+**MODE SELECTION:**
+- **BUILD** — the message describes something NEW to create → steps 1–6.
+- **DEBUG** — the message reports that something ALREADY BUILT is wrong (a
+  pasted error/traceback/wrong output, "chưa đúng ý", "sai rồi", "sửa lại",
+  an existing file/job named, a single behavior to tweak) → do NOT
+  re-orchestrate; use the DEBUG LOOP at the bottom.
+
+BUILD steps:
 
 1. REWRITE the user's request (any language) into the Genius **golden prompt**
    (English) before submitting — unless it already follows this shape:
@@ -69,5 +76,33 @@ Steps:
    `workspace`. Tell the user and re-submit `genius_orchestrate` if they want
    the build finished.
 
-If the tools are unavailable, tell the user to enable the `genius` MCP server
-(**… → Manage MCP Servers**) and retry.
+DEBUG LOOP (user hand-tested and something is wrong):
+
+1. LOCATE the file(s) — the last job's `workspace` (from
+   `genius_orchestrate_status`) or the path the user names — and READ the
+   current content yourself.
+2. DIAGNOSE only if the cause is unclear: `gdbg_review` (preferred — the
+   debug server runs codex) or `genius_review`, with the file content plus
+   the user's evidence.
+3. FIX with `gdbg_code` (or `genius_code`) using the FIX prompt:
+
+   ```
+   Fix the file '<path>' so that <desired behavior, from the user's words>,
+   WITHOUT changing its public API or unrelated behavior.
+   OBSERVED: <error/traceback/wrong output, verbatim>.
+   EXPECTED: <exact behavior, with one input -> output example>.
+   EVIDENCE: <the failing command or test and its output>.
+   Return the COMPLETE corrected file content.
+
+   <full current file content>
+   ```
+
+4. APPLY the returned file to the workspace, re-run the user's failing
+   command/tests if runnable, and report the diff + result. Lock the fix with
+   a regression test via `gdbg_unit_test` when the user wants one.
+5. ESCALATE to BUILD mode (fresh orchestrate: golden prompt + a CONTEXT
+   section describing what already exists) ONLY when the fix means redesign
+   across multiple files or a changed public contract.
+
+If the tools are unavailable, tell the user to enable the `genius` /
+`genius-debug` MCP servers (**… → Manage MCP Servers**) and retry.

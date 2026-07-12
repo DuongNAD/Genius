@@ -13,6 +13,13 @@ gần như không thể hiểu sai.
 > ngôn-ngữ-tự-nhiên (tiếng Việt cũng được) vào đúng mẫu này trước khi gọi
 > Genius — cứ gõ `/genius <mô tả tự nhiên>`. Tự điền chỉ khi muốn kiểm soát
 > từng chữ.
+>
+> **Workflow có 2 mode và tự chọn theo tin nhắn của bạn:**
+> - **BUILD** — bạn mô tả dự án/tính năng mới → mẫu vàng dưới đây → pipeline
+>   build hoàn thiện.
+> - **DEBUG** — bạn tự test thấy sai, dán lỗi, hay nói "chưa đúng ý" → KHÔNG
+>   chạy lại pipeline; vòng sửa nhanh bằng `gdbg_review`/`gdbg_code` với
+>   **mẫu FIX** (xem "Cấp 5 — MODE DEBUG" bên dưới).
 
 **Dạng compact — tiện ích nhỏ (≤3 file, plan nhanh, giữ DƯỚI 600 ký tự):**
 
@@ -218,23 +225,36 @@ lệch, pipeline sẽ dừng để bạn chỉnh prompt.
 
 ---
 
-## Cấp 5 — Sửa/refactor code CÓ SẴN
+## Cấp 5 — MODE DEBUG: bạn tự test thấy sai / chưa đúng ý
 
-Pipeline build dự án mới trong jobs dir — nó không sửa in-place repo của bạn.
-Hai đường:
+Đây là mode thứ hai của `/genius` (workflow tự nhận diện khi bạn dán lỗi,
+nói "chưa đúng ý/sai rồi/sửa lại", hay nêu tên file/job đã build). KHÔNG chạy
+lại cả pipeline — vòng sửa nhanh bằng tool đơn, ưu tiên server debug
+(`gdbg_*`, backend codex gpt-5.6-sol):
 
-- Sửa nhỏ/cục bộ: dùng `genius_review` (dán code, nhận findings) rồi
-  `genius_code` với prompt kiểu:
+1. Đọc file hiện tại từ `workspace` của job (hoặc path bạn nêu).
+2. Chưa rõ nguyên nhân → `gdbg_review` (dán file + bằng chứng lỗi).
+3. Sửa bằng `gdbg_code` với **mẫu FIX** (mẫu vàng của mode debug):
 
-  ```
-  Refactor the following file to <goal> while preserving its public API and
-  behavior. Return the COMPLETE new file content.
-  <paste the file>
-  ```
+   ```
+   Fix the file '<path>' so that <desired behavior>, WITHOUT changing its
+   public API or unrelated behavior.
+   OBSERVED: <lỗi/traceback/output sai, nguyên văn>.
+   EXPECTED: <hành vi đúng, kèm 1 ví dụ input -> output>.
+   EVIDENCE: <lệnh hoặc test đã fail + output của nó>.
+   Return the COMPLETE corrected file content.
 
-- Viết lại một thành phần: chạy `/genius` cấp 2–3, trong prompt dán phần
-  interface hiện tại vào mục CONTEXT + ghi "must stay drop-in compatible with
-  the pasted interface", rồi tự copy kết quả từ workspace về repo.
+   <dán toàn bộ nội dung file hiện tại>
+   ```
+
+4. Áp file trả về, chạy lại đúng lệnh/test đã fail, báo diff + kết quả. Muốn
+   khóa hồi quy: `gdbg_unit_test` sinh test cho hành vi vừa sửa.
+5. Chỉ **leo thang về mode BUILD** (orchestrate mới, golden prompt + mục
+   CONTEXT mô tả những gì đã có, "must stay drop-in compatible") khi cái sai
+   đòi thiết kế lại nhiều file hoặc đổi public contract.
+
+Mẹo viết OBSERVED/EXPECTED: dán nguyên văn, đừng diễn giải — codex sửa trúng
+nhất khi thấy đúng bằng chứng bạn thấy.
 
 ---
 
@@ -272,4 +292,4 @@ prompt, để vắt kiệt chất lượng:
 | Tiện ích 1–3 file có test + audit + review | 2 | `/genius` | — |
 | App nhiều module, config, edge cases | 3 | `/genius` | `@deep`, cân nhắc approval |
 | Dự án lớn, nhiều milestone | 4 | `/genius` × N lần | `@deep` + `require_approval: true` |
-| Sửa code có sẵn | 5 | `genius_review` + `genius_code` | — |
+| DEBUG: tự test thấy sai / chưa đúng ý | 5 | `gdbg_review` + `gdbg_code` (+`gdbg_unit_test`) | mẫu FIX, không re-orchestrate |
