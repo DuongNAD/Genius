@@ -186,6 +186,159 @@ def test_architect_contract_has_design_quality_gates():
         assert marker in ARCHITECT_SYSTEM_PROMPT, marker
 
 
+def test_architect_examples_cover_both_task_classes():
+    """A single application-shaped example anchors the model (a real run
+    planned src/ + conftest.py for a one-function utility). The prompt now
+    shows a tiny-utility root layout AND an application layout, telling the
+    model to classify the task first."""
+    from ag_core.agents.claude_architect import ARCHITECT_SYSTEM_PROMPT
+
+    assert "Task class A" in ARCHITECT_SYSTEM_PROMPT
+    assert '"palindrome.py"' in ARCHITECT_SYSTEM_PROMPT  # root layout example
+    assert "Task class B" in ARCHITECT_SYSTEM_PROMPT
+    assert '"src/main.py"' in ARCHITECT_SYSTEM_PROMPT  # app layout example
+
+
+def test_researcher_brief_must_be_self_contained():
+    """The research brief is the architect's ground truth: it must restate the
+    verbatim request and inline referenced content, never point elsewhere (a
+    real run's research.md was just a pointer to an external artifact, so
+    requirements could not be traced)."""
+    from ag_core.utils.prompt_templates import RESEARCHER_PROMPT
+
+    assert "SELF-CONTAINED" in RESEARCHER_PROMPT
+    assert "Original Request" in RESEARCHER_PROMPT
+
+
+# --- deterministic design lint -------------------------------------------------
+
+
+def test_lint_design_plan_flags_blocking_defects():
+    files = [
+        {"path": "a.py", "specification": "ok"},
+        {"path": "a.py", "specification": "dup"},
+        {"path": "/abs/b.py", "specification": "abs"},
+        {"path": "../escape.py", "specification": "esc"},
+        {"path": "c.py", "specification": "   "},
+        {"path": "", "specification": "no path"},
+    ]
+    blocking, warnings = orchestrator.lint_design_plan(files, "")
+    text = "; ".join(blocking)
+    assert "duplicate file path" in text
+    assert "absolute path" in text
+    assert "escapes the project root" in text
+    assert "empty specification" in text
+    assert "empty path" in text
+    assert warnings == []
+
+
+def test_lint_design_plan_clean_plan_and_clarification_warning():
+    files = [{"path": "x.py", "specification": "do x"}]
+    blocking, warnings = orchestrator.lint_design_plan(
+        files, "design text [NEEDS CLARIFICATION: which timezone?]"
+    )
+    assert blocking == []
+    assert len(warnings) == 1 and "NEEDS CLARIFICATION" in warnings[0]
+
+
+def test_lint_design_plan_windows_paths():
+    blocking, _ = orchestrator.lint_design_plan(
+        [
+            {"path": "C:\\evil.py", "specification": "x"},
+            {"path": "src\\ok.py", "specification": "x"},
+        ],
+        "",
+    )
+    assert any("absolute path" in b for b in blocking)
+    assert not any("ok.py" in b for b in blocking)
+
+
+_DUP_DESIGN = (
+    "```json\n"
+    + json.dumps(
+        {
+            "project_name": "demo",
+            "description": "d",
+            "files": [
+                {"path": "src/thing.py", "specification": "make thing"},
+                {"path": "src/thing.py", "specification": "make it again"},
+            ],
+        }
+    )
+    + "\n```"
+)
+
+
+@pytest.mark.asyncio
+async def test_design_lint_retry_fixes_duplicate_paths(tmp_path, monkeypatch):
+    """A parseable-but-defective plan (duplicate paths would double-implement
+    the same file concurrently) gets ONE corrective re-prompt carrying the
+    lint findings, then the fixed plan is built."""
+    monkeypatch.setattr(orchestrator, "design_selfheal_enabled", lambda: True)
+
+    calls = []
+
+    async def fake_call_api(url, api_key, prompt, **kwargs):
+        calls.append(prompt)
+        n = len(calls)
+        if n == 1:
+            return "research brief"
+        if n == 2:
+            return _DUP_DESIGN  # parseable, but lint-blocking
+        if n == 3:
+            return _GOOD_DESIGN  # the lint retry fixes it
+        if "unit-test" in prompt:
+            return _PASSING_TEST_MODULE
+        if "/audit" in prompt:
+            return _CLEAN_AUDIT
+        if n == 4:
+            return "```python\ndef ok():\n    return 1\n```"  # codex
+        return "deploy plan"  # devops
+
+    with patch("orchestrator.call_api", new=AsyncMock(side_effect=fake_call_api)):
+        await orchestrator.run_pipeline(
+            prompt="build demo",
+            workspace=str(tmp_path),
+            max_debate_rounds=0,
+            max_retries=1,
+        )
+
+    # The 3rd call is the lint retry, carrying the concrete findings.
+    assert "deterministic checks" in calls[2]
+    assert "duplicate file path" in calls[2]
+    project_dirs = list((tmp_path / "projects").iterdir())
+    assert (project_dirs[0] / "src" / "thing.py").is_file()
+    raw_names = os.listdir(project_dirs[0] / "logs" / "raw")
+    assert any(n.startswith("design_lint_retry1") for n in raw_names)
+
+
+@pytest.mark.asyncio
+async def test_design_lint_exhaustion_raises(tmp_path, monkeypatch):
+    """If the corrective retry still fails lint, the run aborts BEFORE any
+    coder tokens are spent."""
+    monkeypatch.setattr(orchestrator, "design_selfheal_enabled", lambda: True)
+
+    calls = []
+
+    async def fake_call_api(url, api_key, prompt, **kwargs):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return "research brief"
+        return _DUP_DESIGN  # the design AND the lint retry stay defective
+
+    with patch("orchestrator.call_api", new=AsyncMock(side_effect=fake_call_api)):
+        with pytest.raises(PipelineError, match="deterministic lint"):
+            await orchestrator.run_pipeline(
+                prompt="build demo",
+                workspace=str(tmp_path),
+                max_debate_rounds=0,
+                max_retries=1,
+            )
+    # research + design + one lint retry — never a /code call.
+    assert len(calls) == 3
+    assert not any(c.startswith("/code") for c in calls)
+
+
 # --- save_raw_response --------------------------------------------------------
 
 

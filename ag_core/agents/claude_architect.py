@@ -18,10 +18,29 @@ def _architect_system_prompt() -> str:
     else:
         schema_dict = DesignPlan.schema()
     schema_json = json.dumps(schema_dict, indent=2)
+    # Two task-class examples, not one: a single application-shaped example
+    # anchors the model — a real run planned src/ + conftest.py for a
+    # one-function utility because the only example it ever saw was an app.
     return (
         ARCHITECT_PROMPT
         + f"\n\nThe single ```json block must conform to this DesignPlan JSON schema:\n{schema_json}"
-        "\n\nExample of a valid response (structure only — adapt to the actual request):\n"
+        "\n\nTwo examples of valid responses (structure only — first CLASSIFY "
+        "the task's real scale, then pick the matching shape; never default a "
+        "small task to the application layout):\n"
+        "\nTask class A — tiny utility (one function / one small module): "
+        "files live at the project ROOT; no src/, no conftest.py, no packaging:\n"
+        "```json\n"
+        "{\n"
+        '  "project_name": "palindrome",\n'
+        '  "description": "GOAL: ... CONSTRAINTS: stdlib only; ASCII-only semantics. TEST STRATEGY: ... DONE-WHEN: ... Assumptions: ...",\n'
+        '  "files": [\n'
+        '    {"path": "palindrome.py", "specification": "PURPOSE: ... SIGNATURES: is_palindrome(text: str) -> bool. ERROR/EDGE CASES: ... HOW TO IMPLEMENT: ... HOW TO TEST: ..."},\n'
+        '    {"path": "test_palindrome.py", "specification": "pytest module locking the documented contract: happy paths, edge cases, and the error contract."}\n'
+        "  ]\n"
+        "}\n"
+        "```\n"
+        "\nTask class B — application/service (only when the scope genuinely "
+        "needs a package layout):\n"
         "```json\n"
         "{\n"
         '  "project_name": "todo_api",\n'
