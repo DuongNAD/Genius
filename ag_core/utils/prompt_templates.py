@@ -104,7 +104,9 @@ TESTER_PROMPT = _role(
     "implementation appears wrong, write a test that documents the correct expected behavior. "
     "Every test MUST terminate on its own: never create or read FIFOs/named pipes, never block on stdin "
     "or network waits, and pass an explicit timeout= to every subprocess call — a generated test that "
-    "hangs is killed after a long timeout and burns a whole verification attempt.",
+    "hangs is killed after a long timeout and burns a whole verification attempt. "
+    "Use the pytest API correctly: capsys.readouterr() returns .out/.err (NOT .stdout/.stderr) — a real "
+    "run failed 7 tests on that one mistake.",
 )
 
 SECURITY_PROMPT = _role(
