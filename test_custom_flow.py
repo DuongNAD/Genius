@@ -648,6 +648,53 @@ async def test_designed_test_modules_run_after_implementation_wave(
 @pytest.mark.asyncio
 @patch("orchestrator.call_api", new_callable=MagicMock)
 @patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
+async def test_designed_test_wave_skipped_when_impl_wave_failed(
+    mock_exec, mock_call_api, temp_workspace
+):
+    """Strict mode: once an implementation file fails all retries the job is
+    doomed, so the designed-test wave is skipped instead of burning its
+    retry budget (worst case 3 x 300s timeouts) against known-broken code."""
+    design = (
+        '{"project_name":"p","description":"d","files":['
+        '{"path":"foo.py","specification":"make foo"},'
+        '{"path":"test_foo.py","specification":"tests for foo"}]}'
+    )
+    code_order = []
+
+    async def impl(url, api_key, prompt, context=None, client=None, poll_timeout=60.0):
+        if prompt.startswith("/code"):
+            name = prompt.split("'")[1]
+            code_order.append(name)
+            # foo.py is UNFIXABLE garbage -> fails invalid_python_feedback
+            # on every attempt; the designed test must never be implemented.
+            return "```python\ndef broken(((\n```"
+        if "You are CriticReviewer" in prompt:
+            return "Looks good [APPROVED]"
+        if url == URLS["tester_url"]:
+            return "```python\ndef test_gen():\n    assert True\n```"
+        if url == URLS["security_url"]:
+            return '```json\n{"blocking": false}\n```'
+        return f"```json\n{design}\n```"
+
+    mock_call_api.side_effect = impl
+    mock_exec.side_effect = _mock_exec
+    from orchestrator import PipelineError as PE
+
+    with pytest.raises(PE, match="Self-healing loop failed"):
+        await run_pipeline(
+            prompt="Build a calculator app",
+            workspace=str(temp_workspace),
+            flow="custom",
+            max_retries=2,
+            **URLS,
+        )
+    assert "foo.py" in code_order
+    assert "test_foo.py" not in code_order  # designed-test wave skipped
+
+
+@pytest.mark.asyncio
+@patch("orchestrator.call_api", new_callable=MagicMock)
+@patch("asyncio.create_subprocess_exec", new_callable=MagicMock)
 async def test_generated_test_module_dodges_designed_basename_collision(
     mock_exec, mock_call_api, temp_workspace
 ):

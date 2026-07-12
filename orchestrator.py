@@ -2674,9 +2674,35 @@ async def run_pipeline(
             results = list(
                 await asyncio.gather(*[handle_file(f) for f in impl_wave])
             )
-            results.extend(
-                await asyncio.gather(*[handle_file(f) for f in test_wave])
-            )
+            impl_wave_failed = [fp for fp, _, err in results if err is not None]
+            if test_wave and impl_wave_failed and not degraded_mode():
+                # The job is already doomed (strict mode fails on any file):
+                # designed tests exercise those very implementations, so
+                # running them would only burn their whole retry budget —
+                # worst case 3 x 300s timeouts each — against known-broken
+                # code. A live run spent 15 extra minutes exactly this way.
+                logger.warning(
+                    "Skipping the designed-test wave (%s): the implementation "
+                    "wave already failed for %s.",
+                    ", ".join(str(f.get("path")) for f in test_wave),
+                    ", ".join(impl_wave_failed),
+                )
+                for f in test_wave:
+                    status_dict[f["path"]] = "failed"
+                    results.append(
+                        (
+                            f["path"],
+                            None,
+                            PipelineError(
+                                "skipped: implementation wave failed"
+                            ),
+                        )
+                    )
+                update_progress_md(status_dict)
+            else:
+                results.extend(
+                    await asyncio.gather(*[handle_file(f) for f in test_wave])
+                )
 
             for file_path, result, err in results:
                 if err is not None:
