@@ -131,11 +131,11 @@ TOOLS = [
                 "require_approval": {
                     "type": "boolean",
                     "description": (
-                        "Pause after each stage (research, design, code; plus "
-                        "review + devops on the custom flow) as "
-                        "'awaiting_approval' until orchestrate_approve / "
-                        "orchestrate_reject is called (sequential and custom "
-                        "pipelines; not e2e)"
+                        "Pause after each stage as 'awaiting_approval' until "
+                        "orchestrate_approve / orchestrate_reject is called. "
+                        "Gate order — sequential: research, design, code; "
+                        "custom: research, design, code, review, devops. "
+                        "Not supported for e2e."
                     ),
                 },
             },
@@ -188,7 +188,10 @@ TOOLS = [
             "(running|completed|failed|awaiting_approval|interrupted), the "
             "workspace directory the files land in, current_stage (what the "
             "pipeline is working on right now — the code stage is the long one), "
-            "per-stage progress, and, when completed, the generated artifacts. "
+            "per-stage progress, artifacts_ready (job-scoped "
+            "genius://artifacts/<job_id>/<name> resource URIs — read them "
+            "verbatim via resources/read), and, when completed, the generated "
+            "artifacts. "
             "Job state survives MCP server restarts: an id from a previous "
             "session is recovered from its on-disk journal (interrupted = the "
             "server restarted mid-run; finished stages' artifacts remain in the "

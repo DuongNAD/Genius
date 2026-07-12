@@ -247,6 +247,9 @@ from ag_core.mcp_resources import (  # noqa: F401
     _list_resources,
     _read_resource,
     _ARTIFACT_WORKSPACES,
+    job_artifact_uri,
+    register_job_workspace,
+    set_job_workspace_resolver,
 )
 # --- Full-pipeline orchestration (the "điều phối viên" entrypoint) ---------
 # The pipeline is long-running, so orchestrate launches it as a background job
@@ -298,6 +301,17 @@ _PIPELINE_STAGES = {
         ("deploy", "deploy.md"),
     ],
     "e2e": [("plan", "plan.md")],
+    # The custom flow adds a final-review checkpoint (appended into review.md
+    # after the code stage + security audit) — mirrors its extra "review"
+    # approval gate so awaiting_stage values always appear in `stages`.
+    "custom": [
+        ("research", "research.md"),
+        ("design", "design.md"),
+        ("code", "review.md"),
+        ("security_audit", "audit.md"),
+        ("review", "review.md"),
+        ("deploy", "deploy.md"),
+    ],
 }
 
 # Tolerance for coarse filesystem mtime granularity when comparing an
@@ -334,9 +348,21 @@ def _stage_progress(job: Dict[str, Any]):
             }
         )
         if done and fname in _RESOURCE_ARTIFACTS:
-            ready.append(RESOURCE_URI_PREFIX + fname)
-            # Advertising this URI commits us to serving it: remember which
-            # workspace holds the artifact so resources/read can find it.
+            # Advertise the JOB-SCOPED URI so resources/read resolves inside
+            # THIS job's workspace — a bare name is ambiguous (a stale root
+            # artifact or a concurrent job could shadow it). Advertising the
+            # URI commits us to serving it: register the workspace mapping.
+            job_id = str(job.get("job_id") or "")
+            if _JOB_ID_RE.fullmatch(job_id):
+                uri = job_artifact_uri(job_id, fname)
+                register_job_workspace(job_id, workspace)
+            else:
+                # Synthetic/legacy ids (tests, hand-built views) keep the
+                # bare-name form, served CWD-first as before.
+                uri = RESOURCE_URI_PREFIX + fname
+            if uri not in ready:
+                ready.append(uri)
+            # Keep the legacy bare-name fallback fresh for old clients.
             _ARTIFACT_WORKSPACES[fname] = workspace
     return stages, ready
 
@@ -759,6 +785,21 @@ def _load_journaled_job(job_id: str):
     return view
 
 
+def _job_workspace_from_journal(job_id: str):
+    """job_id -> workspace fallback for job-scoped resource URIs.
+
+    Lets a resources/read on genius://artifacts/<job_id>/<name> survive a
+    server restart without an orchestrate_status call first: the mapping is
+    rebuilt from the job's on-disk manifest (default jobs dir only, same
+    discoverability rule as _load_journaled_job).
+    """
+    view = _load_journaled_job(job_id)
+    return view.get("workspace") if view else None
+
+
+set_job_workspace_resolver(_job_workspace_from_journal)
+
+
 def _jobs_retention():
     """(max_jobs, max_age_days) for pruning old per-job workspaces.
 
@@ -920,9 +961,14 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         task.add_done_callback(_ORCHESTRATION_TASKS.discard)
         message = "Pipeline started. Poll orchestrate_status with this job_id."
         if require_approval:
+            gate_names = (
+                "research, design, code, review, devops"
+                if pipeline == "custom"
+                else "research, design, code"
+            )
             message = (
                 "Pipeline started WITH approval gates: after each stage "
-                "(research, design, code) the job pauses as "
+                f"({gate_names}) the job pauses as "
                 "'awaiting_approval' — review the artifacts from "
                 "orchestrate_status, then call orchestrate_approve (or "
                 "orchestrate_reject) with this job_id to continue."

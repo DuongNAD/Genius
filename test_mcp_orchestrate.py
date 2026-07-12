@@ -11,6 +11,7 @@ import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import mcp_server
+from ag_core import mcp_resources
 
 
 @pytest.fixture(autouse=True)
@@ -715,10 +716,13 @@ def _isolate_artifact_workspace_map():
     # fallback map (populated by orchestrate_status polls) so URIs advertised
     # for isolated job workspaces stay readable. Earlier orchestrate tests in
     # this file populate it as a side effect; the resource tests below assert
-    # cwd-scoped behavior, so keep the map empty around every test.
+    # cwd-scoped behavior, so keep the map empty around every test. The
+    # job-scoped registry gets the same isolation.
     mcp_server._ARTIFACT_WORKSPACES.clear()
+    mcp_resources._JOB_WORKSPACES.clear()
     yield
     mcp_server._ARTIFACT_WORKSPACES.clear()
+    mcp_resources._JOB_WORKSPACES.clear()
 
 
 async def _rpc(method, params=None, req_id=1):
@@ -802,6 +806,113 @@ async def test_resources_read_missing_artifact_is_not_found(tmp_path, monkeypatc
     assert "audit.md" in res["error"]["message"]
 
 
+# --- job-scoped resource URIs (genius://artifacts/<job_id>/<name>) ----------
+
+_JOB_A = "a" * 32
+_JOB_B = "b" * 32
+
+
+@pytest.mark.asyncio
+async def test_job_scoped_read_prefers_job_workspace_over_cwd(tmp_path, monkeypatch):
+    """Regression: a stale root-workspace design.md ('Second response') used
+    to shadow the job's own artifact behind the very URI orchestrate_status
+    had just advertised."""
+    cwd = tmp_path / "cwd"
+    ws = tmp_path / "job_ws"
+    cwd.mkdir()
+    ws.mkdir()
+    monkeypatch.chdir(cwd)
+    (cwd / "design.md").write_text("Second response", encoding="utf-8")
+    (ws / "design.md").write_text("# real job design", encoding="utf-8")
+    mcp_resources.register_job_workspace(_JOB_A, str(ws))
+
+    res = await _rpc(
+        "resources/read", {"uri": f"genius://artifacts/{_JOB_A}/design.md"}
+    )
+    assert res["result"]["contents"][0]["text"] == "# real job design"
+    # The legacy bare-name URI still serves the CWD copy (compat behavior).
+    res = await _rpc("resources/read", {"uri": "genius://artifacts/design.md"})
+    assert res["result"]["contents"][0]["text"] == "Second response"
+
+
+@pytest.mark.asyncio
+async def test_job_scoped_read_isolates_concurrent_jobs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for jid, text in ((_JOB_A, "job A research"), (_JOB_B, "job B research")):
+        ws = tmp_path / jid
+        ws.mkdir()
+        (ws / "research.md").write_text(text, encoding="utf-8")
+        mcp_resources.register_job_workspace(jid, str(ws))
+
+    a = await _rpc(
+        "resources/read", {"uri": f"genius://artifacts/{_JOB_A}/research.md"}
+    )
+    b = await _rpc(
+        "resources/read", {"uri": f"genius://artifacts/{_JOB_B}/research.md"}
+    )
+    assert a["result"]["contents"][0]["text"] == "job A research"
+    assert b["result"]["contents"][0]["text"] == "job B research"
+
+
+@pytest.mark.asyncio
+async def test_job_scoped_read_unknown_job_is_not_found(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    res = await _rpc(
+        "resources/read", {"uri": f"genius://artifacts/{'f' * 32}/design.md"}
+    )
+    assert res["error"]["code"] == -32002
+    assert "orchestrate_status" in res["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "uri",
+    [
+        f"genius://artifacts/{'A' * 32}/design.md",  # uppercase: not a job id
+        f"genius://artifacts/{'a' * 31}/design.md",  # wrong length
+        f"genius://artifacts/{'a' * 32}/secrets.txt",  # non-whitelisted name
+        f"genius://artifacts/{'a' * 32}/",  # empty name
+        f"genius://artifacts/{'a' * 32}/../design.md",  # traversal in name
+    ],
+)
+async def test_job_scoped_read_rejects_bad_job_uris(tmp_path, monkeypatch, uri):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "secrets.txt").write_text("s3cret", encoding="utf-8")
+    mcp_resources.register_job_workspace("a" * 32, str(tmp_path))
+    res = await _rpc("resources/read", {"uri": uri})
+    assert "result" not in res
+    assert res["error"]["code"] == -32002
+
+
+@pytest.mark.asyncio
+async def test_job_scoped_read_survives_registry_loss_via_journal(
+    tmp_path, monkeypatch
+):
+    """After a server restart the in-memory registry is empty; the journal
+    resolver rebuilds job_id -> workspace from <jobs dir>/<id>/job.json."""
+    monkeypatch.chdir(tmp_path)
+    jid = "c" * 32
+    ws = tmp_path / "jobs" / jid  # the autouse GENIUS_JOBS_DIR
+    ws.mkdir(parents=True)
+    (ws / "deploy.md").write_text("deployed", encoding="utf-8")
+    manifest = {
+        "job_id": jid,
+        "status": "completed",
+        "pipeline": "sequential",
+        "prompt": "p",
+        "error": None,
+        "workspace": str(ws),
+        "started_at": None,
+        "finished_at": None,
+    }
+    (ws / "job.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    res = await _rpc(
+        "resources/read", {"uri": f"genius://artifacts/{jid}/deploy.md"}
+    )
+    assert res["result"]["contents"][0]["text"] == "deployed"
+
+
 # --- orchestrate_status stage derivation ------------------------------------
 
 
@@ -875,6 +986,43 @@ async def test_orchestrate_status_e2e_tracks_plan_artifact(tmp_path):
     data = json.loads(out)
     assert data["stages"] == [{"stage": "plan", "artifact": "plan.md", "state": "done"}]
     assert data["artifacts_ready"] == ["genius://artifacts/plan.md"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_status_real_job_id_advertises_job_scoped_uris(tmp_path):
+    """A real (32-hex) job id gets job-scoped artifact URIs, and the
+    advertised URI is immediately readable from THAT job's workspace."""
+    jid = "d" * 32
+    _register_progress_job(jid, tmp_path)
+    (tmp_path / "research.md").write_text("R", encoding="utf-8")
+
+    out = await mcp_server.dispatch_tool("orchestrate_status", {"job_id": jid})
+    data = json.loads(out)
+    assert data["artifacts_ready"] == [f"genius://artifacts/{jid}/research.md"]
+
+    res = await _rpc("resources/read", {"uri": data["artifacts_ready"][0]})
+    assert res["result"]["contents"][0]["text"] == "R"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_status_custom_pipeline_lists_review_stage(tmp_path):
+    """The custom pipeline's stage list includes the final-review checkpoint,
+    so every awaiting_stage value maps to a listed stage; the shared review.md
+    artifact is advertised only once."""
+    _register_progress_job("j-custom", tmp_path, pipeline="custom")
+    (tmp_path / "review.md").write_text("reviewed", encoding="utf-8")
+
+    out = await mcp_server.dispatch_tool("orchestrate_status", {"job_id": "j-custom"})
+    data = json.loads(out)
+    assert [s["stage"] for s in data["stages"]] == [
+        "research",
+        "design",
+        "code",
+        "security_audit",
+        "review",
+        "deploy",
+    ]
+    assert data["artifacts_ready"] == ["genius://artifacts/review.md"]
 
 
 @pytest.mark.asyncio
