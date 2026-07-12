@@ -1,10 +1,17 @@
 # Kế hoạch triển khai: Pipeline tùy biến 8 bước
 
-> **TRẠNG THÁI: ĐÃ BUILD XONG (Phase 1-6).** `--pipeline custom` / `run_pipeline(flow="custom")`.
+> **⚠️ TÀI LIỆU LỊCH SỬ (thiết kế/định hướng), KHÔNG phải bằng chứng nghiệm thu.**
+> Số liệu và trạng thái bên dưới là ảnh chụp tại thời điểm build (2026-07-11,
+> suite 982 pass). Hiện trạng có thẩm quyền: `.claude/rules/architecture.md`
+> (hành vi hiện tại, gồm cả những thứ plan này chưa có: strict final review,
+> whole-project pytest gate, conformance, two-phase fan-out, deliverable
+> separation) + `python -m pytest` cho số test hôm nay.
+
+> **TRẠNG THÁI lúc viết: ĐÃ BUILD XONG (Phase 1-6).** `--pipeline custom` / `run_pipeline(flow="custom")`.
 > Phase 1 (per-role model) + Phase 2 (config .env) + Phase 3 (scaffold) + Phase 4 (plan-first + codex critic) + Phase 5 (Claude-diagnose self-heal) + Phase 6 (final review + per-stage gate). Full suite 982 pass, default byte-identical.
 > Chạy: `python orchestrator.py --pipeline custom --prompt "..."`.
 > Nguyên tắc lõi: **opt-in `flow="custom"`** → mọi thay đổi sau `if flow=="custom":`, pipeline mặc định & test **giữ nguyên byte-identical**.
-> Còn hoãn: re-code tự động đầy đủ từ final-review (hiện chỉ ghi fix-plan vào review.md); director LLM call per-file (không cần — DesignPlan đã decompose task).
+> Còn hoãn (tại thời điểm viết): re-code tự động đầy đủ từ final-review — từ 2026-07-12 verdict blocking đã FAIL job (GENIUS_FINAL_REVIEW_STRICT); director LLM call per-file (không cần — DesignPlan đã decompose task).
 
 ## 1. Luồng mong muốn (của bạn) → ánh xạ Genius
 

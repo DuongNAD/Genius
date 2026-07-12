@@ -431,7 +431,17 @@ def test_doctor_missing_required_cli_still_fatal():
 
 # --- optional live smoke test (never runs in CI) -----------------------------
 
-_REAL_AGY = r"C:\Users\Admin\AppData\Local\agy\bin\agy.exe"
+# Resolve a REAL agy the same way production does — env override, PATH — with
+# the historical Windows install location as the last fallback, so the smoke
+# test is runnable on any machine that has the CLI (it was hardcoded to a
+# Windows path and silently unrunnable on macOS even with GENIUS_LIVE_AGY=1).
+import shutil as _shutil  # noqa: E402
+
+_REAL_AGY = (
+    os.environ.get("GENIUS_AGY_PATH")
+    or _shutil.which("agy")
+    or r"C:\Users\Admin\AppData\Local\agy\bin\agy.exe"
+)
 
 
 @pytest.mark.skipif(
