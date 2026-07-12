@@ -24,14 +24,24 @@ Steps:
    It returns a `job_id`.
 
 2. Poll `genius_orchestrate_status` with that `job_id` roughly every 20 seconds
-   until `status` is `completed` or `failed`. Report each stage as it finishes
-   (research → design → code → review → deploy) using the `stages` field.
+   until `status` is `completed` or `failed`. Report progress from the response:
+   `current_stage` says what the pipeline is working on RIGHT NOW (the code
+   stage is the long one — often 10+ minutes), `stages` lists what already
+   finished (research → design → code → review → deploy), and `workspace` is
+   the absolute directory the files land in.
 
 3. On `completed`: read the artifacts (research / design / review / audit / deploy)
-   from the `artifacts_ready` URIs and summarize: what was built, the final-review
-   verdict (approved, or the blocking issues), and where the files live.
+   from the `artifacts_ready` URIs (exact URIs, including the `.md` suffix) and
+   summarize: what was built, the final-review verdict (approved, or the
+   blocking issues), and where the files live (`workspace`).
 
 4. On `failed`: report the `error` and the last completed stage.
+
+5. If a poll returns `status: "interrupted"` (with `recovered_from_journal`),
+   the MCP server restarted while the job was in flight: the pipeline is no
+   longer running, but every finished stage's artifacts are still in
+   `workspace`. Tell the user and re-submit `genius_orchestrate` if they want
+   the build finished.
 
 If the tools are unavailable, tell the user to enable the `genius` MCP server
 (**… → Manage MCP Servers**) and retry.

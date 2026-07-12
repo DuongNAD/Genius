@@ -12,10 +12,14 @@ work yourself; Genius builds it, your job is to drive it and summarize.
    project clean; a relative/non-writable workspace is ignored anyway). It
    returns a `job_id`.
 2. Poll `genius_orchestrate_status` with that `job_id` about every 20 seconds
-   until `status` is `completed` or `failed`; report each stage as it finishes.
-3. On completion, read the artifacts from the `artifacts_ready` URIs and
-   summarize what was built, the final-review verdict, and where the files live.
-   On failure, report the error and the last completed stage.
+   until `status` is `completed` or `failed`; report `current_stage` (what is
+   running now — the code stage is the long one) and each finished stage.
+3. On completion, read the artifacts from the `artifacts_ready` URIs (exact
+   URIs, `.md` suffix included) and summarize what was built, the final-review
+   verdict, and where the files live (the `workspace` field). On failure,
+   report the error and the last completed stage. A `status: "interrupted"`
+   means the MCP server restarted mid-job: artifacts of finished stages are
+   still in `workspace`; re-submit to build again.
 
 If the tools are unavailable, enable the `genius` MCP server (… → Manage MCP
 Servers) and retry.
