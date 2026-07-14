@@ -33,6 +33,14 @@ _RESOURCE_ARTIFACTS = {
     "audit.md": "Security audit produced by the security stage.",
     "deploy.md": "Deployment plan produced by the deploy stage (DevOps).",
     "plan.md": "End-to-end plan produced by the e2e pipeline (Claude).",
+    "pitch.md": (
+        "Hackathon pitch produced after deploy on the custom flow with "
+        "GENIUS_HACKATHON_MODE: narrative, demo script, Marp slides, judge Q&A."
+    ),
+    "ai_collaboration_log.md": (
+        "Deterministic AI collaboration log exported from the run's own "
+        "traces (custom flow with GENIUS_HACKATHON_MODE)."
+    ),
 }
 
 

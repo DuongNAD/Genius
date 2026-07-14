@@ -66,7 +66,11 @@ BUILD steps:
 4. On `completed`: read the artifacts (research / design / review / audit / deploy)
    from the `artifacts_ready` URIs (exact URIs, including the `.md` suffix) and
    summarize: what was built, the final-review verdict (approved, or the
-   blocking issues), and where the files live (`workspace`).
+   blocking issues), and where the files live (`workspace`). When the run had
+   `GENIUS_HACKATHON_MODE` on, two extra submission artifacts sit at the
+   workspace root: `pitch.md` (narrative, demo script, Marp slides, judge Q&A)
+   and `ai_collaboration_log.md` (the AI collaboration log) — read them from
+   `workspace` directly and mention both in the summary.
 
 5. On `failed`: report the `error` and the last completed stage.
 

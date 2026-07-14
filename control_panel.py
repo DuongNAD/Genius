@@ -108,7 +108,15 @@ def _prune_panel_jobs() -> None:
         PANEL_JOBS.pop(jid, None)
 
 
-_ROOT_ARTIFACTS = ("research.md", "design.md", "review.md", "audit.md", "deploy.md")
+_ROOT_ARTIFACTS = (
+    "research.md",
+    "design.md",
+    "review.md",
+    "audit.md",
+    "deploy.md",
+    "pitch.md",
+    "ai_collaboration_log.md",
+)
 
 
 def _model_for(backend: str, config) -> str:

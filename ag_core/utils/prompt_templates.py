@@ -126,3 +126,103 @@ DEVOPS_PROMPT = _role(
     "scripts, etc.) in its OWN fenced code block, and begin each block's content with a `# filepath: <relative/path>` "
     "comment so the files can be materialized. No prose outside the code blocks.",
 )
+
+# --- Hackathon mode (GENIUS_HACKATHON_MODE, custom flow only) ---------------
+# Request-prompt appendages, NOT system prompts: the orchestrator appends them
+# to the prompts it sends to the researcher/architect/devops services when
+# hackathon mode is enabled, so the default path stays byte-identical when the
+# env gate is off (same philosophy as SURGICAL_EDIT_GUIDANCE in
+# ag_core/agents/codex_reviewer.py, but applied at the orchestrator call sites
+# where pipeline tests can capture the outgoing prompt).
+
+HACKATHON_RESEARCH_GUIDANCE = (
+    "\n\nADDITIONAL REQUIRED SECTIONS (same structured style as the rest of "
+    "the brief; every claim concrete and specific to THIS product, no filler):\n"
+    "- Target Users & Pain: who exactly hurts today, in what situation, and "
+    "how badly; the single sharpest pain this product removes, stated in one "
+    "sentence.\n"
+    "- Business Viability: the value proposition in one sentence; a pilot "
+    "pathway — a named first customer segment, what a 2-4 week pilot with "
+    "them looks like, and who would sign it off; 2-3 measurable success "
+    "metrics that pilot would report.\n"
+    "- Competitive Differentiation: the 2-3 closest existing alternatives "
+    "(including 'a plain ChatGPT/Claude prompt') and, for each, the one "
+    "defensible reason this product wins.\n"
+    "- AI-Native Opportunity: where AI does the CORE work (multi-step "
+    "reasoning, retrieval over domain data, agentic tool use, generation) "
+    "rather than decorating a form; what data or context grounds the AI; and "
+    "the top trust risks (hallucination, stale data, misuse) that must be "
+    "mitigated before users rely on it.\n"
+)
+
+HACKATHON_DESIGN_GUIDANCE = (
+    "\n\nHACKATHON DESIGN REQUIREMENTS — these shape the CONTENT of the "
+    "DesignPlan fields only; the output format is unchanged: still EXACTLY "
+    "ONE ```json fenced block conforming to the DesignPlan schema, with no "
+    "prose or extra sections outside it.\n"
+    "- The top-level `description` must additionally cover, briefly and "
+    "concretely: (a) AI-NATIVE ARCHITECTURE — which agentic workflow, "
+    "retrieval/RAG pipeline, or reasoning loop is the product's core (not a "
+    "chatbot bolted onto CRUD), which model/tool calls happen at which step, "
+    "and why a non-AI implementation could not deliver the same value; "
+    "(b) UX FLOW — the user's journey step by step, and the trust-building "
+    "moments in the UI (visible progress/steps, citations or sources shown, "
+    "confidence or uncertainty surfaced, one-step correction/undo); "
+    "(c) SAFETY & GROUNDING — how outputs are grounded (retrieval, "
+    "citations, schema/validation checks), how hallucinations are mitigated, "
+    "and where the UI discloses the AI's limits.\n"
+    "- Carry those decisions into the per-file `specification`s: every file "
+    "that implements the AI core, the grounding path, or the trust UI must "
+    "spell out that responsibility concretely (which prompts/calls, which "
+    "checks, which UI states) — not as marketing language.\n"
+    "- Include the deployment surface in `files[]`: a Dockerfile plus "
+    "exactly ONE platform config that fits the stack (render.yaml, fly.toml, "
+    "or vercel.json), so the project can reach a live public URL without "
+    "inventing files after the design is frozen.\n"
+)
+
+HACKATHON_DEVOPS_GUIDANCE = (
+    "\n\nHACKATHON DEPLOY REQUIREMENTS — the deliverable must reach a LIVE "
+    "public URL that a judge can open:\n"
+    "- Emit the Dockerfile and the ONE platform config the design ships "
+    "(render.yaml, fly.toml, or vercel.json — whichever fits the stack). If "
+    "the design already includes them, refine those exact files; do not "
+    "invent additional files beyond the fixed file budget above.\n"
+    "- Finish with ONE ```bash fenced block of exact copy-paste commands "
+    "taking a fresh clone to the live URL: platform CLI auth, create/launch, "
+    "deploy, then the command or URL pattern that proves the app is up. This "
+    "block is operator instructions, not a project file, so it needs no "
+    "filepath header. Reference secrets only as environment variable names, "
+    "never literal values.\n"
+)
+
+HACKATHON_PITCH_PROMPT = (
+    "Write the complete contents of pitch.md for the product whose design, "
+    "review, audit and deploy artifacts follow. This request is a PITCH "
+    "DOCUMENT, not a DesignPlan: respond with plain markdown (no ```json "
+    "block), in English, using exactly these sections in this order:\n"
+    "1. `# <Product name> — Pitch` — a problem/solution narrative in two "
+    "short paragraphs: who hurts and how badly, what the product changes, "
+    "and why now.\n"
+    "2. `## AI-native architecture` — how the agentic/retrieval/reasoning "
+    "core works end to end, why the AI is structural rather than a bolt-on "
+    "chatbot, and the safety/grounding mechanisms actually shipped "
+    "(citations, validation, disclosed limits).\n"
+    "3. `## Business case` — value proposition, pilot pathway (first "
+    "customer segment, shape of a 2-4 week pilot, success metrics), and the "
+    "competitive edge over the closest alternatives.\n"
+    "4. `## 5-minute demo script` — a timed storyboard (0:00-5:00) of what "
+    "to show and say, opening on the user's pain and ending on the live "
+    "deployed URL.\n"
+    "5. `## Slide deck (Marp)` — ONE fenced ```markdown block containing a "
+    "Marp deck: `marp: true` front-matter, `---` slide separators, at most "
+    "10 slides (problem, solution, architecture, demo, business, "
+    "safety/trust, team/ask). Do not nest code fences inside the deck.\n"
+    "6. `## Anticipated judge Q&A` — 6-8 hard questions with crisp, honest "
+    "answers, covering at least: technical depth, what breaks at scale, why "
+    "this beats a plain GPT wrapper, how hallucinations are handled, pilot "
+    "economics, and what was AI-generated versus human-directed.\n"
+    "Ground every claim in the artifacts below; never invent features that "
+    "are not implemented. Where the artifacts note a limitation, own it and "
+    "state the mitigation.\n\n"
+)

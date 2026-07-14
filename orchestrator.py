@@ -34,6 +34,10 @@ from ag_core.runtime import under_pytest
 from ag_core.directives import parse_directives
 from ag_core.utils.prompt_templates import (
     CRITIC_QUALITY_CHECKLIST as _CRITIC_QUALITY_CHECKLIST,
+    HACKATHON_DESIGN_GUIDANCE,
+    HACKATHON_DEVOPS_GUIDANCE,
+    HACKATHON_PITCH_PROMPT,
+    HACKATHON_RESEARCH_GUIDANCE,
 )
 from collections import OrderedDict
 
@@ -319,6 +323,24 @@ def project_gate_enabled() -> bool:
     return os.getenv("GENIUS_PROJECT_GATE", "").lower() in ("1", "true", "yes")
 
 
+def hackathon_mode_enabled() -> bool:
+    """Whether the opt-in hackathon mode augments the CUSTOM flow.
+
+    Opt-in via ``GENIUS_HACKATHON_MODE`` and always OFF under pytest (same
+    convention as project gates / auto-install), so every fixed-mock pipeline
+    test keeps byte-identical prompts and call sequences. When enabled, the
+    custom flow appends rubric-oriented guidance to the research/design/devops
+    request prompts (``HACKATHON_*_GUIDANCE`` in
+    ``ag_core/utils/prompt_templates.py``) and, after the devops stage gate,
+    best-effort emits two extra workspace-root artifacts: ``pitch.md`` (one
+    extra claude-role call) and ``ai_collaboration_log.md`` (deterministic,
+    ``ag_core/collab_log.py``). Off = byte-identical pipeline.
+    """
+    if under_pytest():
+        return False
+    return os.getenv("GENIUS_HACKATHON_MODE", "").lower() in ("1", "true", "yes")
+
+
 async def _maybe_run_eval_gate(project_dir: str, prompt: str) -> None:
     """Grade the finished workspace and log any quality regression.
 
@@ -369,6 +391,78 @@ async def _maybe_run_eval_gate(project_dir: str, prompt: str) -> None:
             )
     except Exception as e:  # noqa: BLE001 - the gate must never fail a run.
         logger.warning("[eval-gate] skipped (non-fatal): %s", e)
+
+
+async def _emit_hackathon_artifacts(
+    workspace: str,
+    project_dir: str,
+    prompt: str,
+    design_content: str,
+    review_file: str,
+    review_content: str,
+    audit_content: str,
+    deploy_content: str,
+    claude_url: str,
+    api_key: str,
+    client,
+    poll_timeout: float,
+) -> None:
+    """Best-effort hackathon submission artifacts (custom flow only).
+
+    Runs after the devops stage gate when :func:`hackathon_mode_enabled`.
+    Two independent halves, each in its own try/except so neither a pitch
+    failure nor a log failure can fail a completed build — and the collab
+    log still exports when the pitch call died:
+
+    1. ``pitch.md`` — one extra claude-role call over the finished artifacts
+       (design, review incl. final-review sections, audit, deploy), raw-
+       captured as ``pitch`` so it appears in the collaboration timeline.
+    2. ``ai_collaboration_log.md`` — deterministic export from the run's own
+       manifest/traces (``ag_core/collab_log.py``); runs AFTER the pitch so
+       the pitch trace is part of the timeline.
+    """
+    try:
+        if claude_url:
+            # Re-read review.md from disk: _record_final_review appended the
+            # "## Final review" (and fix-plan) sections after review_content
+            # was captured. Fall back to the in-memory copy.
+            try:
+                with open(review_file, "r", encoding="utf-8") as fh:
+                    review_text = fh.read()
+            except OSError:
+                review_text = review_content
+            pitch_req = (
+                HACKATHON_PITCH_PROMPT
+                + f"Original request:\n{prompt}\n\n"
+                + f"Design:\n{truncate_log(design_content)}\n\n"
+                + f"Review:\n{truncate_log(review_text)}\n\n"
+                + f"Audit:\n{truncate_log(audit_content)}\n\n"
+                + f"Deploy plan:\n{truncate_log(deploy_content)}"
+            )
+            pitch_content = await call_api(
+                claude_url,
+                api_key,
+                pitch_req,
+                context={},
+                client=client,
+                poll_timeout=poll_timeout,
+            )
+            save_raw_response(project_dir, "pitch", pitch_content)
+            _write_text(os.path.join(workspace, "pitch.md"), pitch_content)
+            logger.info("[hackathon] pitch.md written to workspace root.")
+    except Exception as e:  # noqa: BLE001 - best-effort by contract.
+        logger.warning("[hackathon] pitch generation skipped (non-fatal): %s", e)
+
+    try:
+        from ag_core.collab_log import export_collab_log
+
+        _write_text(
+            os.path.join(workspace, "ai_collaboration_log.md"),
+            export_collab_log(workspace),
+        )
+        logger.info("[hackathon] ai_collaboration_log.md written.")
+    except Exception as e:  # noqa: BLE001 - best-effort by contract.
+        logger.warning("[hackathon] collab log skipped (non-fatal): %s", e)
 
 
 def resolve_degraded_outcome(paths, results, label):
@@ -930,6 +1024,8 @@ _PIPELINE_OWNED_BASENAMES = {
     "audit.md",
     "deploy.md",
     "plan.md",
+    "pitch.md",
+    "ai_collaboration_log.md",
 }
 _PIPELINE_OWNED_DIRS = {"logs", "__pycache__", ".pytest_cache", ".git", ".genius"}
 
@@ -2526,6 +2622,10 @@ async def run_pipeline(
             test_generated_file,
             audit_file,
             deploy_file,
+            # Hackathon-mode artifacts (workspace root only — never written
+            # into the project dir, so no project-dir twins to clean).
+            os.path.join(workspace, "pitch.md"),
+            os.path.join(workspace, "ai_collaboration_log.md"),
             os.path.join(project_dir, "research.md"),
             os.path.join(project_dir, "design.md"),
             os.path.join(project_dir, "app.py"),
@@ -2634,10 +2734,17 @@ async def run_pipeline(
         claude_content = None
         if plan_first:
             logger.info("--- Custom flow: Claude drafts the plan first ---")
+            # HACKATHON (opt-in): shape the DesignPlan CONTENT (AI-native
+            # architecture / UX / safety + deploy files) without touching the
+            # single-```json``` output contract. Local bind; `prompt` itself
+            # stays untouched.
+            plan_prompt = prompt
+            if hackathon_mode_enabled():
+                plan_prompt = prompt + HACKATHON_DESIGN_GUIDANCE
             claude_content = await call_api(
                 claude_url,
                 api_key,
-                prompt,
+                plan_prompt,
                 context=scanned_files,
                 client=client,
                 poll_timeout=poll_timeout,
@@ -2649,11 +2756,18 @@ async def run_pipeline(
         if plan_first and claude_content is not None:
             research_ctx = dict(scanned_files)
             research_ctx["plan.md"] = claude_content
+        # HACKATHON (opt-in, custom only): steer the research brief toward the
+        # submission-critical sections (users/pain, viability, differentiation,
+        # AI-native opportunity). Local bind — the RAW `prompt` every other
+        # stage receives stays untouched.
+        research_prompt = prompt
+        if flow == "custom" and hackathon_mode_enabled():
+            research_prompt = prompt + HACKATHON_RESEARCH_GUIDANCE
         try:
             research_content = await call_api(
                 researcher_url,
                 api_key,
-                prompt,
+                research_prompt,
                 context=research_ctx,
                 client=client,
                 poll_timeout=poll_timeout,
@@ -2817,6 +2931,11 @@ async def run_pipeline(
                     f"CriticReviewer's Criticism:\n{critic_content}\n\n"
                     f"Original Research and Context:\n{claude_prompt}"
                 )
+                # HACKATHON (opt-in, custom only): keep the design guidance in
+                # view during refinement so a debate round cannot launder the
+                # AI-native/UX/safety content out of the plan.
+                if flow == "custom" and hackathon_mode_enabled():
+                    claude_refine_prompt += HACKATHON_DESIGN_GUIDANCE
                 try:
                     claude_content = await call_api(
                         claude_url,
@@ -3498,6 +3617,11 @@ async def run_pipeline(
                     "existing files (e.g. pin versions directly in the "
                     "workflow command: pip install pytest==<version>)."
                 )
+            # HACKATHON (opt-in, custom only): the deploy plan must take a
+            # judge to a LIVE public URL. Appended before the context copy
+            # below so the devops agent sees one consistent view.
+            if flow == "custom" and hackathon_mode_enabled():
+                devops_prompt += HACKATHON_DEVOPS_GUIDANCE
 
             try:
                 proj_scanner = ProjectScanner(
@@ -3556,6 +3680,24 @@ async def run_pipeline(
             # devops), not only the first three.
             if flow == "custom" and stage_gate is not None:
                 await stage_gate("devops")
+
+            # HACKATHON (opt-in, custom only): submission artifacts, both
+            # best-effort — a failure logs and never fails a completed build.
+            if flow == "custom" and hackathon_mode_enabled():
+                await _emit_hackathon_artifacts(
+                    workspace,
+                    project_dir,
+                    prompt,
+                    claude_content,
+                    review_file,
+                    review_content,
+                    consolidated_audit,
+                    devops_content,
+                    claude_url,
+                    api_key,
+                    client,
+                    poll_timeout,
+                )
 
             # Hand over ONLY the designed files: strip any runtime caches the
             # verification steps (or a designed conftest/plugin) left behind.
