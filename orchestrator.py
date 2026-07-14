@@ -299,6 +299,26 @@ def auto_install_enabled() -> bool:
     return os.getenv("GENIUS_AUTO_INSTALL", "").lower() in ("1", "true", "yes")
 
 
+def project_gate_enabled() -> bool:
+    """Whether the pipeline runs the generated project's OWN quality gates.
+
+    Opt-in via ``GENIUS_PROJECT_GATE`` and always OFF under pytest (same
+    convention as auto-install: it spawns package-manager subprocesses that
+    install and execute arbitrary project code). When enabled, the custom
+    flow's whole-project verification additionally detects the project's
+    stack (v1: ``package.json`` → npm) and runs its own gates — install,
+    then the ``test``/``lint``/``build`` scripts that exist — from the
+    project root; results land in review.md under "## Project gates" and a
+    failing gate fails the job through the same strict full-suite gate
+    (``GENIUS_FULL_SUITE_GATE=0`` demotes to report-only). Fixes the
+    false-safety hole where a Next.js job read as verified while every
+    per-file log said "pytest skipped: not a Python file".
+    """
+    if under_pytest():
+        return False
+    return os.getenv("GENIUS_PROJECT_GATE", "").lower() in ("1", "true", "yes")
+
+
 async def _maybe_run_eval_gate(project_dir: str, prompt: str) -> None:
     """Grade the finished workspace and log any quality regression.
 
@@ -823,6 +843,80 @@ async def _run_project_pytest(project_dir: str) -> tuple[int, str]:
         + stderr.decode("utf-8", errors="replace")
     )
     return process.returncode, truncate_log(output)
+
+
+def detect_project_gates(project_dir: str) -> list:
+    """Detect the generated project's own quality gates (v1: npm).
+
+    Returns ``[(gate_name, argv, timeout_seconds), ...]`` to run sequentially
+    from the project root, or ``[]`` when no supported manifest is present
+    (Python projects need no detection — whole-project pytest is the native
+    gate). Only scripts the project actually declares are run, ``install``
+    always first so ``node_modules`` exists for the rest.
+    """
+    pkg_path = os.path.join(project_dir, "package.json")
+    if not os.path.isfile(pkg_path):
+        return []
+    try:
+        with open(pkg_path, "r", encoding="utf-8") as fh:
+            scripts = (json.load(fh) or {}).get("scripts") or {}
+    except (OSError, ValueError) as e:
+        logger.warning("Project gates: unreadable package.json (%s); skipping.", e)
+        return []
+    npm = shutil.which("npm")
+    if not npm:
+        logger.warning(
+            "Project gates: package.json present but npm is not on PATH; "
+            "the project's own test/lint/build gates cannot run."
+        )
+        return []
+
+    def _cmd(args: list) -> list:
+        # npm is npm.cmd on Windows; CreateProcess can't exec .cmd directly.
+        base = [npm] + args
+        return ["cmd.exe", "/c"] + base if os.name == "nt" else base
+
+    gates = [
+        ("npm install", _cmd(["install", "--no-audit", "--no-fund"]))
+    ]
+    for script in ("test", "lint", "build"):
+        if script in scripts:
+            gates.append((f"npm run {script}", _cmd(["run", script])))
+    # npm steps (cold install, framework builds) routinely exceed the
+    # pytest verification ceiling; bound them like installs instead.
+    return [(name, argv, install_timeout()) for name, argv in gates]
+
+
+async def _run_project_gates(project_dir: str) -> tuple[bool, str]:
+    """Run the project's own detected gates; return (any_failed, md_section).
+
+    The section body is review.md-ready (one ``###`` block per gate with the
+    exit code and a bounded log tail). An ``npm install`` failure skips the
+    remaining gates — they could only fail for the same missing-deps reason.
+    """
+    gates = detect_project_gates(project_dir)
+    if not gates:
+        return False, ""
+    env = os.environ.copy()
+    # Never watch mode / interactive wizards inside a pipeline.
+    env["CI"] = "1"
+    failed = False
+    parts = []
+    for name, argv, timeout in gates:
+        code, out = await run_subprocess(
+            argv, env=env, cwd=project_dir, timeout=timeout
+        )
+        parts.append(
+            f"### {name}\nexit code: {code}\n\n"
+            f"```\n{truncate_log(out, 4000).strip()}\n```"
+        )
+        if code != 0:
+            failed = True
+            logger.warning("Project gate '%s' failed (exit %s).", name, code)
+            if name == "npm install":
+                parts.append("(npm install failed — remaining gates skipped)")
+                break
+    return failed, "\n\n".join(parts)
 
 
 # The pipeline no longer writes its artifacts into the project directory
@@ -3103,6 +3197,23 @@ async def run_pipeline(
                             "non-Python project this gate verifies nothing — "
                             "the product's own test suite was not run)"
                         )
+                    # Stack-aware project gates (opt-in GENIUS_PROJECT_GATE):
+                    # run the product's OWN install/test/lint/build from the
+                    # project root and fail the job through the same strict
+                    # gate — pytest alone proves nothing about a JS/TS stack.
+                    if project_gate_enabled():
+                        gates_failed, gates_section = await _run_project_gates(
+                            project_dir
+                        )
+                        if gates_section:
+                            review_content += (
+                                "\n\n## Project gates (stack-aware)\n"
+                                + gates_section
+                            )
+                        if gates_failed:
+                            full_suite_failed = True
+                            if full_suite_rc in (0, 5):
+                                full_suite_rc = "project-gates"
 
             review_art_id = await message_bus.publish_async(
                 Artifact(
@@ -3140,8 +3251,13 @@ async def run_pipeline(
                 logger.warning(f"Failed to write audit.md: {e}")
 
             if full_suite_failed and full_suite_gate_enabled():
+                _gate_desc = (
+                    "The project's own gates (npm install/test/lint/build) failed"
+                    if full_suite_rc == "project-gates"
+                    else f"Whole-project pytest failed (exit {full_suite_rc})"
+                )
                 raise PipelineError(
-                    f"Whole-project pytest failed (exit {full_suite_rc}) after "
+                    f"{_gate_desc} after "
                     "per-file verification — a cross-file conflict or "
                     "integration failure the per-file loops cannot see; the "
                     "log is recorded in review.md. Set GENIUS_FULL_SUITE_GATE=0 "
