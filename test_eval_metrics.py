@@ -80,11 +80,14 @@ def test_design_wellformed_good(tmp_path):
 
 
 def test_design_wellformed_missing_keys(tmp_path):
+    # A JSON object with no files[] key is not a DesignPlan candidate at all —
+    # the pipeline's own parser rejects it (design self-heal / PipelineError),
+    # so the metric mirrors that: "no parseable DesignPlan", not a mid score.
     (tmp_path / "design.md").write_text('```json\n{"foo": 1}\n```', encoding="utf-8")
     case = collect_case(str(tmp_path))
     res = BUILTIN_METRICS["design_wellformed"].evaluate(case)
-    assert res["score"] == 3.0
-    assert "files[]" in res["explanation"]
+    assert res["score"] == 1.0
+    assert "no parseable DesignPlan" in res["explanation"]
 
 
 def test_design_wellformed_unparseable(tmp_path):

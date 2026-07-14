@@ -26,6 +26,7 @@ from ag_core.utils.code_extract import extract_code, fence_hint
 from ag_core.utils.cli_runner import (
     cli_timeout,
     test_timeout,
+    install_timeout,
     communicate_with_timeout,
     CLITimeoutError,
 )
@@ -276,6 +277,28 @@ def eval_gate_enabled() -> bool:
     return os.getenv("GENIUS_EVAL_GATE", "").lower() in ("1", "true", "yes")
 
 
+def auto_install_enabled() -> bool:
+    """Whether the pipeline auto-installs designed dependencies before verify.
+
+    Opt-in via ``GENIUS_AUTO_INSTALL`` and always OFF under pytest (same
+    convention as the eval gate). When enabled, root-level
+    ``requirements*.txt`` files from the design are implemented FIRST (wave 0
+    of the fan-out), then ``pip install``-ed into an isolated venv under
+    ``pipeline_internal_dir()`` (built with ``--system-site-packages`` so
+    pytest/flake8 stay importable), and every verification subprocess runs on
+    that venv's interpreter via :func:`verification_python`. Off — the
+    default — keeps today's behavior byte-identical: manifests are ordinary
+    wave-1 files and verification uses the orchestrator's own interpreter.
+
+    SECURITY: installing LLM-generated requirements executes arbitrary
+    package code at install time — enable only for runs you trust enough to
+    install from.
+    """
+    if under_pytest():
+        return False
+    return os.getenv("GENIUS_AUTO_INSTALL", "").lower() in ("1", "true", "yes")
+
+
 async def _maybe_run_eval_gate(project_dir: str, prompt: str) -> None:
     """Grade the finished workspace and log any quality regression.
 
@@ -288,7 +311,25 @@ async def _maybe_run_eval_gate(project_dir: str, prompt: str) -> None:
     try:
         from ag_core.eval.gate import run_eval_gate
 
-        result = await run_eval_gate(project_dir, prompt=prompt)
+        # Grade the WORKSPACE root (where research/design/review.md live
+        # post-separation), not the projects/<slug> deliverable — grading the
+        # deliverable left the artifact metrics permanently blind. The eval
+        # JSON itself is a pipeline internal, so it lands under .genius/,
+        # never inside the deliverable.
+        abs_project = os.path.abspath(project_dir)
+        parent = os.path.dirname(abs_project)
+        grade_root = (
+            os.path.dirname(parent)
+            if os.path.basename(parent) == "projects"
+            else abs_project
+        )
+        result = await run_eval_gate(
+            grade_root,
+            prompt=prompt,
+            eval_dir=os.path.join(
+                pipeline_internal_dir(project_dir), "logs", "eval"
+            ),
+        )
         diff = result.get("compare")
         overall = result["grade"].get("overall", 0.0)
         if diff and diff.get("regressed"):
@@ -568,8 +609,152 @@ def generated_test_path(
     return os.path.join(pipeline_internal_dir(project_dir), "tests", name)
 
 
+def is_dependency_manifest(rel_path: str) -> bool:
+    """True for a ROOT-level pip requirements file (``requirements*.txt``).
+
+    Only these are auto-installed (see :func:`auto_install_enabled`): nested
+    pin files (``deploy/requirements.txt``) and other manifest formats stay
+    ordinary designed files.
+    """
+    norm = str(rel_path or "").replace("\\", "/").strip("/")
+    if not norm or "/" in norm:
+        return False
+    return re.fullmatch(r"requirements[\w.-]*\.txt", norm, re.IGNORECASE) is not None
+
+
+def project_venv_dir(project_dir: str) -> str:
+    """Home of the auto-install venv — a pipeline INTERNAL, never handed over."""
+    return os.path.join(pipeline_internal_dir(project_dir), "venv")
+
+
+def venv_python(project_dir: str) -> str:
+    """Interpreter path inside the auto-install venv (may not exist yet)."""
+    if os.name == "nt":
+        return os.path.join(project_venv_dir(project_dir), "Scripts", "python.exe")
+    return os.path.join(project_venv_dir(project_dir), "bin", "python")
+
+
+def verification_python(project_dir: str) -> str:
+    """Interpreter for verification subprocesses (flake8/pytest).
+
+    The auto-install venv's python when the feature is enabled AND the venv
+    was actually built, else ``sys.executable``. Re-checking the flag here
+    means a stale venv left in a reused workspace by an earlier opted-in run
+    can never hijack verification once the feature is off again.
+    """
+    if auto_install_enabled():
+        py = venv_python(project_dir)
+        if os.path.exists(py):
+            return py
+    return sys.executable
+
+
+def partition_fanout_waves(files_to_implement) -> tuple[list, list, list]:
+    """Split a design's file list into (manifest, implementation, test) waves.
+
+    Both fan-outs (sequential/custom and e2e) process the waves strictly in
+    that order. Designed TEST MODULES always run last, once their targets are
+    final; dependency manifests are peeled into wave 0 only when auto-install
+    is enabled (otherwise they stay ordinary implementation files, keeping the
+    default scheduling byte-identical).
+    """
+    impl_wave = [
+        f for f in files_to_implement if not is_test_module(str(f.get("path", "")))
+    ]
+    test_wave = [
+        f for f in files_to_implement if is_test_module(str(f.get("path", "")))
+    ]
+    manifest_wave = []
+    if auto_install_enabled():
+        manifest_wave = [
+            f for f in impl_wave if is_dependency_manifest(str(f.get("path", "")))
+        ]
+        impl_wave = [
+            f for f in impl_wave if not is_dependency_manifest(str(f.get("path", "")))
+        ]
+    return manifest_wave, impl_wave, test_wave
+
+
+async def auto_install_requirements(project_dir: str, manifest_paths: list) -> None:
+    """Build the isolated venv and ``pip install`` designed requirements into it.
+
+    Best-effort by design: any failure is logged (and captured in the internal
+    ``logs/install.log``) but never fails the pipeline — the verification
+    waves that follow surface truly missing dependencies as ordinary test
+    failures the self-heal loop can react to. The venv inherits the
+    orchestrator's site-packages (``--system-site-packages``) so pytest and
+    flake8 remain importable without reinstalling them; packages pinned by the
+    manifests shadow the inherited copies.
+    """
+    log_sections = []
+    try:
+        venv_dir = project_venv_dir(project_dir)
+        py = venv_python(project_dir)
+        if not os.path.exists(py):
+            code, out = await run_subprocess(
+                [sys.executable, "-m", "venv", "--system-site-packages", venv_dir],
+                timeout=install_timeout(),
+            )
+            log_sections.append(f"$ python -m venv {venv_dir}\n[exit {code}]\n{out}")
+            if code != 0 or not os.path.exists(py):
+                logger.warning(
+                    "Auto-install: venv creation failed (exit %s); verification "
+                    "falls back to the orchestrator interpreter. %s",
+                    code,
+                    truncate_log(out, 2000),
+                )
+                return
+        for rel in sorted(str(p) for p in manifest_paths):
+            manifest = os.path.join(project_dir, rel)
+            if not os.path.exists(manifest):
+                # The coder may have failed to produce the file; its wave-0
+                # task already recorded that failure — nothing to install.
+                log_sections.append(
+                    f"$ pip install -r {rel}\n[skipped: file was never written]"
+                )
+                continue
+            code, out = await run_subprocess(
+                [
+                    py,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-input",
+                    "--disable-pip-version-check",
+                    "-r",
+                    manifest,
+                ],
+                cwd=project_dir,
+                timeout=install_timeout(),
+            )
+            log_sections.append(f"$ pip install -r {rel}\n[exit {code}]\n{out}")
+            if code != 0:
+                logger.warning(
+                    "Auto-install: pip install -r %s failed (exit %s); "
+                    "verification may hit ModuleNotFoundError. %s",
+                    rel,
+                    code,
+                    truncate_log(out, 2000),
+                )
+            else:
+                logger.info("Auto-install: installed %s into %s", rel, venv_dir)
+    except Exception as e:  # noqa: BLE001 - setup assist must never kill the run
+        logger.warning(f"Auto-install failed: {e}")
+        log_sections.append(f"[error] {e}")
+    finally:
+        if log_sections:
+            try:
+                log_dir = os.path.join(pipeline_internal_dir(project_dir), "logs")
+                os.makedirs(log_dir, exist_ok=True)
+                _write_text(
+                    os.path.join(log_dir, "install.log"), "\n\n".join(log_sections)
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write install.log: {e}")
+
+
 async def run_subprocess(
-    cmd: list, env: dict = None, cwd: str = None
+    cmd: list, env: dict = None, cwd: str = None, timeout: float = None
 ) -> tuple[int, str]:
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -581,7 +766,9 @@ async def run_subprocess(
     cli_name = " ".join(str(c) for c in cmd[:2]) if cmd else "subprocess"
     try:
         stdout, stderr = await communicate_with_timeout(
-            process, timeout=test_timeout(), cli_name=cli_name
+            process,
+            timeout=timeout if timeout is not None else test_timeout(),
+            cli_name=cli_name,
         )
     except CLITimeoutError as e:
         # Bound the wait so a hung flake8/pytest (an LLM-generated infinite loop
@@ -614,7 +801,7 @@ async def _run_project_pytest(project_dir: str) -> tuple[int, str]:
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
+            verification_python(project_dir),
             "-m",
             "pytest",
             "-q",
@@ -666,6 +853,11 @@ def sweep_runtime_caches(project_dir: str) -> None:
         for d in list(dirs):
             if d in ("__pycache__", ".pytest_cache"):
                 shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                dirs.remove(d)
+            elif d == ".genius":
+                # Pipeline internals are not part of the deliverable, and in
+                # the fallback layout they include the auto-install venv —
+                # thousands of directories the sweep must not crawl.
                 dirs.remove(d)
 
 
@@ -830,6 +1022,46 @@ def security_is_blocking(security_report: str) -> bool:
     if verdict is not None:
         return bool(verdict.get("blocking"))
     return detect_vulnerabilities(security_report)
+
+
+def verification_mode(rel_path: str) -> str:
+    """Human-readable verification mode the per-file loop applies to a file.
+
+    Feeds the review.md "Verification coverage" section: "verified" must
+    never imply "executed" — a real Next.js job shipped 28 files whose logs
+    all said "pytest skipped: not a Python file" while the job read as fully
+    tested.
+    """
+    norm = str(rel_path or "").replace("\\", "/")
+    if not norm.endswith(".py"):
+        return "audit-only (non-Python; NOT executed by any test runner)"
+    if is_test_module(norm):
+        return "executed directly under pytest (designed test module)"
+    if is_pytest_infra(norm):
+        return "audit-only (pytest infrastructure)"
+    return "generated pytest module executed"
+
+
+def design_scope_note(design_plan_content: str) -> str:
+    """Suffix for security-audit prompts: the design's scope is the contract.
+
+    A real job failed on a policy conflict no code change could resolve: the
+    design EXPLICITLY excluded authentication, the auditor kept returning
+    blocking "no auth" findings, and all three API/page files burned their
+    whole retry budget. Capabilities the design rules out are accepted
+    risks, not blocking defects.
+    """
+    if not design_plan_content:
+        return ""
+    return (
+        "\n\nScope rule: the approved design below is the CONTRACT for this "
+        "job. If the design explicitly excludes a capability (e.g. 'do NOT "
+        "introduce authentication/pagination'), its ABSENCE is an accepted "
+        "risk: report it with severity 'low', note '(accepted by design)', "
+        "and it must NOT make the verdict blocking. Reserve blocking=true "
+        "for defects in what the file actually implements.\n\n"
+        f"Approved design (excerpt):\n{design_plan_content[:4000]}"
+    )
 
 
 def validate_file(path, step_name, is_input=True):
@@ -1784,7 +2016,10 @@ async def process_single_file(
                     f"{file_path} {_skip_reason}: skipping test generation; "
                     "running the security audit only."
                 )
-                security_req_prompt = f"/audit Audit the following file for security issues (secrets, unsafe configuration, injection vectors) in '{file_path}':\n\n{code_to_write}"
+                security_req_prompt = (
+                    f"/audit Audit the following file for security issues (secrets, unsafe configuration, injection vectors) in '{file_path}':\n\n{code_to_write}"
+                    + design_scope_note(design_plan_content)
+                )
                 try:
                     security_report = await call_api(
                         security_url,
@@ -1848,7 +2083,10 @@ async def process_single_file(
                         "repeating it.\nPrevious failures:\n"
                         f"{truncate_log(test_failures_logs)}"
                     )
-                security_req_prompt = f"/audit Audit the following code for security vulnerabilities in file '{file_path}':\n\n{code_to_write}"
+                security_req_prompt = (
+                    f"/audit Audit the following code for security vulnerabilities in file '{file_path}':\n\n{code_to_write}"
+                    + design_scope_note(design_plan_content)
+                )
 
                 # Reuse this attempt's pre-Codex scan instead of a second
                 # full-workspace walk: the only content that changed since is
@@ -1963,7 +2201,12 @@ async def process_single_file(
                     else "(pytest skipped: pytest infrastructure file)"
                 )
             else:
-                pytest_cmd = [sys.executable, "-m", "pytest", test_file_path]
+                pytest_cmd = [
+                    verification_python(project_dir),
+                    "-m",
+                    "pytest",
+                    test_file_path,
+                ]
                 logger.info(f"Running pytest command: {' '.join(pytest_cmd)}")
 
                 try:
@@ -2699,17 +2942,22 @@ async def run_pipeline(
             # run failed exactly this way (the designed test exhausted 3
             # attempts against in-flight wordfreq.py versions; the final
             # implementation was correct and would have passed).
-            impl_wave = [
-                f
-                for f in files_to_implement
-                if not is_test_module(str(f.get("path", "")))
-            ]
-            test_wave = [
-                f
-                for f in files_to_implement
-                if is_test_module(str(f.get("path", "")))
-            ]
-            results = list(
+            # With GENIUS_AUTO_INSTALL there is an extra wave 0 up front:
+            # root requirements*.txt manifests are implemented first, then
+            # pip-installed into the isolated venv, so the implementation
+            # wave's pytest runs can already import the declared deps.
+            manifest_wave, impl_wave, test_wave = partition_fanout_waves(
+                files_to_implement
+            )
+            results = []
+            if manifest_wave:
+                results.extend(
+                    await asyncio.gather(*[handle_file(f) for f in manifest_wave])
+                )
+                await auto_install_requirements(
+                    project_dir, [str(f.get("path")) for f in manifest_wave]
+                )
+            results.extend(
                 await asyncio.gather(*[handle_file(f) for f in impl_wave])
             )
             impl_wave_failed = [fp for fp, _, err in results if err is not None]
@@ -2792,6 +3040,31 @@ async def run_pipeline(
             else:
                 review_content = "All files successfully implemented and verified through self-healing loop."
 
+            # HONEST COVERAGE: "verified" above means each file passed ITS
+            # verification mode — for non-Python files that is the security
+            # audit alone (this pipeline has no JS/TS test runner). Spell the
+            # modes out so "completed" can never be read as "executed".
+            _mode_groups = {}
+            for _f in files_to_implement:
+                _rel = str(_f.get("path", "") or "")
+                if not _rel:
+                    continue
+                _mode_groups.setdefault(verification_mode(_rel), []).append(_rel)
+            if _mode_groups:
+                review_content += "\n\n## Verification coverage\n" + "\n".join(
+                    f"- {_mode}: {len(_paths)} file(s) — {', '.join(sorted(_paths))}"
+                    for _mode, _paths in sorted(_mode_groups.items())
+                )
+                if any(
+                    _mode.startswith("audit-only (non-Python")
+                    for _mode in _mode_groups
+                ):
+                    review_content += (
+                        "\nWARNING: non-Python files were NOT executed by any "
+                        "test runner — their verification is the security "
+                        "audit alone."
+                    )
+
             # CUSTOM: whole-project verification. The per-file loops execute
             # each test module in isolation, so they can never see cross-file
             # conflicts (a real job completed while bare `pytest` at its root
@@ -2824,6 +3097,12 @@ async def run_pipeline(
                         f"exit code: {full_suite_rc}"
                         f"\n\n```\n{full_suite_log.strip()}\n```"
                     )
+                    if full_suite_rc == 5:
+                        review_content += (
+                            "\n(exit 5 = pytest collected NO tests: for a "
+                            "non-Python project this gate verifies nothing — "
+                            "the product's own test suite was not run)"
+                        )
 
             review_art_id = await message_bus.publish_async(
                 Artifact(
@@ -2838,16 +3117,10 @@ async def run_pipeline(
             except Exception as e:
                 logger.warning(f"Failed to write review.md: {e}")
 
-            if full_suite_failed and full_suite_gate_enabled():
-                raise PipelineError(
-                    f"Whole-project pytest failed (exit {full_suite_rc}) after "
-                    "per-file verification — a cross-file conflict or "
-                    "integration failure the per-file loops cannot see; the "
-                    "log is recorded in review.md. Set GENIUS_FULL_SUITE_GATE=0 "
-                    "to demote this gate to report-only."
-                )
-
-            # Aggregate audit report
+            # Aggregate audit report — written BEFORE the full-suite gate can
+            # raise: a real gate failure used to leave the job with review.md
+            # but NO audit.md at all, silently discarding per-file audits
+            # that had all passed (they survived only in internal logs).
             consolidated_audit = (
                 "\n\n---\n\n".join(aggregated_audits)
                 if aggregated_audits
@@ -2865,6 +3138,15 @@ async def run_pipeline(
                 _write_text(audit_file, consolidated_audit)
             except Exception as e:
                 logger.warning(f"Failed to write audit.md: {e}")
+
+            if full_suite_failed and full_suite_gate_enabled():
+                raise PipelineError(
+                    f"Whole-project pytest failed (exit {full_suite_rc}) after "
+                    "per-file verification — a cross-file conflict or "
+                    "integration failure the per-file loops cannot see; the "
+                    "log is recorded in review.md. Set GENIUS_FULL_SUITE_GATE=0 "
+                    "to demote this gate to report-only."
+                )
 
             if stage_gate is not None:
                 await stage_gate("code")
@@ -2935,8 +3217,15 @@ async def run_pipeline(
                         client=client,
                         poll_timeout=poll_timeout,
                     )
+                    save_raw_response(project_dir, "final_review", final_review)
                     _verdict = parse_security_verdict(final_review)
                     if "[APPROVED]" in final_review:
+                        # Record the approval too: review.md must be able to
+                        # distinguish "final review approved" from "final
+                        # review never ran / crashed".
+                        _record_final_review(
+                            "\n\n## Final review (approved)\n" + final_review
+                        )
                         logger.info("Custom final review approved the implementation.")
                     elif _verdict is not None and not _verdict.get("blocking", True):
                         # A non-blocking verdict (e.g. codex-gpt5.6-sol via the
@@ -2957,6 +3246,11 @@ async def run_pipeline(
                         review_blocking = _verdict is not None and bool(
                             _verdict.get("blocking")
                         )
+                        # Record the review BEFORE the fix-plan call: if that
+                        # call dies, the strict gate below still fails the job
+                        # claiming the evidence "is recorded in review.md" — a
+                        # crash here used to lose the entire final review.
+                        _record_final_review("\n\n## Final review\n" + final_review)
                         fix_plan = await call_api(
                             claude_url,
                             api_key,
@@ -2967,6 +3261,7 @@ async def run_pipeline(
                             client=client,
                             poll_timeout=poll_timeout,
                         )
+                        save_raw_response(project_dir, "final_review_fix_plan", fix_plan)
                         _record_final_review(
                             "\n\n## Final review\n"
                             + final_review
@@ -3745,7 +4040,12 @@ async def run_e2e_pipeline(
                     # yields a spurious E999 SyntaxError that fails every attempt
                     # and dooms the whole e2e run; its content is written as-is.
                     if file_is_python:
-                        flake8_cmd = [sys.executable, "-m", "flake8", target_file_path]
+                        flake8_cmd = [
+                            verification_python(project_dir),
+                            "-m",
+                            "flake8",
+                            target_file_path,
+                        ]
                         flake8_code, flake8_out = await run_subprocess(
                             flake8_cmd, env=env
                         )
@@ -3766,7 +4066,12 @@ async def run_e2e_pipeline(
                     # would fail our verification non-deterministically. Each
                     # sibling's test is verified by its own task.
                     if file_is_python and os.path.exists(test_file_path):
-                        pytest_cmd = [sys.executable, "-m", "pytest", test_file_path]
+                        pytest_cmd = [
+                            verification_python(project_dir),
+                            "-m",
+                            "pytest",
+                            test_file_path,
+                        ]
                         pytest_code, pytest_out = await run_subprocess(
                             pytest_cmd, env=env, cwd=project_dir
                         )
@@ -3897,7 +4202,12 @@ async def run_e2e_pipeline(
 
                     # Run pytest on the generated test file (cwd = project
                     # root: the generated module lives outside the deliverable)
-                    pytest_cmd = [sys.executable, "-m", "pytest", test_file_path]
+                    pytest_cmd = [
+                        verification_python(project_dir),
+                        "-m",
+                        "pytest",
+                        test_file_path,
+                    ]
                     pytest_code, pytest_out = await run_subprocess(
                         pytest_cmd, env=env, cwd=project_dir
                     )
@@ -3924,16 +4234,26 @@ async def run_e2e_pipeline(
                 status_dict[file_path] = "completed"
                 update_progress_md(status_dict)
 
-        # Same two-phase ordering as the sequential fan-out: designed test
-        # modules only run once the implementations they exercise are final.
-        e2e_impl_wave = [
-            f for f in files_to_implement if not is_test_module(str(f.get("path", "")))
-        ]
-        e2e_test_wave = [
-            f for f in files_to_implement if is_test_module(str(f.get("path", "")))
-        ]
+        # Same wave ordering as the sequential fan-out: designed test modules
+        # only run once the implementations they exercise are final, and (with
+        # GENIUS_AUTO_INSTALL) root requirements*.txt manifests run first so
+        # the venv is provisioned before any implementation is verified.
+        e2e_manifest_wave, e2e_impl_wave, e2e_test_wave = partition_fanout_waves(
+            files_to_implement
+        )
         if degraded_mode():
-            results = list(
+            results = []
+            if e2e_manifest_wave:
+                results.extend(
+                    await asyncio.gather(
+                        *[process_e2e_file(f) for f in e2e_manifest_wave],
+                        return_exceptions=True,
+                    )
+                )
+                await auto_install_requirements(
+                    project_dir, [str(f.get("path")) for f in e2e_manifest_wave]
+                )
+            results.extend(
                 await asyncio.gather(
                     *[process_e2e_file(f) for f in e2e_impl_wave],
                     return_exceptions=True,
@@ -3945,7 +4265,9 @@ async def run_e2e_pipeline(
                     return_exceptions=True,
                 )
             )
-            paths = [f["path"] for f in e2e_impl_wave + e2e_test_wave]
+            paths = [
+                f["path"] for f in e2e_manifest_wave + e2e_impl_wave + e2e_test_wave
+            ]
             failed, summary = resolve_degraded_outcome(paths, results, "E2E Pipeline")
             if failed:
                 logger.warning(
@@ -3957,6 +4279,13 @@ async def run_e2e_pipeline(
                 )
                 return summary
         else:
+            if e2e_manifest_wave:
+                await gather_or_raise(
+                    *[process_e2e_file(f) for f in e2e_manifest_wave]
+                )
+                await auto_install_requirements(
+                    project_dir, [str(f.get("path")) for f in e2e_manifest_wave]
+                )
             await gather_or_raise(*[process_e2e_file(f) for f in e2e_impl_wave])
             await gather_or_raise(*[process_e2e_file(f) for f in e2e_test_wave])
 

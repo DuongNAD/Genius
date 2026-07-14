@@ -50,17 +50,21 @@ async def run_eval_gate(
     judge=None,
     now: Optional[float] = None,
     config=None,
+    eval_dir: Optional[str] = None,
 ) -> dict:
     """Grade ``workspace``, persist the score, diff vs the last baseline.
 
     Returns ``{"grade", "compare", "score_path", "baseline_path"}``.
     ``compare`` is ``None`` when there is no prior baseline. ``now`` is
     injectable so the persisted ``score-<ts>.json`` filename is
-    deterministic in tests.
+    deterministic in tests. ``eval_dir`` overrides where the score/baseline
+    JSON is persisted (the orchestrator passes the pipeline-internal
+    ``.genius/<slug>/logs/eval`` so eval state never lands in a
+    deliverable); default stays ``<workspace>/logs/eval``.
     """
     result = await grade(workspace, metrics, prompt=prompt, judge=judge, config=config)
 
-    eval_dir = _eval_dir(workspace)
+    eval_dir = eval_dir or _eval_dir(workspace)
     os.makedirs(eval_dir, exist_ok=True)
     ts = int(now if now is not None else time.time())
     score_path = os.path.join(eval_dir, f"score-{ts}.json")

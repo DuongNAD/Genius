@@ -7,8 +7,8 @@ does the (blocking) file read off the event loop.
 
 This reads what the pipeline already writes - root artifacts
 (``research.md``/``design.md``/``review.md``), generated ``*.py`` files,
-and the raw per-stage traces under ``logs/raw/`` - so no new capture step
-is needed.
+and the raw per-stage traces (``.genius/<slug>/logs/raw/`` post-separation,
+legacy ``logs/raw/`` still honored) - so no new capture step is needed.
 """
 
 import os
@@ -39,6 +39,12 @@ _SKIP_DIRS = {
     "build",
     "dist",
     ".mypy_cache",
+    # Pipeline internals: tester-GENERATED test modules and the auto-install
+    # venv live here — the pipeline itself keeps them out of the deliverable,
+    # the conformance walk and the whole-project gate, so a grade must not
+    # let them distort code metrics or judge context either.
+    ".genius",
+    ".genius_jobs",
 }
 
 _MAX_CODE_FILES = 100
@@ -75,18 +81,40 @@ def _collect_code_files(workspace: str) -> Dict[str, str]:
     return files
 
 
+def _trace_dirs(workspace: str) -> List[str]:
+    """Raw-trace directories for a workspace, newest layout first.
+
+    Post-separation the pipeline writes traces under
+    ``<workspace>/.genius/<slug>/logs/raw/``; the legacy ``logs/raw/`` root
+    location is still honored for old workspaces and hand-built fixtures.
+    """
+    dirs: List[str] = []
+    internal_root = os.path.join(workspace, ".genius")
+    if os.path.isdir(internal_root):
+        try:
+            slugs = sorted(os.listdir(internal_root))
+        except OSError:
+            slugs = []
+        for slug in slugs:
+            cand = os.path.join(internal_root, slug, "logs", "raw")
+            if os.path.isdir(cand):
+                dirs.append(cand)
+    legacy = os.path.join(workspace, "logs", "raw")
+    if os.path.isdir(legacy):
+        dirs.append(legacy)
+    return dirs
+
+
 def _collect_trace(workspace: str) -> str:
     """A trimmed digest of the raw per-stage traces, for judge context."""
-    raw_dir = os.path.join(workspace, "logs", "raw")
-    if not os.path.isdir(raw_dir):
-        return ""
     parts: List[str] = []
-    for name in sorted(os.listdir(raw_dir)):
-        if not name.endswith(".md"):
-            continue
-        parts.append(f"### {name}\n{_read_text(os.path.join(raw_dir, name))}")
-        if sum(len(p) for p in parts) >= _MAX_TRACE_CHARS:
-            break
+    for raw_dir in _trace_dirs(workspace):
+        for name in sorted(os.listdir(raw_dir)):
+            if not name.endswith(".md"):
+                continue
+            parts.append(f"### {name}\n{_read_text(os.path.join(raw_dir, name))}")
+            if sum(len(p) for p in parts) >= _MAX_TRACE_CHARS:
+                return "\n\n".join(parts)[:_MAX_TRACE_CHARS]
     return "\n\n".join(parts)[:_MAX_TRACE_CHARS]
 
 

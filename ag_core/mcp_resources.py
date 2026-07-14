@@ -25,7 +25,11 @@ _RESOURCE_ARTIFACTS = {
         "Requirements research produced by the research stage (researcher role)."
     ),
     "design.md": "Architecture design produced by the design stage (Claude).",
-    "review.md": "Code review + lint/test logs produced by the code stage (Codex).",
+    "review.md": (
+        "Verification summary assembled by the pipeline: per-file self-heal "
+        "results and verification coverage; plus conformance, whole-project "
+        "pytest and the final-review sections on the custom flow."
+    ),
     "audit.md": "Security audit produced by the security stage.",
     "deploy.md": "Deployment plan produced by the deploy stage (DevOps).",
     "plan.md": "End-to-end plan produced by the e2e pipeline (Claude).",

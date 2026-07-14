@@ -1,7 +1,7 @@
 """The Genius eval flywheel (R5).
 
 A grade layer over the traces the pipeline already captures
-(``orchestrator.save_raw_response`` -> ``projects/<slug>/logs/raw/``).
+(``orchestrator.save_raw_response`` -> ``.genius/<slug>/logs/raw/`` under the workspace).
 Mirrors the shape of google/agents-cli's eval loop
 (dataset -> generate -> grade -> compare) but stays local-first and
 provider-agnostic: no Google Cloud / ADK dependency.

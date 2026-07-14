@@ -340,6 +340,18 @@ def _stage_progress(job: Dict[str, Any]):
                 done = os.path.getmtime(path) >= started - _MTIME_SLACK_SECONDS
             except OSError:
                 done = False
+        if done and stage == "review" and fname == "review.md":
+            # Custom flow: the CODE stage writes review.md long before the
+            # final review APPENDS its section — freshness alone flipped this
+            # checkpoint done while the reviewer was still running (and kept
+            # it done forever if the reviewer crashed). Every final-review
+            # outcome (approved / non-blocking / blocking) now records a
+            # "## Final review" section, so require that marker.
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    done = "## Final review" in fh.read()
+            except OSError:
+                done = False
         stages.append(
             {
                 "stage": stage,
@@ -941,8 +953,8 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         require_approval = bool(arguments.get("require_approval", False))
         if require_approval and pipeline == "e2e":
             raise ValueError(
-                "require_approval is only supported for the 'sequential' "
-                "pipeline (the e2e variant has no stage gates)."
+                "require_approval is not supported for the 'e2e' pipeline "
+                "(it has no stage gates); use 'sequential' or 'custom'."
             )
         job_id = uuid.uuid4().hex
         if workspace and not _workspace_is_usable(workspace):

@@ -75,6 +75,25 @@ def test_timeout(default: float = DEFAULT_TEST_TIMEOUT) -> float:
     return default
 
 
+# Dependency auto-install (GENIUS_AUTO_INSTALL) shells out to ``python -m
+# venv`` and ``pip install``; a cold install of a heavy dependency tree
+# routinely exceeds the verification ceiling, so it gets its own knob.
+DEFAULT_INSTALL_TIMEOUT = 600.0
+
+
+def install_timeout(default: float = DEFAULT_INSTALL_TIMEOUT) -> float:
+    """Resolve the auto-install subprocess timeout from ``GENIUS_INSTALL_TIMEOUT``."""
+    raw = os.getenv("GENIUS_INSTALL_TIMEOUT")
+    if raw:
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return default
+
+
 def tail_text(text: str, limit: int = TAIL_CHARS) -> str:
     """Return the last ``limit`` characters of ``text`` (for error messages)."""
     text = (text or "").strip()

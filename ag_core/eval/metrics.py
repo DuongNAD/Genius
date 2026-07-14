@@ -197,43 +197,40 @@ def _m_code_syntax_valid(case: dict) -> Tuple[float, str]:
 
 
 def _m_design_wellformed(case: dict) -> Tuple[float, str]:
+    """Score design.md with the SAME machinery the pipeline itself uses.
+
+    A private single-fence extractor here used to diverge from the
+    orchestrator's parser in both directions (a pipeline-accepted design
+    scored "malformed" when an example JSON block preceded the plan; a
+    pydantic-rejected files-as-strings plan scored 5.0). Reusing
+    ``_iter_json_objects`` + the ``DesignPlan`` model keeps the metric's
+    notion of "well-formed" identical to what the pipeline accepts.
+    """
     text = (case.get("design") or "").strip()
     if not text:
         return 0.0, "no design artifact"
-    block = _extract_json_block(text)
-    if block is None:
-        return 1.0, "design contains no parseable JSON block"
-    try:
-        obj = json.loads(block)
-    except ValueError as e:
-        return 1.0, f"design JSON is invalid: {e}"
-    if not isinstance(obj, dict):
-        return 2.0, "design JSON is not an object"
-    files = obj.get("files")
-    has_files = isinstance(files, list) and len(files) > 0
-    has_name = bool(obj.get("project_name"))
-    if has_files and has_name:
-        return 5.0, f"well-formed DesignPlan with {len(files)} file(s)"
-    missing = []
-    if not has_name:
-        missing.append("project_name")
-    if not has_files:
-        missing.append("files[]")
-    return 3.0, f"design JSON parsed but missing {missing}"
+    from ag_core.models import DesignPlan
+    from ag_core.orchestration_helpers import _iter_json_objects
 
-
-def _extract_json_block(text: str):
-    """Return the JSON substring from a design artifact, or None.
-
-    Handles a ```json fenced block or a bare first ``{...}`` object.
-    """
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
-    if fence:
-        return fence.group(1)
-    start, end = text.find("{"), text.rfind("}")
-    if start != -1 and end > start:
-        return text[start : end + 1]
-    return None
+    fenced = re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    saw_candidate = False
+    last_error = "no JSON object with a files[] key found"
+    for chunk in fenced + [text]:
+        for obj in _iter_json_objects(chunk):
+            if not isinstance(obj, dict) or "files" not in obj:
+                continue
+            saw_candidate = True
+            try:
+                plan = DesignPlan(**obj)
+            except Exception as e:  # pydantic ValidationError et al.
+                last_error = str(e).splitlines()[0]
+                continue
+            if plan.files:
+                return 5.0, f"well-formed DesignPlan with {len(plan.files)} file(s)"
+            last_error = "files[] is empty"
+    if saw_candidate:
+        return 3.0, f"design JSON found but not a valid DesignPlan: {last_error}"
+    return 1.0, "design contains no parseable DesignPlan JSON"
 
 
 # --------------------------------------------------------------------------

@@ -206,6 +206,18 @@ def parse_security_verdict(security_report: str):
     for text in fenced + [security_report]:
         for obj in _iter_json_objects(text):
             if isinstance(obj, dict) and "blocking" in obj:
+                blocking = obj.get("blocking")
+                if isinstance(blocking, str):
+                    # LLMs routinely quote booleans ({"blocking": "false"});
+                    # raw truthiness would read that as BLOCKING and fail a
+                    # healthy job, so normalize strings here — every gate
+                    # (per-file and final review) consumes this dict.
+                    obj = dict(obj)
+                    obj["blocking"] = blocking.strip().lower() in (
+                        "true",
+                        "1",
+                        "yes",
+                    )
                 return obj
     return None
 
