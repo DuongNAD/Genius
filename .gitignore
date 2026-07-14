@@ -49,6 +49,8 @@ MANIFEST
 /test_generated.py
 /*.md.bak
 *.log
+# CLI-run job manifest journaled into the workspace root (runtime artifact)
+/job.json
 
 # Generated pipeline project outputs (demo runs; excluded from pytest too)
 /projects/
