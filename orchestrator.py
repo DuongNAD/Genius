@@ -1136,6 +1136,27 @@ def verification_mode(rel_path: str) -> str:
     return "generated pytest module executed"
 
 
+def file_quality_state(rel_path: str, failed: bool = False) -> str:
+    """Quality-ladder badge for one designed file (generated → tested →
+    security-accepted).
+
+    Complements the lifecycle strings ("in progress"/"completed"/"failed",
+    kept byte-identical for compatibility): a COMPLETED file earned exactly
+    the badges its verification mode can grant, so a non-Python file can
+    never read as tested — the gap behind a real mis-reported Next.js job.
+    """
+    if failed:
+        return "generated-only (verification FAILED)"
+    norm = str(rel_path or "").replace("\\", "/")
+    if not norm.endswith(".py"):
+        return "security-accepted (NOT tested: non-Python, no runner)"
+    if is_test_module(norm):
+        return "tested (executed under pytest)"
+    if is_pytest_infra(norm):
+        return "security-accepted (NOT tested: pytest infrastructure)"
+    return "tested, security-accepted"
+
+
 def design_scope_note(design_plan_content: str) -> str:
     """Suffix for security-audit prompts: the design's scope is the contract.
 
@@ -3159,6 +3180,19 @@ async def run_pipeline(
                         "audit alone."
                     )
 
+            # Quality ladder per file (proposal #2): completed ≠ shippable.
+            _failed_set = set(failed_files)
+            _state_lines = [
+                f"- {str(_f.get('path'))}: "
+                f"{file_quality_state(str(_f.get('path')), str(_f.get('path')) in _failed_set)}"
+                for _f in files_to_implement
+                if _f.get("path")
+            ]
+            if _state_lines:
+                review_content += "\n\n## File quality states\n" + "\n".join(
+                    sorted(_state_lines)
+                )
+
             # CUSTOM: whole-project verification. The per-file loops execute
             # each test module in isolation, so they can never see cross-file
             # conflicts (a real job completed while bare `pytest` at its root
@@ -3214,6 +3248,34 @@ async def run_pipeline(
                             full_suite_failed = True
                             if full_suite_rc in (0, 5):
                                 full_suite_rc = "project-gates"
+
+            # Job-level release verdict (proposal #2): "completed" alone must
+            # not read as shippable. Strict gates make a surviving job
+            # release-ready by construction; degraded / report-only runs get
+            # an honest NO. On the custom flow the final review can still
+            # veto AFTER this write — a blocking verdict fails the job, so a
+            # surviving YES stays truthful.
+            if failed_files or full_suite_failed:
+                _why = []
+                if failed_files:
+                    _why.append(f"{len(failed_files)} file(s) failed verification")
+                if full_suite_failed:
+                    _why.append("whole-project gates failed")
+                review_content += (
+                    "\n\n## Release readiness\nrelease-ready: NO — "
+                    + "; ".join(_why)
+                )
+            else:
+                _caveat = (
+                    " (final review still pending below)"
+                    if flow == "custom" and review_target_url
+                    else ""
+                )
+                review_content += (
+                    "\n\n## Release readiness\nrelease-ready: YES — all "
+                    "designed files passed their verification modes and the "
+                    f"whole-project gates raised no failures{_caveat}"
+                )
 
             review_art_id = await message_bus.publish_async(
                 Artifact(

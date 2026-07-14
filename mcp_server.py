@@ -1048,6 +1048,23 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         # stage output before approving/rejecting.
         if job["status"] in ("completed", "awaiting_approval"):
             view["artifacts"] = job["artifacts"]
+        if job["status"] == "completed":
+            # Quality ladder (proposal from a real mis-reported Next.js job):
+            # "completed" alone must not read as shippable. review.md is the
+            # canonical report; it carries an explicit release-readiness
+            # verdict since the same change. Absent marker (old workspaces,
+            # e2e flow) => None, not a claim either way.
+            review_md = os.path.join(job.get("workspace") or "", "review.md")
+            try:
+                with open(review_md, "r", encoding="utf-8", errors="replace") as fh:
+                    _rv = fh.read()
+                view["release_ready"] = (
+                    True
+                    if "release-ready: YES" in _rv
+                    else False if "release-ready: NO" in _rv else None
+                )
+            except OSError:
+                view["release_ready"] = None
         return json.dumps(view)
 
     if name in ("orchestrate_approve", "orchestrate_reject"):

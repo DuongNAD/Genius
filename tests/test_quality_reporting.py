@@ -204,3 +204,49 @@ def test_custom_review_stage_done_with_marker(tmp_path):
     stages, _ = mcp_server._stage_progress(_custom_job(tmp_path))
     by_name = {s["stage"]: s["state"] for s in stages}
     assert by_name["review"] == "done"
+
+
+# ------------------------------------------------------- quality ladder (#2)
+
+
+def test_file_quality_state_ladder():
+    assert orchestrator.file_quality_state("src/lib.py") == (
+        "tested, security-accepted"
+    )
+    assert "NOT tested: non-Python" in orchestrator.file_quality_state(
+        "src/app/route.ts"
+    )
+    assert orchestrator.file_quality_state("tests/test_app.py").startswith("tested")
+    assert "pytest infrastructure" in orchestrator.file_quality_state("conftest.py")
+    assert orchestrator.file_quality_state("a.py", failed=True) == (
+        "generated-only (verification FAILED)"
+    )
+
+
+def test_release_ready_flag_read_from_review_md(tmp_path):
+    (tmp_path / "review.md").write_text(
+        "summary\n\n## Release readiness\nrelease-ready: YES — all good",
+        encoding="utf-8",
+    )
+    job = {
+        "job_id": "b" * 32,
+        "status": "completed",
+        "workspace": str(tmp_path),
+        "pipeline": "custom",
+        "started_at": 0,
+        "artifacts": {},
+        "error": None,
+    }
+    import json as _json
+
+    mcp_server.ORCHESTRATION_JOBS[job["job_id"]] = job
+    try:
+        raw = asyncio.run(
+            mcp_server.dispatch_tool(
+                "orchestrate_status", {"job_id": job["job_id"]}
+            )
+        )
+    finally:
+        mcp_server.ORCHESTRATION_JOBS.pop(job["job_id"], None)
+    view = _json.loads(raw)
+    assert view.get("release_ready") is True
