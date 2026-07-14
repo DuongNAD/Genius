@@ -119,6 +119,25 @@ def test_export_is_deterministic(tmp_path):
     assert export_collab_log(ws) == export_collab_log(ws)
 
 
+def test_export_excludes_stale_traces_outside_current_job_window(tmp_path):
+    ws = _build_workspace(tmp_path)
+    stale = os.path.join(
+        ws, ".genius", "previous-project", "logs", "raw", "final_review.md"
+    )
+    future = os.path.join(
+        ws, ".genius", "future-project", "logs", "raw", "pitch.md"
+    )
+    _write(stale, "old run", mtime=_T0 - 3600)
+    _write(future, "future run", mtime=_T0 + 7200)
+
+    out = export_collab_log(ws)
+
+    rows = [ln for ln in out.splitlines() if ln.startswith("| ") and ".md |" in ln]
+    assert len(rows) == 6
+    assert "old run" not in out
+    assert "previous-project" not in out
+
+
 def test_flat_name_with_underscores(tmp_path):
     ws = str(tmp_path)
     raw = os.path.join(ws, ".genius", "slug", "logs", "raw")

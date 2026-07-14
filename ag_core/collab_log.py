@@ -116,9 +116,28 @@ def _classify(stem: str) -> Tuple[str, str, str]:
     return stem, "—", "—"
 
 
-def _trace_rows(workspace: str) -> List[Dict[str, object]]:
-    """One row per raw trace, sorted by ``(mtime, name)`` for a stable
-    chronology."""
+def _trace_rows(
+    workspace: str,
+    started_at: Optional[float] = None,
+    finished_at: Optional[float] = None,
+) -> List[Dict[str, object]]:
+    """Current-job trace rows sorted by ``(mtime, name)``.
+
+    A workspace can be reused for several project slugs, leaving old traces
+    under multiple ``.genius/<slug>`` directories.  When the job manifest has
+    timestamps, constrain the timeline to that run so the collaboration log
+    cannot attribute stale work to the current job.  With no usable manifest
+    window (standalone/legacy usage), retain the historical all-traces
+    behavior.
+    """
+    try:
+        lower = float(started_at) if started_at is not None else None
+    except (TypeError, ValueError, OverflowError):
+        lower = None
+    try:
+        upper = float(finished_at) if finished_at is not None else None
+    except (TypeError, ValueError, OverflowError):
+        upper = None
     rows: List[Dict[str, object]] = []
     for raw_dir in _trace_dirs(workspace):
         try:
@@ -132,6 +151,12 @@ def _trace_rows(workspace: str) -> List[Dict[str, object]]:
             try:
                 st = os.stat(path)
             except OSError:
+                continue
+            # A one-second tolerance covers coarse filesystem timestamp
+            # resolution without admitting traces from materially older runs.
+            if lower is not None and st.st_mtime < lower - 1.0:
+                continue
+            if upper is not None and st.st_mtime > upper + 1.0:
                 continue
             stage, subject, attempt = _classify(name[: -len(".md")])
             rows.append(
@@ -171,7 +196,11 @@ def export_collab_log(workspace: str) -> str:
     produces the identical string. Never raises on missing inputs.
     """
     manifest = _load_manifest(workspace) or {}
-    rows = _trace_rows(workspace)
+    rows = _trace_rows(
+        workspace,
+        started_at=manifest.get("started_at"),
+        finished_at=manifest.get("finished_at"),
+    )
 
     def field(key: str) -> str:
         value = manifest.get(key)
