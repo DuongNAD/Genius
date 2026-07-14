@@ -78,9 +78,15 @@ def check_agent_busy(agent_name: str) -> str:
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            placeholders = ",".join("?" for _ in names_to_check)
+            # Role aliases cap this at three values. Literal query shapes keep
+            # all names as bound parameters and avoid dynamic SQL entirely.
+            busy_queries = {
+                1: "SELECT 1 FROM agent_logs WHERE agent_name IN (?) AND status IN ('processing', 'started') LIMIT 1",
+                2: "SELECT 1 FROM agent_logs WHERE agent_name IN (?, ?) AND status IN ('processing', 'started') LIMIT 1",
+                3: "SELECT 1 FROM agent_logs WHERE agent_name IN (?, ?, ?) AND status IN ('processing', 'started') LIMIT 1",
+            }
             cursor.execute(
-                f"SELECT 1 FROM agent_logs WHERE agent_name IN ({placeholders}) AND status IN ('processing', 'started') LIMIT 1",
+                busy_queries[len(names_to_check)],
                 names_to_check,
             )
             if cursor.fetchone():

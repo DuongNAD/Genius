@@ -66,7 +66,6 @@ def test_auto_install_env_parsing(monkeypatch, raw, expected):
         "requirements-dev.txt",
         "requirements_ci.txt",
         "REQUIREMENTS.TXT",
-        "/requirements.txt",
     ],
 )
 def test_dependency_manifest_matches_root_requirements(path):
@@ -78,6 +77,9 @@ def test_dependency_manifest_matches_root_requirements(path):
     [
         "src/requirements.txt",
         "deploy\\requirements.txt",
+        "/requirements.txt",
+        "\\requirements.txt",
+        "C:\\requirements.txt",
         "requirements.md",
         "requirements",
         "pyproject.toml",
@@ -264,6 +266,24 @@ def test_installer_skips_never_written_manifest(tmp_path, monkeypatch):
     )
     with open(log_path, encoding="utf-8") as fh:
         assert "skipped: file was never written" in fh.read()
+
+
+def test_installer_rejects_absolute_manifest_without_reading_host(tmp_path, monkeypatch):
+    project = str(tmp_path / "projects" / "demo")
+    os.makedirs(project)
+    fake = SubprocessRecorder(project)
+    monkeypatch.setattr(orchestrator, "run_subprocess", fake)
+
+    asyncio.run(auto_install_requirements(project, ["/requirements.txt"]))
+
+    # The isolated venv may be created, but pip must never receive the host path.
+    assert len(fake.calls) == 1
+    assert "venv" in fake.calls[0]["cmd"]
+    log_path = os.path.join(
+        orchestrator.pipeline_internal_dir(project), "logs", "install.log"
+    )
+    with open(log_path, encoding="utf-8") as fh:
+        assert "skipped: unsafe manifest path" in fh.read()
 
 
 def test_installer_uses_install_timeout(tmp_path, monkeypatch):

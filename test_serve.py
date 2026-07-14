@@ -13,6 +13,7 @@ from serve import (
     wait_for_servers_ready,
     _prune_registry_entry,
     _resolve_registry_path,
+    _resolve_service_host,
     _startup_timeout,
 )
 
@@ -35,6 +36,18 @@ def test_resolve_registry_path_honours_explicit_env(tmp_path, monkeypatch):
     assert path == str(target)
     # Parent directory must have been created.
     assert target.parent.is_dir()
+
+
+def test_service_host_defaults_to_loopback(monkeypatch):
+    monkeypatch.delenv("GENIUS_SKILL_HOST", raising=False)
+    monkeypatch.delenv("GENIUS_BIND_HOST", raising=False)
+    assert _resolve_service_host("GENIUS_SKILL_HOST") == "127.0.0.1"
+
+
+def test_service_host_specific_override_wins(monkeypatch):
+    monkeypatch.setenv("GENIUS_BIND_HOST", "127.0.0.2")
+    monkeypatch.setenv("GENIUS_HUB_HOST", "0.0.0.0")
+    assert _resolve_service_host("GENIUS_HUB_HOST") == "0.0.0.0"
 
 
 def test_normalize_roles():

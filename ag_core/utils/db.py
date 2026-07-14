@@ -268,6 +268,18 @@ def _log_conversation_impl(conn, prompt: str, result: str):
 # the anti-replay DELETEs in the JWT layer).
 _DEFAULT_HISTORY_MAX_ROWS = 100000
 _HISTORY_TABLES = ("conversations", "agent_logs")
+_HISTORY_QUERIES = {
+    "conversations": (
+        "DELETE FROM conversations WHERE timestamp < datetime('now', ?)",
+        "SELECT id FROM conversations ORDER BY id DESC LIMIT 1 OFFSET ?",
+        "DELETE FROM conversations WHERE id <= ?",
+    ),
+    "agent_logs": (
+        "DELETE FROM agent_logs WHERE timestamp < datetime('now', ?)",
+        "SELECT id FROM agent_logs ORDER BY id DESC LIMIT 1 OFFSET ?",
+        "DELETE FROM agent_logs WHERE id <= ?",
+    ),
+}
 
 
 def _int_env(name: str, default: int) -> int:
@@ -306,9 +318,10 @@ def _prune_history_impl(conn, max_rows=None, max_age_days=None):
         return
     cursor = conn.cursor()
     for table in _HISTORY_TABLES:  # fixed names, never user input
+        age_sql, boundary_sql, delete_sql = _HISTORY_QUERIES[table]
         if max_age_days > 0:
             cursor.execute(
-                f"DELETE FROM {table} WHERE timestamp < datetime('now', ?)",
+                age_sql,
                 (f"-{int(max_age_days)} days",),
             )
         if max_rows > 0:
@@ -316,11 +329,11 @@ def _prune_history_impl(conn, max_rows=None, max_age_days=None):
             # row and delete everything at or below it. Uses the PK index — no
             # full scan or big IN (...) list.
             boundary = cursor.execute(
-                f"SELECT id FROM {table} ORDER BY id DESC LIMIT 1 OFFSET ?",
+                boundary_sql,
                 (max_rows,),
             ).fetchone()
             if boundary:
-                cursor.execute(f"DELETE FROM {table} WHERE id <= ?", (boundary[0],))
+                cursor.execute(delete_sql, (boundary[0],))
     conn.commit()
 
 

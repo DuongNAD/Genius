@@ -64,6 +64,17 @@ def test_detect_orders_install_then_declared_scripts(tmp_path, monkeypatch):
     assert all(isinstance(g[2], float) for g in gates)
 
 
+def test_detect_uses_npm_ci_when_lockfile_exists(tmp_path, monkeypatch):
+    _write_pkg(tmp_path, {"test": "vitest run"})
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/npm")
+
+    gates = detect_project_gates(str(tmp_path))
+
+    assert gates[0][0] == "npm ci"
+    assert "ci" in gates[0][1]
+
+
 def test_detect_bad_package_json_is_soft(tmp_path, monkeypatch):
     (tmp_path / "package.json").write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/npm")
@@ -106,6 +117,27 @@ def test_gates_install_failure_short_circuits(npm_project, monkeypatch):
     assert failed is True
     assert len(fake.calls) == 1
     assert "remaining gates skipped" in section
+
+
+def test_gates_fail_closed_when_npm_is_missing(tmp_path, monkeypatch):
+    _write_pkg(tmp_path, {"test": "vitest run"})
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+
+    failed, section = asyncio.run(_run_project_gates(str(tmp_path)))
+
+    assert failed is True
+    assert "npm gate setup" in section
+    assert "npm is unavailable" in section
+
+
+def test_gates_fail_closed_when_package_json_is_invalid(tmp_path, monkeypatch):
+    (tmp_path / "package.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/npm")
+
+    failed, section = asyncio.run(_run_project_gates(str(tmp_path)))
+
+    assert failed is True
+    assert "invalid manifest" in section
 
 
 def test_gates_test_failure_marks_failed_but_continues(npm_project, monkeypatch):

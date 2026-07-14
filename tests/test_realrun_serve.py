@@ -30,14 +30,13 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _occupy_port() -> socket.socket:
     """Bind and listen on an OS-assigned port, keeping it occupied.
 
-    Bound on the wildcard address: on Windows that conflicts with a later
-    server bind of either kind (0.0.0.0 — the skill-server default — or
-    127.0.0.1 via GENIUS_SKILL_HOST/GENIUS_BIND_HOST). The reverse does NOT
-    hold: a loopback-bound blocker coexists with a later wildcard bind, and
-    the fallback under test would silently stop triggering.
+    Bound on loopback, matching the secure skill-server default. Deployments
+    that opt in to a wildcard bind exercise the same fallback code path; using
+    the exact default address keeps this real-socket test portable on macOS,
+    where a wildcard blocker can coexist with a later loopback listener.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("0.0.0.0", 0))
+    sock.bind(("127.0.0.1", 0))
     sock.listen(1)
     return sock
 

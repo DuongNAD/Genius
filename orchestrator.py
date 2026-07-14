@@ -804,8 +804,18 @@ def is_dependency_manifest(rel_path: str) -> bool:
     pin files (``deploy/requirements.txt``) and other manifest formats stay
     ordinary designed files.
     """
-    norm = str(rel_path or "").replace("\\", "/").strip("/")
-    if not norm or "/" in norm:
+    norm = str(rel_path or "").replace("\\", "/")
+    # Do not normalize a leading slash away: ``os.path.join(project_dir,
+    # "/requirements.txt")`` discards ``project_dir`` and targets the host
+    # filesystem.  ``safe_join`` also rejects this later, but the predicate is
+    # a security boundary of its own because degraded fan-out may still call
+    # the installer after the file-generation task failed.
+    if (
+        not norm
+        or norm.startswith("/")
+        or (len(norm) > 1 and norm[1] == ":")
+        or "/" in norm
+    ):
         return False
     return re.fullmatch(r"requirements[\w.-]*\.txt", norm, re.IGNORECASE) is not None
 
@@ -893,7 +903,25 @@ async def auto_install_requirements(project_dir: str, manifest_paths: list) -> N
                 )
                 return
         for rel in sorted(str(p) for p in manifest_paths):
-            manifest = os.path.join(project_dir, rel)
+            # Defence in depth: callers should pass only values accepted by
+            # ``is_dependency_manifest``, but never let a direct or future
+            # caller turn ``pip -r`` into an arbitrary host-file read.
+            if not is_dependency_manifest(rel):
+                logger.warning(
+                    "Auto-install: unsafe/non-root manifest path skipped: %r", rel
+                )
+                log_sections.append(
+                    f"$ pip install -r {rel}\n[skipped: unsafe manifest path]"
+                )
+                continue
+            try:
+                manifest = safe_join(project_dir, rel)
+            except PipelineError:
+                logger.warning("Auto-install: manifest escaped project: %r", rel)
+                log_sections.append(
+                    f"$ pip install -r {rel}\n[skipped: unsafe manifest path]"
+                )
+                continue
             if not os.path.exists(manifest):
                 # The coder may have failed to produce the file; its wave-0
                 # task already recorded that failure — nothing to install.
@@ -1044,8 +1072,13 @@ def detect_project_gates(project_dir: str) -> list:
         base = [npm] + args
         return ["cmd.exe", "/c"] + base if os.name == "nt" else base
 
+    lock_path = os.path.join(project_dir, "package-lock.json")
+    install_verb = "ci" if os.path.isfile(lock_path) else "install"
     gates = [
-        ("npm install", _cmd(["install", "--no-audit", "--no-fund"]))
+        (
+            f"npm {install_verb}",
+            _cmd([install_verb, "--no-audit", "--no-fund"]),
+        )
     ]
     for script in ("test", "lint", "build"):
         if script in scripts:
@@ -1064,6 +1097,17 @@ async def _run_project_gates(project_dir: str) -> tuple[bool, str]:
     """
     gates = detect_project_gates(project_dir)
     if not gates:
+        # No package.json means this simply is not an npm project.  If the
+        # manifest does exist, however, an empty detection result means the
+        # requested gate could not even start (invalid JSON or npm missing).
+        # Treat that as a failed verification instead of a false green.
+        if os.path.isfile(os.path.join(project_dir, "package.json")):
+            return (
+                True,
+                "### npm gate setup\nexit code: unavailable\n\n"
+                "```\npackage.json exists, but npm gates could not be "
+                "configured (invalid manifest or npm is unavailable).\n```",
+            )
         return False, ""
     env = os.environ.copy()
     # Never watch mode / interactive wizards inside a pipeline.
@@ -1081,8 +1125,8 @@ async def _run_project_gates(project_dir: str) -> tuple[bool, str]:
         if code != 0:
             failed = True
             logger.warning("Project gate '%s' failed (exit %s).", name, code)
-            if name == "npm install":
-                parts.append("(npm install failed — remaining gates skipped)")
+            if name in ("npm install", "npm ci"):
+                parts.append(f"({name} failed — remaining gates skipped)")
                 break
     return failed, "\n\n".join(parts)
 

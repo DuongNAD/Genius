@@ -460,16 +460,24 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             await worker_registry.unregister(registered_worker_id, websocket)
 
 
-async def start_hub_server(port: int):
-    # Default 0.0.0.0 (the hub is auth-protected and Docker maps its port);
-    # `or` so a blank GENIUS_HUB_HOST from .env is treated as unset. Set
-    # GENIUS_HUB_HOST=127.0.0.1 to restrict it to loopback on bare metal.
-    # The specific env wins over GENIUS_BIND_HOST (generic, all servers).
-    hub_host = (
-        os.environ.get("GENIUS_HUB_HOST")
+def _resolve_service_host(specific_env: str) -> str:
+    """Resolve a service bind host with a secure bare-metal default.
+
+    Docker/LAN deployments opt in to ``0.0.0.0`` through the per-service
+    variable; a plain local invocation should not expose the control plane to
+    every network interface merely because authentication is configured.
+    """
+    return (
+        os.environ.get(specific_env)
         or os.environ.get("GENIUS_BIND_HOST")
-        or "0.0.0.0"
+        or "127.0.0.1"
     )
+
+
+async def start_hub_server(port: int):
+    # Specific override wins over GENIUS_BIND_HOST; Docker declares 0.0.0.0
+    # explicitly, while bare-metal defaults to loopback.
+    hub_host = _resolve_service_host("GENIUS_HUB_HOST")
     config = uvicorn.Config(app, host=hub_host, port=port, log_level="info", ws="auto")
     server = uvicorn.Server(config)
     # Drive the lifecycle manually (startup -> main_loop -> shutdown) instead of
@@ -779,15 +787,9 @@ async def start_server(role: str, port: int):
     app = get_api_app(role)
 
     def _make_server(bind_port: int) -> uvicorn.Server:
-        # Default 0.0.0.0 (skill servers are JWT-protected and Docker maps
-        # their ports); `or` so a blank GENIUS_SKILL_HOST is treated as unset.
-        # Set GENIUS_SKILL_HOST=127.0.0.1 to keep them on loopback on bare
-        # metal. The specific env wins over GENIUS_BIND_HOST (generic).
-        skill_host = (
-            os.environ.get("GENIUS_SKILL_HOST")
-            or os.environ.get("GENIUS_BIND_HOST")
-            or "0.0.0.0"
-        )
+        # Specific override wins over GENIUS_BIND_HOST; Docker declares
+        # 0.0.0.0 explicitly, while bare-metal defaults to loopback.
+        skill_host = _resolve_service_host("GENIUS_SKILL_HOST")
         config = uvicorn.Config(
             app,
             host=skill_host,

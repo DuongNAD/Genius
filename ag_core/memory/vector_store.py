@@ -71,7 +71,16 @@ class SimpleTFIDFEmbedding:
             if total > 0:
                 for word, count in counter.items():
                     # Deterministic hash to map word to index
-                    word_hash = int(hashlib.md5(word.encode("utf-8")).hexdigest(), 16)
+                    # This is a stable feature-bucketing hash, not a security
+                    # primitive.  Mark it explicitly so FIPS/security scanners
+                    # do not treat the intentional compatibility-preserving MD5
+                    # use as cryptography.
+                    word_hash = int(
+                        hashlib.md5(
+                            word.encode("utf-8"), usedforsecurity=False
+                        ).hexdigest(),
+                        16,
+                    )
                     idx = word_hash % self.vector_dim
                     vector[idx] += count / total
                 norm = math.sqrt(sum(v * v for v in vector))
