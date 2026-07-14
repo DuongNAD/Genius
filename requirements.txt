@@ -2,23 +2,25 @@
 # CI all install from this file — loose `>=` pins let their environments
 # drift apart silently. Bump versions deliberately, on one machine, and let
 # the others pick the change up via git.
-pydantic==2.12.5
+pydantic==2.13.4
 tenacity==9.1.4
 PyYAML==6.0.3
-pytest==9.0.3
+pytest==9.1.1
 pathspec==1.1.1
-tiktoken==0.12.0
+tiktoken==0.13.0
 httpx==0.28.1
 python-dotenv==1.2.2
-fastapi==0.135.1
+fastapi==0.139.0
 # >=0.46 satisfies google-antigravity (installed alongside the agy CLI) and, at
 # 0.51, its `ws="auto"` resolves to the new websockets-sansio implementation —
 # so the hub/dashboard servers stop importing the deprecated `websockets.legacy`
 # module (validated: WS test suite passes with zero legacy DeprecationWarnings).
 uvicorn==0.51.0
 flake8==7.3.0
-websockets==16.0
-requests==2.32.5
+websockets==16.1
+# 2.33.0 fixed CVE-2026-25645 / PYSEC-2026-2275; keep the current patched
+# release so installs do not retain the vulnerable deterministic extraction path.
+requests==2.34.2
 pytest-asyncio==1.4.0
 # Per-test hang backstop (see pytest.ini `timeout`): a wedged WS/subprocess
 # test must fail with stack dumps instead of hanging CI forever.
@@ -30,7 +32,7 @@ pytest-timeout==2.4.0
 # three machines and CI exercise the same multi-language path. Deliberately
 # NOT tree-sitter-language-pack: its 1.x line swapped in an undocumented
 # PyO3 binding with a different node API.
-tree-sitter==0.25.2
+tree-sitter==0.26.0
 tree-sitter-javascript==0.25.0
 tree-sitter-typescript==0.23.2
 tree-sitter-go==0.25.0
@@ -38,7 +40,7 @@ tree-sitter-go==0.25.0
 # CLI pipeline (installed via guarded uvloop.install() in serve.py /
 # orchestrator.py; uvicorn.run entrypoints pick it up automatically).
 # No Windows build exists — do NOT carry this line to the win branch.
-uvloop==0.21.0
+uvloop==0.22.1
 # Official MCP SDK — powers the spec-compliant stdio transport that Antigravity
 # (and any MCP client) consumes: `python mcp_server.py stdio` builds an
 # mcp.server.Server that wraps the in-process dispatch_tool engine. Gives
