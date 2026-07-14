@@ -11,6 +11,7 @@ import httpx
 import re
 import shutil
 import time
+import uuid
 import email.utils
 from datetime import timezone
 from tenacity import (
@@ -463,6 +464,79 @@ async def _emit_hackathon_artifacts(
         logger.info("[hackathon] ai_collaboration_log.md written.")
     except Exception as e:  # noqa: BLE001 - best-effort by contract.
         logger.warning("[hackathon] collab log skipped (non-fatal): %s", e)
+
+
+def _write_job_manifest(workspace: str, manifest: dict) -> None:
+    """Best-effort atomic ``job.json`` write for CLI runs (MCP manifest shape).
+
+    Gives ``ag_core/collab_log.py`` (and any other manifest reader) the same
+    job metadata an MCP-driven run gets from ``mcp_server._journal_job`` —
+    same tmp+``os.replace`` atomicity, same field names. Failures are logged
+    and swallowed: journaling must never fail a run.
+    """
+    path = os.path.join(workspace, "job.json")
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(workspace, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError as e:
+        logger.warning("[cli-journal] job.json write skipped (non-fatal): %s", e)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+async def run_cli_journaled(pipeline_coro_factory, *, workspace, pipeline, prompt):
+    """Run a pipeline coroutine with start/finish ``job.json`` journaling.
+
+    The CLI counterpart of the MCP server's per-transition ``_journal_job``:
+    a ``python orchestrator.py`` run journals ``running`` before the pipeline
+    and the terminal ``completed``/``failed`` (+ ``finished_at``) after, so a
+    CLI workspace carries the same job metadata an MCP job dir does — the AI
+    collaboration log's Job table in particular. After the final manifest
+    write, the collab log (if the run emitted one) is re-exported so the
+    shipped log reflects the terminal status instead of "running". Exceptions
+    from the pipeline propagate unchanged; journaling itself is best-effort.
+    """
+    ws = os.path.abspath(workspace or os.getcwd())
+    manifest = {
+        "job_id": uuid.uuid4().hex,
+        "status": "running",
+        "pipeline": pipeline,
+        "prompt": prompt,
+        "error": None,
+        "workspace": ws,
+        "started_at": time.time(),
+        "finished_at": None,
+        "require_approval": False,
+        "awaiting_stage": None,
+        "journaled_by": "cli",
+    }
+    _write_job_manifest(ws, manifest)
+    try:
+        result = await pipeline_coro_factory()
+        manifest["status"] = "completed"
+        return result
+    except BaseException as e:
+        manifest["status"] = "failed"
+        manifest["error"] = str(e) or e.__class__.__name__
+        raise
+    finally:
+        manifest["finished_at"] = time.time()
+        _write_job_manifest(ws, manifest)
+        try:
+            from ag_core.collab_log import refresh_log_if_present
+
+            if refresh_log_if_present(ws):
+                logger.info(
+                    "[cli-journal] ai_collaboration_log.md refreshed with the "
+                    "terminal job status."
+                )
+        except Exception as e:  # noqa: BLE001 - best-effort by contract.
+            logger.warning("[cli-journal] collab log refresh skipped: %s", e)
 
 
 def resolve_degraded_outcome(paths, results, label):
@@ -4769,56 +4843,68 @@ def main():
     try:
         if args.pipeline == "e2e":
             asyncio.run(
-                run_e2e_pipeline(
-                    prompt=args.prompt,
-                    grok_cmd=args.grok_cmd,
-                    claude_cmd=args.claude_cmd,
-                    codex_cmd=args.codex_cmd,
-                    tester_cmd=args.tester_cmd,
+                run_cli_journaled(
+                    lambda: run_e2e_pipeline(
+                        prompt=args.prompt,
+                        grok_cmd=args.grok_cmd,
+                        claude_cmd=args.claude_cmd,
+                        codex_cmd=args.codex_cmd,
+                        tester_cmd=args.tester_cmd,
+                        workspace=args.workspace,
+                        researcher_url=args.researcher_url,
+                        claude_url=args.claude_url,
+                        codex_url=args.codex_url,
+                        tester_url=args.tester_url,
+                        api_key_override=args.api_key_override,
+                        poll_timeout=args.poll_timeout,
+                        max_retries=args.max_retries,
+                        max_debate_rounds=args.max_debate_rounds,
+                        distributed=args.distributed,
+                    ),
                     workspace=args.workspace,
-                    researcher_url=args.researcher_url,
-                    claude_url=args.claude_url,
-                    codex_url=args.codex_url,
-                    tester_url=args.tester_url,
-                    api_key_override=args.api_key_override,
-                    poll_timeout=args.poll_timeout,
-                    max_retries=args.max_retries,
-                    max_debate_rounds=args.max_debate_rounds,
-                    distributed=args.distributed,
+                    pipeline=args.pipeline,
+                    prompt=args.prompt,
                 )
             )
         else:
             asyncio.run(
-                run_pipeline(
-                    prompt=args.prompt,
-                    grok_cmd=args.grok_cmd,
-                    claude_cmd=args.claude_cmd,
-                    antigravity_cmd=args.antigravity_cmd,
-                    codex_cmd=args.codex_cmd,
-                    tester_cmd=args.tester_cmd,
-                    security_cmd=args.security_cmd,
-                    devops_cmd=args.devops_cmd,
-                    grok_args=args.grok_args,
-                    claude_args=args.claude_args,
-                    antigravity_args=args.antigravity_args,
-                    codex_args=args.codex_args,
-                    tester_args=args.tester_args,
-                    security_args=args.security_args,
-                    devops_args=args.devops_args,
+                run_cli_journaled(
+                    lambda: run_pipeline(
+                        prompt=args.prompt,
+                        grok_cmd=args.grok_cmd,
+                        claude_cmd=args.claude_cmd,
+                        antigravity_cmd=args.antigravity_cmd,
+                        codex_cmd=args.codex_cmd,
+                        tester_cmd=args.tester_cmd,
+                        security_cmd=args.security_cmd,
+                        devops_cmd=args.devops_cmd,
+                        grok_args=args.grok_args,
+                        claude_args=args.claude_args,
+                        antigravity_args=args.antigravity_args,
+                        codex_args=args.codex_args,
+                        tester_args=args.tester_args,
+                        security_args=args.security_args,
+                        devops_args=args.devops_args,
+                        workspace=args.workspace,
+                        researcher_url=args.researcher_url,
+                        claude_url=args.claude_url,
+                        codex_url=args.codex_url,
+                        tester_url=args.tester_url,
+                        security_url=args.security_url,
+                        devops_url=args.devops_url,
+                        api_key_override=args.api_key_override,
+                        poll_timeout=args.poll_timeout,
+                        interactive=args.interactive,
+                        max_retries=args.max_retries,
+                        max_debate_rounds=args.max_debate_rounds,
+                        distributed=args.distributed,
+                        flow=(
+                            "custom" if args.pipeline == "custom" else "sequential"
+                        ),
+                    ),
                     workspace=args.workspace,
-                    researcher_url=args.researcher_url,
-                    claude_url=args.claude_url,
-                    codex_url=args.codex_url,
-                    tester_url=args.tester_url,
-                    security_url=args.security_url,
-                    devops_url=args.devops_url,
-                    api_key_override=args.api_key_override,
-                    poll_timeout=args.poll_timeout,
-                    interactive=args.interactive,
-                    max_retries=args.max_retries,
-                    max_debate_rounds=args.max_debate_rounds,
-                    distributed=args.distributed,
-                    flow=("custom" if args.pipeline == "custom" else "sequential"),
+                    pipeline=args.pipeline,
+                    prompt=args.prompt,
                 )
             )
     except PipelineError as e:

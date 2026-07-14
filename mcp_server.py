@@ -692,6 +692,17 @@ async def _run_orchestration(
             )
         job["finished_at"] = time.time()
         _journal_job(job)
+        # Hackathon-mode runs export ai_collaboration_log.md BEFORE the job
+        # reaches its terminal state, so the shipped log would say "running"
+        # forever. Now that the terminal manifest is journaled, re-export the
+        # (deterministic) log if this run emitted one. Best-effort: never
+        # breaks job completion. No-op for every non-hackathon job.
+        try:
+            from ag_core.collab_log import refresh_log_if_present
+
+            refresh_log_if_present(workspace or os.getcwd())
+        except Exception:  # noqa: BLE001 - the refresh must never break a job
+            pass
         watcher.cancel()
         try:
             await watcher

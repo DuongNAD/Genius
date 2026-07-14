@@ -15,6 +15,7 @@ from ag_core.collab_log import (  # noqa: E402
     _review_section,
     export_collab_log,
     main,
+    refresh_log_if_present,
 )
 
 _JOB_ID = "a" * 32
@@ -139,6 +140,19 @@ def test_cli_main(tmp_path, capsys):
     out_file = str(tmp_path / "log.md")
     assert main([ws, "--out", out_file]) == 0
     with open(out_file, "r", encoding="utf-8") as fh:
+        assert fh.read() == export_collab_log(ws)
+
+
+def test_refresh_log_if_present(tmp_path):
+    ws = _build_workspace(tmp_path)
+    # Absent -> False, and the file is NOT created.
+    assert refresh_log_if_present(ws) is False
+    assert not os.path.exists(os.path.join(ws, "ai_collaboration_log.md"))
+    # Present (stale content) -> True, rewritten with the real export.
+    log_path = os.path.join(ws, "ai_collaboration_log.md")
+    _write(log_path, "STALE")
+    assert refresh_log_if_present(ws) is True
+    with open(log_path, encoding="utf-8") as fh:
         assert fh.read() == export_collab_log(ws)
 
 

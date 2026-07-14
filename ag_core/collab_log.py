@@ -266,6 +266,27 @@ def export_collab_log(workspace: str) -> str:
     return "\n".join(lines)
 
 
+def refresh_log_if_present(workspace: str) -> bool:
+    """Re-export ``ai_collaboration_log.md`` IN PLACE if the run emitted it.
+
+    The pipeline exports the log BEFORE the driving process finalizes the
+    ``job.json`` manifest (terminal status + ``finished_at``), so the shipped
+    log would say "running" forever. Callers that finalize the manifest (the
+    orchestrator CLI journal, the MCP job-completion path) call this right
+    after their last manifest write; the export is deterministic, so the
+    rewrite is safe. Returns ``True`` when a log existed and was rewritten,
+    ``False`` when there was nothing to refresh (never creates the file).
+    May raise ``OSError`` — callers treat the refresh as best-effort.
+    """
+    path = os.path.join(workspace, "ai_collaboration_log.md")
+    if not os.path.isfile(path):
+        return False
+    text = export_collab_log(workspace)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return True
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point. Returns 0 on success, 2 on usage errors."""
     args = list(sys.argv[1:] if argv is None else argv)
