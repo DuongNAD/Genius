@@ -114,7 +114,11 @@ jobs:
             http://127.0.0.1:8005/run)
           echo "unauthenticated /run -> HTTP $code"
           test "$code" = "400" -o "$code" = "401"
-          docker exec genius-smoke python - <<'PY'
+          # -i is REQUIRED: without it docker exec does not forward the heredoc
+          # to the container's `python -` stdin, so the script runs empty, exits
+          # 0, and the authenticated assertion below never executes — a silent
+          # false positive (the CI log showed no "authenticated /run" line).
+          docker exec -i genius-smoke python - <<'PY'
           import json
           import os
           import time
