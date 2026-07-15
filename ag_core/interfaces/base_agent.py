@@ -101,30 +101,44 @@ class BaseAgent(abc.ABC):
             )
         return []
 
-    def scan_context(self, context_data: dict | None = None):
+    def scan_context(self, context_data: dict | None = None, task_text: str = ""):
         """Resolve the project file map (scanning cwd unless context_data is
         supplied) and render it as a prompt context block.
 
         Returns (scanned_files, context_str).
+
+        A SELF-scanned workspace is trimmed to GENIUS_CONTEXT_TOKEN_BUDGET via
+        the repo graph (identity passthrough under the budget) — the pipeline
+        budgets at its own call sites, but the direct paths (skill /run with no
+        context, MCP single-agent tools, worker, run.py CLIs) reach this scan
+        unprotected, and an unbudgeted repo blows the provider argv/context
+        limits. Supplied context_data is the caller's contract and is rendered
+        untouched. ``task_text`` seeds the graph ranking (files the task names
+        rank first).
         """
         if context_data is not None:
             scanned_files = context_data
         else:
             from ag_core.scanner.project_scanner import ProjectScanner
+            from ag_core.scanner.repo_graph import build_budgeted_context
 
             config = getattr(self, "config", None)
             exclude_patterns = config.scanner.exclude_patterns if config else None
             scanner = ProjectScanner(
                 root_dir=os.getcwd(), extra_ignores=exclude_patterns
             )
-            scanned_files = scanner.scan()
+            scanned_files = build_budgeted_context(
+                scanner.scan(), task_text=task_text
+            )
 
         context = ""
         for filepath, file_content in scanned_files.items():
             context += f"\n--- File: {filepath} ---\n{file_content}\n"
         return scanned_files, context
 
-    async def scan_context_async(self, context_data: dict | None = None):
+    async def scan_context_async(
+        self, context_data: dict | None = None, task_text: str = ""
+    ):
         """scan_context with the full-tree disk read off the event loop.
 
         Every agent's async run() calls this when no context was supplied;
@@ -134,7 +148,7 @@ class BaseAgent(abc.ABC):
         """
         if context_data is not None:
             return self.scan_context(context_data)
-        return await asyncio.to_thread(self.scan_context, None)
+        return await asyncio.to_thread(self.scan_context, None, task_text)
 
     def format_history(self) -> str:
         """Render self.history as a prompt preamble (empty string if none)."""
@@ -345,7 +359,7 @@ class BaseAgent(abc.ABC):
         effort: str | None = None,
     ) -> str:
         user_prompt, _ = self._route_slash_command(self._resolve_user_prompt(prompt))
-        _, context = await self.scan_context_async(context_data)
+        _, context = await self.scan_context_async(context_data, task_text=user_prompt)
         memory_context = ""
         if self.USES_MEMORY:
             memory_context = await self._memory_context_block(user_prompt)

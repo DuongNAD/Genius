@@ -47,7 +47,7 @@ class TesterAgent(BaseAgent):
         effort = effort or self.directives.effort
 
         # Scan project files (or use provided context_data) and format context
-        _, context = await self.scan_context_async(context_data)
+        _, context = await self.scan_context_async(context_data, task_text=user_prompt)
         full_prompt = self._compose_full_prompt(user_prompt, "", context)
 
         from ag_core.utils.prompt_templates import TESTER_PROMPT

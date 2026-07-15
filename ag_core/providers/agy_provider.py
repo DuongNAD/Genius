@@ -26,6 +26,7 @@ Auth is shared with the Antigravity IDE login - no API key is needed (the
 """
 
 import os
+import sys
 from typing import Any, Dict
 
 from ag_core.interfaces.base_provider import BaseProvider, ProviderResponse, TokenUsage
@@ -42,6 +43,33 @@ from ag_core.utils.cli_runner import (
 # floor) so it can exit gracefully with its own error message first.
 _PRINT_TIMEOUT_MARGIN = 10
 _PRINT_TIMEOUT_FLOOR = 30
+
+# The prompt travels as ONE argv string (--print=<prompt>), so it is bounded
+# by the OS argument limits, not by the model's context window: Windows
+# CreateProcess caps the whole command line at ~32K chars, Linux caps a single
+# argv string at MAX_ARG_STRLEN (128 KiB), macOS caps argv+env at ARG_MAX
+# (1 MiB total). An over-limit spawn dies as OSError(E2BIG) — an exception
+# FallbackProvider does NOT catch — so the guard below converts the condition
+# into a clean RuntimeError BEFORE spawning, letting the chain fall through to
+# a stdin-capable backend (claude/codex). Tune with GENIUS_AGY_MAX_PROMPT_BYTES.
+_ARGV_PROMPT_LIMITS = {"win32": 28_000, "linux": 120_000}
+_ARGV_PROMPT_LIMIT_DEFAULT = 800_000  # darwin & others: 1 MiB ARG_MAX - headroom
+
+
+def max_prompt_bytes() -> int:
+    """Effective agy prompt byte cap: env override > per-platform default."""
+    raw = (os.environ.get("GENIUS_AGY_MAX_PROMPT_BYTES") or "").strip()
+    if raw:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    for prefix, limit in _ARGV_PROMPT_LIMITS.items():
+        if sys.platform.startswith(prefix):
+            return limit
+    return _ARGV_PROMPT_LIMIT_DEFAULT
 
 
 @memoize_cli_path
@@ -168,7 +196,28 @@ class AgyProvider(BaseProvider):
                 cmd.extend(["--model", self.model_name])
             cmd.append(f"--print={prompt}")
 
-            process = await spawn_cli(cmd, cli_path)
+            prompt_bytes = len(prompt.encode("utf-8"))
+            limit = max_prompt_bytes()
+            if prompt_bytes > limit:
+                raise RuntimeError(
+                    f"Agy CLI prompt is {prompt_bytes} bytes, over the "
+                    f"{limit}-byte argv cap (agy only accepts the prompt via "
+                    "--print=<value> in argv; an oversized spawn dies with "
+                    "E2BIG). Shrink the context (GENIUS_CONTEXT_TOKEN_BUDGET) "
+                    "or raise GENIUS_AGY_MAX_PROMPT_BYTES; a fallback chain "
+                    "moves on to a stdin-capable backend."
+                )
+
+            try:
+                process = await spawn_cli(cmd, cli_path)
+            except OSError as exc:
+                # E2BIG & friends at exec time: surface as RuntimeError so a
+                # FallbackProvider chain falls through instead of dying.
+                raise RuntimeError(
+                    f"Agy CLI could not be launched ({exc}); prompt was "
+                    f"{prompt_bytes} bytes — if this is an argv-size failure, "
+                    "lower GENIUS_AGY_MAX_PROMPT_BYTES or shrink the context."
+                ) from exc
 
             # Prompt travels in argv (above); stdin is intentionally empty.
             stdout, stderr = await communicate_with_timeout(

@@ -15,6 +15,7 @@ from ag_core.providers.agy_provider import (
     AgyProvider,
     _print_timeout_seconds,
     _sandbox_enabled,
+    max_prompt_bytes,
     resolve_agy_cli,
 )
 
@@ -23,6 +24,7 @@ IS_WINDOWS = sys.platform == "win32"
 _AGY_ENV_VARS = (
     "GENIUS_AGY_PATH",
     "GENIUS_AGY_SANDBOX",
+    "GENIUS_AGY_MAX_PROMPT_BYTES",
     "GENIUS_CLI_TIMEOUT",
     "GENIUS_PROVIDER_FALLBACK",
     "GENIUS_PROVIDER_GROK",
@@ -365,6 +367,89 @@ async def test_agy_shim_failure_raises_actionable_error(shim_dir):
     assert "exit code 1" in msg
     assert "unauthorized" in msg
     assert "Hint" in msg
+
+
+# --- argv prompt-size guard --------------------------------------------------
+#
+# The prompt travels as ONE argv string (--print=<prompt>), so an unbudgeted
+# repo context used to die at exec time with OSError(E2BIG) — an exception
+# FallbackProvider does NOT catch, killing the whole chain. The guard raises a
+# clean RuntimeError BEFORE spawning so the chain falls through to a
+# stdin-capable backend.
+
+
+def test_max_prompt_bytes_env_override(monkeypatch):
+    monkeypatch.setenv("GENIUS_AGY_MAX_PROMPT_BYTES", "12345")
+    assert max_prompt_bytes() == 12345
+
+
+def test_max_prompt_bytes_junk_env_falls_back_to_platform(monkeypatch):
+    monkeypatch.setenv("GENIUS_AGY_MAX_PROMPT_BYTES", "not-a-number")
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert max_prompt_bytes() == 120_000
+
+
+def test_max_prompt_bytes_platform_defaults(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert max_prompt_bytes() == 28_000
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert max_prompt_bytes() == 120_000
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert max_prompt_bytes() == 800_000
+
+
+@pytest.mark.asyncio
+async def test_oversize_prompt_raises_before_spawn(monkeypatch):
+    monkeypatch.setenv("GENIUS_AGY_MAX_PROMPT_BYTES", "100")
+
+    async def _never_spawn(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("spawn_cli must not be reached for an oversize prompt")
+
+    monkeypatch.setattr(
+        "ag_core.providers.agy_provider.spawn_cli", _never_spawn
+    )
+    provider = AgyProvider()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await provider.send_prompt("x" * 500)
+
+    msg = str(exc_info.value)
+    assert "argv" in msg
+    assert "GENIUS_AGY_MAX_PROMPT_BYTES" in msg
+    assert "GENIUS_CONTEXT_TOKEN_BUDGET" in msg
+
+
+@pytest.mark.asyncio
+async def test_oversize_check_counts_system_prompt_too(monkeypatch):
+    # The system text is folded into the argv payload before the size check.
+    monkeypatch.setenv("GENIUS_AGY_MAX_PROMPT_BYTES", "100")
+
+    async def _never_spawn(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("spawn_cli must not be reached")
+
+    monkeypatch.setattr("ag_core.providers.agy_provider.spawn_cli", _never_spawn)
+    provider = AgyProvider()
+
+    with pytest.raises(RuntimeError, match="argv"):
+        await provider.send_prompt("short", system="s" * 200)
+
+
+@pytest.mark.asyncio
+async def test_spawn_oserror_becomes_runtimeerror(monkeypatch):
+    # E2BIG & friends at exec time surface as RuntimeError (fallback-able),
+    # never as a raw OSError that would kill a FallbackProvider chain.
+    async def _boom(*args, **kwargs):
+        raise OSError(7, "Argument list too long")
+
+    monkeypatch.setattr("ag_core.providers.agy_provider.spawn_cli", _boom)
+    provider = AgyProvider()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await provider.send_prompt("small prompt")
+
+    msg = str(exc_info.value)
+    assert "could not be launched" in msg
+    assert "Argument list too long" in msg
 
 
 # --- doctor wiring -----------------------------------------------------------

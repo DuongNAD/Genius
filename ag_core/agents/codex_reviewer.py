@@ -119,7 +119,9 @@ class CodexReviewerAgent(BaseAgent):
 
         # Scan project files (or use provided context_data) and format context
         root_dir = os.getcwd()
-        scanned_files, context = await self.scan_context_async(context_data)
+        scanned_files, context = await self.scan_context_async(
+            context_data, task_text=user_prompt
+        )
 
         memory_context = await self._memory_context_block(user_prompt)
         full_prompt = self._compose_full_prompt(user_prompt, memory_context, context)
