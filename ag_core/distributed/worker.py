@@ -26,6 +26,10 @@ ROLE_AGENT_MAP = {
 }
 
 
+def _truthy(value) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 class ClientWorker:
     def __init__(self, worker_id: str, roles: List[str], api_key: Optional[str] = None):
         self.worker_id = worker_id
@@ -198,7 +202,15 @@ class ClientWorker:
             task_id = payload.get("task_id")
             if task_id in self.running_tasks:
                 self.running_tasks[task_id].cancel()
-            self.status = "idle"
+            # Per-task cleanup only: the old blanket `status = "idle"` went
+            # through the setter that clears active_tasks WHOLESALE, wiping
+            # the liveness of every other in-flight task. The cancelled
+            # task's own execute_task.finally completes the cleanup when the
+            # cancellation lands.
+            self.active_tasks.discard(task_id)
+            if not self.active_tasks:
+                self._status = "idle"
+                self._current_task = None
             return 200, {"status": "cancelled"}, {}
 
         return 404, {"error": "Endpoint not found"}, {}
@@ -282,8 +294,14 @@ class ClientWorker:
         finally:
             self.running_tasks.pop(task_id, None)
             self.active_tasks.discard(task_id)
-            self.status = "idle"
-            self.current_task = None
+            # Per-task cleanup only. The old unconditional `status = "idle"` /
+            # `current_task = None` went through setters that CLEAR active_tasks
+            # wholesale — one settling (or stale cancelled) task wiped the
+            # liveness of every other in-flight task, including tasks accepted
+            # after a reconnect. Reset the mirrors only when nothing is active.
+            if not self.active_tasks:
+                self._status = "idle"
+                self._current_task = None
 
             # Report result
             async def report():
@@ -357,15 +375,29 @@ class ClientWorker:
         max_backoff = 60.0
         backoff_factor = 2.0
 
+        # wss:// when the hub sits behind TLS (GENIUS_HUB_TLS truthy): the ws://
+        # transport sends the JWT — and every prompt/result — readable to
+        # anyone on the network path.
+        scheme = "wss" if _truthy(os.environ.get("GENIUS_HUB_TLS")) else "ws"
+
         while True:
             token = self.generate_jwt()
-            uri = f"ws://{hub_ip}:{hub_port}/ws/connect?token={token}"
-            # The token is a bearer credential in the query string — never log
-            # the full URI (stdout/log capture would leak a replayable token).
-            safe_uri = f"ws://{hub_ip}:{hub_port}/ws/connect"
+            safe_uri = f"{scheme}://{hub_ip}:{hub_port}/ws/connect"
+            # The JWT rides the Authorization header by default: query strings
+            # land in access/proxy logs, headers generally do not. Hubs older
+            # than the header support need GENIUS_WS_TOKEN_QUERY=1 (the token
+            # then returns to the query string — never log that URI).
+            if _truthy(os.environ.get("GENIUS_WS_TOKEN_QUERY")):
+                uri = f"{safe_uri}?token={token}"
+                connect_kwargs = {}
+            else:
+                uri = safe_uri
+                connect_kwargs = {
+                    "additional_headers": {"Authorization": f"Bearer {token}"}
+                }
             try:
                 print(f"[Worker] Connecting to {safe_uri} ...")
-                async with websockets.connect(uri) as websocket:
+                async with websockets.connect(uri, **connect_kwargs) as websocket:
                     self.ws = websocket
                     # NB: do NOT reset the reconnect backoff here. A socket that
                     # merely opened is not a stable session — a hub that accepts
@@ -444,7 +476,12 @@ class ClientWorker:
                                 )
                                 if task_id in self.running_tasks:
                                     self.running_tasks[task_id].cancel()
-                                self.status = "idle"
+                                # Same per-task cleanup as the HTTP /cancel
+                                # handler: never clear other tasks' liveness.
+                                self.active_tasks.discard(task_id)
+                                if not self.active_tasks:
+                                    self._status = "idle"
+                                    self._current_task = None
                                 continue
 
                             if msg_type in ("run_task", "dispatch"):
@@ -535,10 +572,19 @@ class ClientWorker:
                         read_task.cancel()
                         await asyncio.gather(hb_task, read_task, return_exceptions=True)
                         self.ws = None
-                        # Task 7: cancel running tasks and clear list on disconnect
-                        for t_id, task in list(self.running_tasks.items()):
+                        # Cancel in-flight tasks AND await them to completion:
+                        # each execute_task's finally (result reporting + state
+                        # cleanup) must finish BEFORE the reconnect loop can
+                        # accept new work. A cancelled-but-not-awaited task's
+                        # finally used to run after reconnect and wipe the
+                        # state of freshly-accepted tasks.
+                        inflight = list(self.running_tasks.values())
+                        for task in inflight:
                             task.cancel()
+                        if inflight:
+                            await asyncio.gather(*inflight, return_exceptions=True)
                         self.running_tasks.clear()
+                        self.active_tasks.clear()
             except Exception as e:
                 print(f"[Worker] Connection failed: {e}")
 

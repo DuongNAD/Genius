@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 import argparse
 import asyncio
 import importlib.util
@@ -283,7 +283,7 @@ IS_DISTRIBUTED = False
 
 
 @app.websocket("/ws/connect")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
+async def websocket_endpoint(websocket: WebSocket, token: str = Query(default="")):
     is_pytest = under_pytest()
     if not IS_DISTRIBUTED and not is_pytest:
         from fastapi import HTTPException
@@ -291,6 +291,19 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         raise HTTPException(
             status_code=404, detail="WebSocket not enabled in local mode"
         )
+
+    # Workers send the JWT in an `Authorization: Bearer` header by default
+    # (query strings end up in access/proxy logs; headers generally do not).
+    # `?token=` stays accepted for backward compatibility with older workers.
+    auth_header = websocket.headers.get("authorization") or ""
+    if auth_header.lower().startswith("bearer "):
+        credential = auth_header[7:].strip()
+    else:
+        credential = (token or "").strip()
+    if not credential:
+        await websocket.accept()
+        await websocket.close(code=4001)
+        return
 
     # Resolve the JWT secret the same way the hub/worker do, so tokens verify
     # consistently. Fail closed (don't accept connections) if no secret is
@@ -308,7 +321,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         # worker eviction (and, in --auto-pilot, freeze every skill server too).
         payload = await asyncio.to_thread(
             decode_jwt,
-            token,
+            credential,
             secret,
             require_exp=True,
             max_lifetime=jwt_max_lifetime(),
@@ -485,6 +498,19 @@ async def start_hub_server(port: int):
     # Specific override wins over GENIUS_BIND_HOST; Docker declares 0.0.0.0
     # explicitly, while bare-metal defaults to loopback.
     hub_host = _resolve_service_host("GENIUS_HUB_HOST")
+    if hub_host.strip() not in ("127.0.0.1", "localhost", "::1", ""):
+        # The hub's own transport is plaintext HTTP/ws: off loopback, the
+        # shared secret, worker JWTs and every prompt/result are readable to
+        # anyone on the network path. Warn loudly (but don't refuse — LAN/VPN
+        # setups are legitimate) and point at the mitigations.
+        print(
+            f"[Hub] WARNING: binding {hub_host}: the hub speaks plaintext "
+            "HTTP/ws. Keep it on a VPN/trusted LAN or front it with TLS "
+            "(workers switch to wss:// with GENIUS_HUB_TLS=1), and set "
+            "GENIUS_HUB_ADMIN_KEY so the shared worker key cannot administer "
+            "the hub.",
+            file=sys.stderr,
+        )
     config = uvicorn.Config(app, host=hub_host, port=port, log_level="info", ws="auto")
     server = uvicorn.Server(config)
     # Drive the lifecycle manually (startup -> main_loop -> shutdown) instead of

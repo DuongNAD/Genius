@@ -70,7 +70,7 @@ async def test_network_drop_exponential_backoff():
         await original_sleep(0.001)
 
     # Patch websockets.connect to always fail
-    def mock_connect(uri):
+    def mock_connect(uri, **kwargs):
         raise Exception("Connection refused")
 
     with patch("websockets.connect", mock_connect), patch(
@@ -137,7 +137,7 @@ async def test_network_drop_backoff_reset():
         async def close(self):
             self.closed = True
 
-    def mock_connect(uri):
+    def mock_connect(uri, **kwargs):
         nonlocal connect_count
         connect_count += 1
         if connect_count == 2:
@@ -192,7 +192,7 @@ async def test_backoff_not_reset_without_registration():
         async def __aexit__(self, exc_type, exc_val, exc_tb):
             pass
 
-    def mock_connect(uri):
+    def mock_connect(uri, **kwargs):
         # Every attempt: the socket opens but is immediately closed, so the
         # worker never receives a "registered: success" frame.
         ws = MockWebSocket()
@@ -227,7 +227,7 @@ async def test_token_regeneration_on_reconnect():
     Test 3: Verify that fresh JWT tokens with updated expiration times
     are generated on every reconnect attempt.
     """
-    captured_uris = []
+    captured_tokens = []
     current_mocked_time = 1700000000.0
 
     class MockContextManager:
@@ -240,8 +240,14 @@ async def test_token_regeneration_on_reconnect():
         async def __aexit__(self, exc_type, exc_val, exc_tb):
             pass
 
-    def mock_connect(uri):
-        captured_uris.append(uri)
+    def mock_connect(uri, **kwargs):
+        # The JWT must ride the Authorization header, never the URI query
+        # string (query strings land in access/proxy logs).
+        assert "token=" not in uri
+        headers = kwargs.get("additional_headers") or {}
+        auth = headers.get("Authorization", "")
+        assert auth.startswith("Bearer ")
+        captured_tokens.append(auth[len("Bearer ") :])
         ws = MockWebSocket()
         ws.closed = True
         return MockContextManager(ws)
@@ -250,7 +256,7 @@ async def test_token_regeneration_on_reconnect():
         nonlocal current_mocked_time
         # Advance time on each reconnect sleep
         current_mocked_time += 10.0
-        if len(captured_uris) >= 3:
+        if len(captured_tokens) >= 3:
             raise StopTestException()
         await original_sleep(0.001)
 
@@ -264,16 +270,11 @@ async def test_token_regeneration_on_reconnect():
         with pytest.raises(StopTestException):
             await run_worker("127.0.0.1", 8000, ["grok"], "test-worker-token")
 
-    assert len(captured_uris) == 3
+    assert len(captured_tokens) == 3
 
     # Verify each connection has an updated JWT with updated exp
     last_exp = 0
-    for uri in captured_uris:
-        # Extract token from ws://127.0.0.1:8000/ws/connect?token=...
-        parts = uri.split("token=")
-        assert len(parts) == 2
-        token = parts[1]
-
+    for token in captured_tokens:
         # Parse token payload manually to avoid env / time.time() mismatch outside the patch block
         token_parts = token.split(".")
         assert len(token_parts) == 3
@@ -312,7 +313,7 @@ async def test_heartbeat_failure_triggers_reconnect():
         async def __aexit__(self, exc_type, exc_val, exc_tb):
             pass
 
-    def mock_connect(uri):
+    def mock_connect(uri, **kwargs):
         nonlocal connect_calls, ws_instance
         connect_calls += 1
         ws_instance = MockWebSocket()
