@@ -1,4 +1,4 @@
-﻿# tests/test_milestone3_challenger.py
+# tests/test_milestone3_challenger.py
 import asyncio
 import json
 import time

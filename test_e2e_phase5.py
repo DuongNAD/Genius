@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import pytest
 import sqlite3

@@ -1,4 +1,4 @@
-﻿# tests/test_adversarial_challenger_m2_extra.py
+# tests/test_adversarial_challenger_m2_extra.py
 import asyncio
 import json
 import time

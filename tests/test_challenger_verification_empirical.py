@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 
 sys.modules["sentence_transformers"] = None
 sys.modules["transformers"] = None

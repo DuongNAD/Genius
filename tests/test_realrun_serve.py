@@ -1,4 +1,4 @@
-﻿"""Real server boot smoke tests for serve.py.
+"""Real server boot smoke tests for serve.py.
 
 Unlike test_serve.py (which mocks serve.start_server entirely), these tests
 actually bind sockets:
