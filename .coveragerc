@@ -1,0 +1,22 @@
+# Coverage configuration for the CI `coverage` job and local runs:
+#     python -m pytest --cov=. --cov-fail-under=80
+# Measures production code only: test files, test scaffolding, and generated
+# pipeline output are excluded so the percentage means "production statements
+# covered" (baseline ~83% when the gate was introduced — ratchet the CI
+# threshold up as it improves, never down).
+[run]
+omit =
+    test_*.py
+    tests/*
+    client_app/test_*.py
+    conftest.py
+    */conftest.py
+    projects/*
+    .genius/*
+    .genius_jobs/*
+    dummy_cli.py
+    run_debug.py
+    verify_db.py
+
+[report]
+precision = 2

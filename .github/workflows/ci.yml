@@ -171,3 +171,36 @@ jobs:
       - name: Run pytest
         run: |
           python -m pytest
+
+  coverage:
+    # Blocking coverage gate over production code (.coveragerc excludes test
+    # files): fails the build when coverage drops below the threshold.
+    # Baseline was ~83% when introduced; the threshold starts at 80% to
+    # absorb platform variance — ratchet it UP as coverage improves, never
+    # down. Runs on macOS (the platform the suite's timing-sensitive
+    # distributed tests are tuned on) and as a SEPARATE job so the plain
+    # `python -m pytest` contract of the test jobs stays untouched —
+    # coverage instrumentation changes timings.
+    if: >-
+      github.ref_name == 'mac' || github.ref_name == 'main' ||
+      github.base_ref == 'mac' || github.base_ref == 'main'
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest-cov
+
+      - name: Run pytest with coverage gate
+        run: |
+          python -m pytest --cov=. --cov-report=term --cov-fail-under=80
