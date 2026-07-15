@@ -40,6 +40,27 @@ class GitManager:
             text = text.replace(self.token, "***")
         return text
 
+    # git's transport-helper syntax `<helper>::<address>` (ext::, fd::, ...)
+    # executes commands / reads arbitrary descriptors — never a legitimate
+    # remote here. Plain paths, file://, https://, ssh:// and scp-like
+    # user@host:path remotes all stay allowed (local-path clones are a
+    # supported case).
+    _HELPER_URL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+.-]*::")
+
+    def _validate_remote_url(self, url: str) -> str:
+        """Refuse remote URLs that could smuggle git options or transport
+        helpers. Remotes read back from repo config are attacker-influenced
+        when operating on cloned/generated repos: a leading '-' would parse
+        as an option (e.g. --upload-pack=...), and ext:: runs commands."""
+        cleaned = (url or "").strip()
+        if not cleaned or cleaned.startswith("-"):
+            raise GitError(f"Refusing unsafe git remote URL: {self._mask(cleaned)!r}")
+        if self._HELPER_URL_RE.match(cleaned):
+            raise GitError(
+                f"Refusing git transport-helper remote URL: {self._mask(cleaned)!r}"
+            )
+        return cleaned
+
     def _get_auth_url(self, url: str) -> str:
         if not url:
             return url
@@ -125,7 +146,7 @@ class GitManager:
             raise GitError(self._mask(f"Failed to execute git command: {str(e)}"))
 
     async def clone(self, repo_url: str, target_path: str) -> str:
-        auth_url = self._get_auth_url(repo_url)
+        auth_url = self._get_auth_url(self._validate_remote_url(repo_url))
         # `--` so a repo_url beginning with `-` can't be parsed as a git option
         # (e.g. --upload-pack=...); it's forced to be positional.
         return await self._run_git(["clone", "--", auth_url, target_path])
@@ -161,7 +182,10 @@ class GitManager:
         remote_url = await self._get_remote_url(cwd)
         args = ["pull"]
         if remote_url:
-            auth_url = self._get_auth_url(remote_url)
+            # The URL comes back from the repo's own config: validate it and
+            # pin it positional with `--` so it can never parse as an option.
+            auth_url = self._get_auth_url(self._validate_remote_url(remote_url))
+            args.append("--")
             args.append(auth_url)
             branch = await self._get_current_branch(cwd)
             if branch and branch != "HEAD":
@@ -172,7 +196,9 @@ class GitManager:
         remote_url = await self._get_remote_url(cwd)
         args = ["push"]
         if remote_url:
-            auth_url = self._get_auth_url(remote_url)
+            # Same hardening as pull: repo-config data stays positional.
+            auth_url = self._get_auth_url(self._validate_remote_url(remote_url))
+            args.append("--")
             args.append(auth_url)
             branch = await self._get_current_branch(cwd)
             if branch and branch != "HEAD":
