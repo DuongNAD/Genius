@@ -119,13 +119,20 @@ class BaseAgent(abc.ABC):
         if context_data is not None:
             scanned_files = context_data
         else:
-            from ag_core.scanner.project_scanner import ProjectScanner
+            from ag_core.scanner.project_scanner import (
+                ProjectScanner,
+                resolve_workspace_root,
+            )
             from ag_core.scanner.repo_graph import build_budgeted_context
 
             config = getattr(self, "config", None)
             exclude_patterns = config.scanner.exclude_patterns if config else None
+            # resolve_workspace_root() honors GENIUS_MCP_WORKSPACE/GENIUS_WORKSPACE
+            # before falling back to cwd; ProjectScanner.scan() then refuses a
+            # filesystem-root/home scan root up front, so a cwd="/" MCP server
+            # fails fast with guidance instead of walking the whole disk.
             scanner = ProjectScanner(
-                root_dir=os.getcwd(), extra_ignores=exclude_patterns
+                root_dir=resolve_workspace_root(), extra_ignores=exclude_patterns
             )
             scanned_files = build_budgeted_context(
                 scanner.scan(), task_text=task_text

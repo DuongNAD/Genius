@@ -23,6 +23,72 @@ def is_binary_file(filepath: str) -> bool:
         return True
 
 
+# --- Scan-root safety -------------------------------------------------------
+# A process launched with NO working directory (e.g. an MCP server the IDE
+# spawns with cwd="/") makes a cwd-defaulting agent walk the ENTIRE filesystem:
+# os.walk("/") opens an unbounded number of files, balloons memory (a real
+# Antigravity run wedged the server at ~4.6 GB), leaks file contents from
+# outside the project into the model prompt, and never returns — the scan
+# hangs BEFORE context budgeting can trim anything. Refuse a filesystem root /
+# home directory up front, before any os.walk.
+_UNSAFE_ROOT_OVERRIDE = ("1", "true", "yes", "on")
+
+
+def _unsafe_scan_root_reason(path: str) -> Optional[str]:
+    """Human-readable reason if ``path`` is a dangerous scan root, else None."""
+    # realpath, not just abspath: a symlink pointing at "/" (reachable via an
+    # explicitly-set GENIUS_MCP_WORKSPACE/GENIUS_WORKSPACE) must not slip the
+    # guard — os.walk would follow the symlinked top into the real root.
+    p = os.path.realpath(os.path.abspath(path))
+    if os.path.dirname(p) == p:  # "/" on POSIX, a drive root "C:\\" on Windows
+        return "a filesystem root"
+    home = os.path.realpath(os.path.abspath(os.path.expanduser("~")))
+    if p == home:
+        return "the home directory"
+    if p == os.path.dirname(home):  # the home container, e.g. /Users, /home
+        return "the home-directory container (e.g. /Users, /home)"
+    return None
+
+
+def assert_safe_scan_root(path: str) -> None:
+    """Raise :class:`ValueError` BEFORE any ``os.walk`` when ``path`` is a
+    filesystem root or home directory rather than a project workspace.
+
+    Escape hatch for the rare intentional case: ``GENIUS_ALLOW_UNSAFE_SCAN_ROOT=1``.
+    """
+    override = (os.environ.get("GENIUS_ALLOW_UNSAFE_SCAN_ROOT") or "").strip().lower()
+    if override in _UNSAFE_ROOT_OVERRIDE:
+        return
+    reason = _unsafe_scan_root_reason(path)
+    if reason:
+        raise ValueError(
+            f"Refusing to scan {os.path.abspath(path)!r}: it is {reason}, not a "
+            "project workspace. This usually means the process was started with "
+            "no working directory (e.g. an MCP server the IDE launched with "
+            "cwd='/'). Point it at the project: set GENIUS_MCP_WORKSPACE (or "
+            "GENIUS_WORKSPACE) to the folder, or run from the project directory. "
+            "Set GENIUS_ALLOW_UNSAFE_SCAN_ROOT=1 to override."
+        )
+
+
+def resolve_workspace_root() -> str:
+    """Scan root for a cwd-defaulting agent (skill /run without context, MCP
+    single-agent tools, worker, run.py CLIs).
+
+    An explicit workspace override — ``GENIUS_MCP_WORKSPACE`` then
+    ``GENIUS_WORKSPACE`` — wins over ``os.getcwd()`` so the single-agent tools
+    do not SILENTLY depend on the server's working directory (Antigravity's
+    stdio MCP schema exposes ``env`` but not ``cwd``, so ``env`` is the only
+    channel to pin the workspace). Falls back to the cwd, which
+    :func:`assert_safe_scan_root` still guards against a dangerous root.
+    """
+    for env in ("GENIUS_MCP_WORKSPACE", "GENIUS_WORKSPACE"):
+        val = (os.environ.get(env) or "").strip()
+        if val and os.path.isdir(val):
+            return os.path.abspath(val)
+    return os.getcwd()
+
+
 class ProjectScanner:
     def __init__(self, root_dir: str, extra_ignores: Optional[List[str]] = None):
         self.root_dir = os.path.abspath(root_dir)
@@ -60,6 +126,11 @@ class ProjectScanner:
 
     def scan(self) -> Dict[str, str]:
         """Scans the directory recursively and returns a map of relative paths to text contents."""
+        # Fail fast on a filesystem-root / home scan root BEFORE walking it:
+        # os.walk("/") is the hang the MCP single-agent tools hit when the IDE
+        # launches the server with cwd="/".
+        assert_safe_scan_root(self.root_dir)
+
         scanned_files: Dict[str, str] = {}
 
         for dirpath, dirnames, filenames in os.walk(self.root_dir):

@@ -124,6 +124,15 @@ def collect_case(workspace: str, prompt: str = "") -> dict:
     ``prompt`` is the original user request (the grader cannot recover it
     from disk reliably, so callers pass it through); defaults to "".
     """
+    # Same scan-root guard as ProjectScanner.scan(): _collect_code_files walks
+    # ``workspace``, so a filesystem-root/home default (e.g. the MCP eval tool
+    # on a cwd="/" server) must fail fast instead of walking the disk and
+    # leaking out-of-project sources into the judge context. Pipeline
+    # workspaces are always deep directories — identity for them.
+    from ag_core.scanner.project_scanner import assert_safe_scan_root
+
+    assert_safe_scan_root(workspace)
+
     case: dict = {"prompt": prompt or "", "workspace": workspace}
     for field, filename in _ARTIFACT_FILES.items():
         case[field] = _read_text(os.path.join(workspace, filename))

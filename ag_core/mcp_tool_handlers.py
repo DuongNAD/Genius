@@ -160,7 +160,15 @@ async def _run_eval(arguments: Dict[str, Any]) -> str:
         return json.dumps({"op": op, **compare_grades(baseline, current)})
 
     # op == "grade"
-    workspace = arguments.get("workspace") or os.getcwd()
+    # Default through resolve_workspace_root(), not bare os.getcwd(): an MCP
+    # server launched with cwd="/" would otherwise hand grader.collect_case a
+    # filesystem root to walk (an unguarded parallel of the agent scan path —
+    # bounded to 100 files, but it leaked out-of-project sources to the LLM
+    # judge). The env pin (GENIUS_MCP_WORKSPACE) rescues it the same way, and
+    # collect_case's own scan-root guard refuses a dangerous default.
+    from ag_core.scanner.project_scanner import resolve_workspace_root
+
+    workspace = arguments.get("workspace") or resolve_workspace_root()
     if not os.path.isdir(workspace):
         return json.dumps({"error": f"Workspace directory not found: {workspace}"})
 
