@@ -184,6 +184,50 @@ def _role_model_fits_backend(backend: str, model: str) -> bool:
     return model.lower().startswith(prefixes)
 
 
+def resolve_model(backend: str, config, role: Optional[str] = None) -> str:
+    """The model name :func:`build_backend` will hand to ``backend`` for
+    ``role`` ("" = the CLI's own default model).
+
+    Model precedence, most specific first (blank = unset, ``or``-chained so an
+    unset knob transparently drops through — with no role knob set this is
+    byte-identical to the old per-backend-only resolution):
+
+      1. ``GENIUS_MODEL_ROLE_<ROLE>``          (per-role env)
+      2. ``config.models.roles.<role>``        (per-role config)
+      3. ``GENIUS_MODEL_<BACKEND>``            (per-backend env)
+      4. ``config.models.<attr>``              (per-backend config)
+
+    A role model whose family clearly belongs to a DIFFERENT backend (e.g. a
+    gemini slug reaching the claude fallback) is ignored so this backend runs
+    its own default instead of dying on a model it can never serve.
+
+    This is the SINGLE resolution path: the control panel displays what this
+    returns, so the UI can never disagree with the runtime (it used to
+    re-implement only the per-backend half and misreport per-role pins).
+    """
+    _mod, _cls, model_attr, _key = BACKENDS[backend]
+    role_model = ""
+    if role:
+        crole = canonical_role(role)
+        role_model = os.environ.get(
+            f"GENIUS_MODEL_ROLE_{crole.upper()}", ""
+        ) or getattr(config.models.roles, crole, "")
+    if role_model and not _role_model_fits_backend(backend, role_model):
+        logger.warning(
+            "role '%s' pins model '%s', which backend '%s' cannot serve; "
+            "using the backend's own model instead.",
+            role,
+            role_model,
+            backend,
+        )
+        role_model = ""
+    return (
+        role_model
+        or os.environ.get(f"GENIUS_MODEL_{backend.upper()}")
+        or getattr(config.models, model_attr)
+    )
+
+
 def build_backend(backend: str, config, role: Optional[str] = None):
     """Instantiate the provider for one backend from ``config``.
 
@@ -197,43 +241,15 @@ def build_backend(backend: str, config, role: Optional[str] = None):
     the plan (architect) and test (tester) stages can run at different
     reasoning efforts despite sharing the claude backend.
     """
-    mod_name, cls_name, model_attr, key_attr = BACKENDS[backend]
+    mod_name, cls_name, _model_attr, key_attr = BACKENDS[backend]
     provider_class = getattr(importlib.import_module(mod_name), cls_name)
     api_key = None
     if key_attr:
         api_key = getattr(config, key_attr, None) or os.getenv(key_attr.upper(), "")
-    # Model precedence, most specific first (blank = unset, `or`-chained so an
-    # unset knob transparently drops through — with no role knob set this is
-    # byte-identical to the old per-backend-only resolution):
-    #   1. GENIUS_MODEL_ROLE_<ROLE>          (per-role env)
-    #   2. config.models.roles.<role>        (per-role config)
-    #   3. GENIUS_MODEL_<BACKEND>            (per-backend env)
-    #   4. config.models.<attr>              (per-backend config)
     # Per-role lets two roles share a backend yet use different models (e.g.
-    # researcher and codex both on agy but gemini-pro vs gemini-flash).
-    role_model = ""
-    if role:
-        crole = canonical_role(role)
-        role_model = os.environ.get(
-            f"GENIUS_MODEL_ROLE_{crole.upper()}", ""
-        ) or getattr(config.models.roles, crole, "")
-    if role_model and not _role_model_fits_backend(backend, role_model):
-        # Foreign-family role model (e.g. a gemini slug reaching the claude
-        # fallback): ignore it so THIS backend runs its own default instead
-        # of dying on a model it can never serve.
-        logger.warning(
-            "role '%s' pins model '%s', which backend '%s' cannot serve; "
-            "using the backend's own model instead.",
-            role,
-            role_model,
-            backend,
-        )
-        role_model = ""
-    model_name = (
-        role_model
-        or os.environ.get(f"GENIUS_MODEL_{backend.upper()}")
-        or getattr(config.models, model_attr)
-    )
+    # researcher and codex both on agy but gemini-pro vs gemini-flash); the
+    # full precedence lives in resolve_model (shared with the control panel).
+    model_name = resolve_model(backend, config, role=role)
     kwargs = {"api_key": api_key, "model_name": model_name}
     if role:
         kwargs["role"] = role

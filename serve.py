@@ -908,12 +908,22 @@ async def main_async():
         action="store_true",
         help="Run preflight checks (CLI resolution, auth, SKILL_API_KEY) and exit",
     )
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        help=(
+            "With --doctor: additionally send one live canary prompt through "
+            "every unique (backend, model) pair in the effective role chains — "
+            "catches invalid model pins and logged-out CLIs that --version "
+            "checks cannot see. Costs one small real inference per pair."
+        ),
+    )
     args = parser.parse_args()
 
     if getattr(args, "doctor", False) is True:
         from ag_core.diagnostics import run_doctor_report_async
 
-        code = await run_doctor_report_async()
+        code = await run_doctor_report_async(deep=getattr(args, "deep", False))
         raise SystemExit(code)
 
     auto_pilot = getattr(args, "auto_pilot", False) is True

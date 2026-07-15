@@ -44,9 +44,9 @@ if root_dir not in sys.path:
 from ag_core.config import load_config  # noqa: E402
 from ag_core.diagnostics import run_doctor_async  # noqa: E402
 from ag_core.provider_factory import (  # noqa: E402
-    BACKENDS,
     chain_source,
     resolve_chain,
+    resolve_model,
 )
 
 app = FastAPI(title="Genius Control Panel")
@@ -119,11 +119,13 @@ _ROOT_ARTIFACTS = (
 )
 
 
-def _model_for(backend: str, config) -> str:
-    _mod, _cls, model_attr, _key = BACKENDS[backend]
-    model = os.environ.get(f"GENIUS_MODEL_{backend.upper()}") or getattr(
-        config.models, model_attr, ""
-    )
+def _model_for(backend: str, role: str, config) -> str:
+    """What the runtime will actually run: provider_factory.resolve_model is
+    the SAME function build_backend uses, so per-role pins (and the foreign-
+    family veto) show up here instead of the panel re-deriving its own — the
+    panel used to report the per-backend model while the runtime honored a
+    per-role override."""
+    model = resolve_model(backend, config, role=role)
     return model or "(CLI default)"
 
 
@@ -158,7 +160,7 @@ async def _build_status() -> Dict[str, Any]:
                 "stage": label,
                 "role": role,
                 "backend": primary,
-                "model": _model_for(primary, config),
+                "model": _model_for(primary, role, config),
                 "effort": _effort_for(primary, role),
                 "fallback": (
                     os.getenv("GENIUS_CLAUDE_FALLBACK_MODEL", "")

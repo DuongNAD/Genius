@@ -1,4 +1,4 @@
-"""Preflight diagnostics - ``python serve.py --doctor``.
+"""Preflight diagnostics - ``python serve.py --doctor`` (``--deep`` opt-in).
 
 Verifies the brittle parts of a real run *before* the pipeline starts, so a
 missing Codex desktop install, an unauthenticated agy CLI, or a missing
@@ -11,12 +11,19 @@ For each vendor CLI it reports one of:
 * ``WARN``    - executable located but ``--version`` failed (some CLIs lack the
   flag; it may still work for ``exec``).
 * ``MISSING`` - no real executable found (only a bare literal name).
+
+``--deep`` additionally runs a LIVE one-prompt canary through every unique
+(backend, model) pair the effective role chains reference — ``--version``
+alone cannot catch an invalid model pin (a real agy upgrade renamed every
+model id: the shallow doctor kept saying READY while every agy call failed
+and silently burned the fallback chain).
 """
 
 import asyncio
 import os
 import shutil
 import sys
+import time
 
 from ag_core import provider_factory
 from ag_core.providers.agy_provider import resolve_agy_cli
@@ -24,7 +31,11 @@ from ag_core.providers.grok_provider import resolve_grok_cli
 from ag_core.providers.anthropic_provider import resolve_claude_cli
 from ag_core.providers.openai_provider import resolve_codex_cli
 from ag_core.providers.notebooklm_provider import resolve_notebooklm_cli
-from ag_core.utils.cli_runner import communicate_with_timeout, DEFAULT_AUX_TIMEOUT
+from ag_core.utils.cli_runner import (
+    communicate_with_timeout,
+    DEFAULT_AUX_TIMEOUT,
+    DEFAULT_CLI_TIMEOUT,
+)
 
 # (display name, resolver, agents that depend on this CLI)
 CLI_CHECKS = [
@@ -163,8 +174,11 @@ def _header_lines():
             "[MISSING] SKILL_API_KEY is not set - orchestrator <-> skill server "
             "calls will be rejected. Set it in .env (same value both sides)."
         )
+    # Display the GENERATIVE default (what a real agent call gets), not the
+    # auxiliary --version timeout — the old line said "60+" while LLM calls
+    # actually run under a 600s ceiling.
     timeout = (
-        os.getenv("GENIUS_CLI_TIMEOUT") or f"{int(DEFAULT_AUX_TIMEOUT)}+ (default)"
+        os.getenv("GENIUS_CLI_TIMEOUT") or f"{int(DEFAULT_CLI_TIMEOUT)} (default)"
     )
     lines.append(f"[info]    CLI timeout: GENIUS_CLI_TIMEOUT={timeout}")
     lines.append("-" * 60)
@@ -283,15 +297,195 @@ def report_lines(results, skill_key_ok: bool):
     return lines, 0
 
 
-async def run_doctor_report_async() -> int:
+# ---------------------------------------------------------------------------
+# Deep doctor (--deep): live model canaries.
+#
+# The shallow checks above only prove the CLI binaries exist and answer
+# --version — they cannot catch an invalid model pin, a logged-out CLI, or a
+# dead account. The deep pass sends one tiny prompt through every unique
+# (backend, model) pair the effective role chains reference and reports which
+# pairs actually answer, then judges each role by whether ANY backend in its
+# chain is alive. Costs one real (cheap) inference per unique pair.
+# ---------------------------------------------------------------------------
+
+DEEP_CANARY_PROMPT = "Reply with the single word: pong"
+_DEEP_DETAIL_CHARS = 220
+
+
+def _canary_timeout() -> float:
+    """Hard cap per canary call (seconds); GENIUS_DOCTOR_CANARY_TIMEOUT
+    overrides, floor-guarded, default 240. The providers self-bound at
+    cli_timeout() anyway — this keeps an interactive doctor from sitting on a
+    hung CLI for the full 600s generative ceiling. On a cap the CLI child may
+    finish (and be reaped) on its own; a five-word canary exits quickly."""
+    raw = os.getenv("GENIUS_DOCTOR_CANARY_TIMEOUT")
+    if raw:
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return 240.0
+
+
+def collect_canary_pairs(config):
+    """(backend, model) -> {"roles": [...], "primary_for": [...]} across every
+    role's effective chain, model resolved EXACTLY as build_backend will."""
+    pairs = {}
+    role_chains = {}
+    for role in provider_factory.DEFAULT_CHAINS:
+        try:
+            chain = provider_factory.resolve_chain(role)
+        except ValueError:
+            role_chains[role] = []
+            continue
+        role_chains[role] = chain
+        for idx, backend in enumerate(chain):
+            try:
+                model = provider_factory.resolve_model(backend, config, role=role)
+            except Exception:  # noqa: BLE001 - an unknown backend name
+                model = ""
+            entry = pairs.setdefault(
+                (backend, model), {"roles": [], "primary_for": []}
+            )
+            if role not in entry["roles"]:
+                entry["roles"].append(role)
+            if idx == 0:
+                entry["primary_for"].append(role)
+    return pairs, role_chains
+
+
+async def _canary_call(backend: str, model: str, role: str, config) -> dict:
+    """One live prompt through one backend+model; never raises."""
+    result = {
+        "backend": backend,
+        "model": model,
+        "status": "FAIL",
+        "detail": "",
+        "elapsed": 0.0,
+    }
+    started = time.monotonic()
+    try:
+        provider = provider_factory.build_backend(backend, config, role=role)
+        response = await asyncio.wait_for(
+            provider.send_prompt(DEEP_CANARY_PROMPT), timeout=_canary_timeout()
+        )
+        content = ((response or {}).get("content") or "").strip()
+        result["elapsed"] = time.monotonic() - started
+        if content:
+            result["status"] = "OK"
+            first_line = content.splitlines()[0]
+            result["detail"] = first_line[:_DEEP_DETAIL_CHARS]
+        else:
+            result["detail"] = "empty response"
+    except asyncio.TimeoutError:
+        result["elapsed"] = time.monotonic() - started
+        result["detail"] = (
+            f"no answer within {_canary_timeout():.0f}s "
+            "(GENIUS_DOCTOR_CANARY_TIMEOUT)"
+        )
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        raise
+    except Exception as exc:  # noqa: BLE001 - report, don't crash the doctor
+        result["elapsed"] = time.monotonic() - started
+        detail = str(exc).strip() or exc.__class__.__name__
+        result["detail"] = detail[:_DEEP_DETAIL_CHARS]
+    return result
+
+
+async def run_deep_doctor_async() -> dict:
+    """Run every unique canary concurrently. Returns
+    ``{"pairs": [result+roles...], "role_chains": {role: [backend...]}}``."""
+    from ag_core.config import load_config
+
+    config = load_config()
+    pairs, role_chains = collect_canary_pairs(config)
+    ordered = sorted(pairs)  # deterministic output
+    results = await asyncio.gather(
+        *(
+            _canary_call(backend, model, pairs[(backend, model)]["roles"][0], config)
+            for backend, model in ordered
+        )
+    )
+    enriched = []
+    for (backend, model), result in zip(ordered, results):
+        result["roles"] = pairs[(backend, model)]["roles"]
+        result["primary_for"] = pairs[(backend, model)]["primary_for"]
+        enriched.append(result)
+    return {"pairs": enriched, "role_chains": role_chains}
+
+
+def deep_report_lines(deep: dict):
+    """Render the deep-canary section; pure. Returns ``(lines, exit_code)``.
+
+    Exit 1 only when some role has NO live backend left in its chain — a
+    failed primary with a live fallback is degraded (warn), not dead,
+    matching the shallow doctor's READY-with-warnings philosophy.
+    """
+    lines = ["Deep doctor - live model canaries (one prompt per pair):"]
+    for r in deep["pairs"]:
+        tag = "[OK]     " if r["status"] == "OK" else "[FAIL]   "
+        shown_model = r["model"] or "(CLI default)"
+        lines.append(
+            f"{tag} {r['backend']:7} model {shown_model}: "
+            f"{r['detail']} ({r['elapsed']:.1f}s)"
+        )
+        lines.append(f"            used by roles: {', '.join(r['roles'])}")
+
+    dead_roles = []
+    for role, chain in deep["role_chains"].items():
+        if not chain:
+            dead_roles.append(role)
+            lines.append(
+                f"[ERROR]   role {role}: chain failed to resolve - cannot canary"
+            )
+            continue
+        alive = None
+        for backend in chain:
+            ok = any(
+                r["status"] == "OK"
+                for r in deep["pairs"]
+                if r["backend"] == backend and role in r["roles"]
+            )
+            if ok:
+                alive = backend
+                break
+        if alive is None:
+            dead_roles.append(role)
+            lines.append(
+                f"[ERROR]   role {role}: NO backend in its chain "
+                f"({', '.join(chain)}) answered the canary"
+            )
+        elif alive != chain[0]:
+            lines.append(
+                f"[warn]    role {role}: primary {chain[0]} failed its canary; "
+                f"live traffic will fall back to {alive}"
+            )
+    if dead_roles:
+        lines.append(
+            "Deep result: NOT READY - roles with no live backend: "
+            + ", ".join(sorted(dead_roles))
+        )
+        return lines, 1
+    lines.append("Deep result: every role has at least one live backend.")
+    return lines, 0
+
+
+async def run_doctor_report_async(deep: bool = False) -> int:
     """Run checks + print the report from inside an existing event loop."""
     _, skill_ok = _header_lines()
     results = await run_doctor_async()
     lines, code = report_lines(results, skill_ok)
     print("\n".join(lines))
+    if deep:
+        deep_results = await run_deep_doctor_async()
+        deep_lines, deep_code = deep_report_lines(deep_results)
+        print("\n".join(deep_lines))
+        code = max(code, deep_code)
     return code
 
 
-def run_doctor() -> int:
+def run_doctor(deep: bool = False) -> int:
     """Standalone entry point (own event loop). Returns a process exit code."""
-    return asyncio.run(run_doctor_report_async())
+    return asyncio.run(run_doctor_report_async(deep=deep))

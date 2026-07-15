@@ -16,9 +16,12 @@ models:
   # role with GENIUS_PROVIDER_<ROLE>=grok,... (model not passed to the CLI).
   grok: "grok-build-0.1"
   # agy CLI (--model), Antigravity 2.0 / Gemini, the default Researcher
-  # primary. Alternative (2026-07): gemini-3.1-pro-preview (deeper research,
-  # slower). Empty = account default.
-  agy: "gemini-3.5-flash"
+  # primary. agy 1.1.2 accepts the DISPLAY names printed by `agy models`
+  # ("Gemini 3.5 Flash (Medium)", "Gemini 3.1 Pro (High)", ...) — the old
+  # dash slugs like "gemini-3.5-flash" are rejected with "not recognized as
+  # a known model", which silently pushed every call to the claude fallback.
+  # Empty = account default. Verify with: python serve.py --doctor --deep
+  agy: "Gemini 3.5 Flash (Medium)"
   # nlm CLI (NotebookLM). OPT-IN backend only (no default chain uses it);
   # enable per role with GENIUS_PROVIDER_<ROLE>=notebooklm,... This is NOT a
   # model name: it is the default notebook id/alias to query (empty = require
