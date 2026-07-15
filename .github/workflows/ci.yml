@@ -75,10 +75,74 @@ jobs:
 
       - name: Docker smoke build
         # Validates the Dockerfile + .dockerignore + requirements install cleanly
-        # into the image. Build only (no push, no run) — the agent CLIs the
-        # providers need aren't in the image by design, so there is no pipeline
-        # to exercise here.
+        # into the image. The agent CLIs the providers need aren't in the image
+        # by design, so no full pipeline runs here — the steps below exercise
+        # the coordination surface (boot + auth) instead.
         run: docker build -t genius:ci .
+
+      - name: Compose config validation
+        # docker-compose.yml hard-fails (`:?`) when SKILL_API_KEY /
+        # GENIUS_DASHBOARD_TOKEN are unset, so render it with both present:
+        # a compose edit that breaks interpolation or drops the auth wiring
+        # fails CI here instead of at the user's `docker compose up`.
+        env:
+          SKILL_API_KEY: ci-smoke-key
+          GENIUS_DASHBOARD_TOKEN: ci-smoke-token
+        run: docker compose config -q
+
+      - name: Container auth smoke test
+        # Boot one skill server from the built image and prove the auth path
+        # end-to-end: /health answers, an unauthenticated /run is rejected,
+        # and a /run signed with SKILL_API_KEY (JWT + HMAC body checksum, via
+        # the repo's own helpers) is accepted. The background agent execution
+        # fails later without vendor CLIs — request acceptance is the wiring
+        # under test, i.e. exactly what a missing SKILL_API_KEY env used to
+        # break silently.
+        run: |
+          docker run -d --name genius-smoke \
+            -e SKILL_API_KEY=ci-smoke-key \
+            -e GENIUS_SKILL_HOST=0.0.0.0 \
+            -p 8005:8005 genius:ci python serve.py --roles security
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8005/health >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8005/health
+          echo
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' -d '{"prompt":"x"}' \
+            http://127.0.0.1:8005/run)
+          echo "unauthenticated /run -> HTTP $code"
+          test "$code" = "400" -o "$code" = "401"
+          docker exec genius-smoke python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+
+          from ag_core.utils.jwt import encode_jwt
+          from ag_core.utils.security import calculate_checksum
+
+          key = os.environ["SKILL_API_KEY"]
+          now = int(time.time())
+          token = encode_jwt({"sub": "ci-smoke", "iat": now, "exp": now + 300}, key)
+          body = json.dumps({"prompt": "/security_audit ping"}).encode("utf-8")
+          req = urllib.request.Request(
+              "http://127.0.0.1:8005/run",
+              data=body,
+              headers={
+                  "Content-Type": "application/json",
+                  "X-API-Key": token,
+                  "X-Payload-SHA256": calculate_checksum(body, key),
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=15) as resp:
+              out = json.loads(resp.read().decode("utf-8"))
+          print("authenticated /run ->", out)
+          assert resp.status == 200 and out.get("task_id"), out
+          PY
+          docker rm -f genius-smoke
 
   test-macos:
     if: >-

@@ -6,6 +6,21 @@ version: '3.8'
 # the container kept serving the volume's stale copy of the code. Keeping the
 # volume at /data leaves /app as pure, rebuildable source and isolates data
 # from code. GENIUS_DB_PATH points every service at /data/genius.db.
+#
+# AUTH: every service gets SKILL_API_KEY from the host env / a .env file next
+# to this compose file. Compose only uses .env for ${...} interpolation — it
+# does NOT inject it into containers (and .dockerignore keeps .env out of the
+# image), so without the explicit `environment:` entry below the hub and the
+# skill servers boot fine but reject every authenticated request. The
+# `:?` form fails fast at `docker compose up` instead.
+#
+# PORTS: only the hub (8000) and dashboard (8080) are published on all
+# interfaces; the six agent servers are for the orchestrator/hub only, so
+# they are published on 127.0.0.1 (host-local access keeps working, the LAN
+# cannot reach them; in-network services use service names regardless).
+x-skill-api-key: &skill_api_key
+  SKILL_API_KEY=${SKILL_API_KEY:?set SKILL_API_KEY (host env or .env next to docker-compose.yml)}
+
 services:
   hub:
     build: .
@@ -15,6 +30,15 @@ services:
     environment:
       - GENIUS_DB_PATH=/data/genius.db
       - GENIUS_HUB_HOST=0.0.0.0
+      - *skill_api_key
+    healthcheck:
+      # The hub exposes no GET /health (authenticated catch-all only): a TCP
+      # connect proves the listener is up without tripping auth.
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     volumes:
       - genius_data:/data
 
@@ -33,6 +57,14 @@ services:
       # dashboard.py itself fails closed on a non-loopback bind without a token.
       - GENIUS_DASHBOARD_HOST=0.0.0.0
       - GENIUS_DASHBOARD_TOKEN=${GENIUS_DASHBOARD_TOKEN:?set GENIUS_DASHBOARD_TOKEN to expose the dashboard}
+      # The proxy endpoints sign hub calls with the shared secret.
+      - *skill_api_key
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     depends_on:
       - hub
     volumes:
@@ -42,10 +74,17 @@ services:
     build: .
     command: python serve.py --roles grok
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     environment:
       - GENIUS_DB_PATH=/data/genius.db
       - GENIUS_SKILL_HOST=0.0.0.0
+      - *skill_api_key
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       - hub
     volumes:
@@ -55,10 +94,17 @@ services:
     build: .
     command: python serve.py --roles claude
     ports:
-      - "8002:8002"
+      - "127.0.0.1:8002:8002"
     environment:
       - GENIUS_DB_PATH=/data/genius.db
       - GENIUS_SKILL_HOST=0.0.0.0
+      - *skill_api_key
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       - hub
     volumes:
@@ -68,10 +114,17 @@ services:
     build: .
     command: python serve.py --roles codex
     ports:
-      - "8003:8003"
+      - "127.0.0.1:8003:8003"
     environment:
       - GENIUS_DB_PATH=/data/genius.db
       - GENIUS_SKILL_HOST=0.0.0.0
+      - *skill_api_key
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8003/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       - hub
     volumes:
@@ -81,10 +134,17 @@ services:
     build: .
     command: python serve.py --roles tester
     ports:
-      - "8004:8004"
+      - "127.0.0.1:8004:8004"
     environment:
       - GENIUS_DB_PATH=/data/genius.db
       - GENIUS_SKILL_HOST=0.0.0.0
+      - *skill_api_key
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8004/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       - hub
     volumes:
@@ -94,10 +154,17 @@ services:
     build: .
     command: python serve.py --roles security
     ports:
-      - "8005:8005"
+      - "127.0.0.1:8005:8005"
     environment:
       - GENIUS_DB_PATH=/data/genius.db
       - GENIUS_SKILL_HOST=0.0.0.0
+      - *skill_api_key
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8005/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       - hub
     volumes:
@@ -107,10 +174,17 @@ services:
     build: .
     command: python serve.py --roles devops
     ports:
-      - "8006:8006"
+      - "127.0.0.1:8006:8006"
     environment:
       - GENIUS_DB_PATH=/data/genius.db
       - GENIUS_SKILL_HOST=0.0.0.0
+      - *skill_api_key
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8006/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       - hub
     volumes:
