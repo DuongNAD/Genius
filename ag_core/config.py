@@ -22,6 +22,15 @@ def _load_env():
     # the tests need before this module is imported.
     if under_pytest():
         return
+    # Explicit trusted path: GENIUS_ENV_FILE pins WHICH .env is loaded and
+    # disables the cwd-upward walk. Running Genius inside an untrusted repo
+    # must not let that repo's .env reconfigure provider paths, service
+    # destinations, or behavior toggles.
+    explicit = (os.environ.get("GENIUS_ENV_FILE") or "").strip()
+    if explicit:
+        if os.path.exists(explicit):
+            load_dotenv(explicit, override=False)
+        return
     curr_dir = os.path.abspath(os.getcwd())
     while curr_dir:
         temp_path = os.path.join(curr_dir, ".env")
@@ -47,6 +56,14 @@ _load_env()
 def _reload_env_safely():
     if under_pytest():
         return
+    # Same explicit-trusted-path contract as _load_env: GENIUS_ENV_FILE pins
+    # the .env and disables the cwd-upward walk.
+    explicit = (os.environ.get("GENIUS_ENV_FILE") or "").strip()
+    if explicit:
+        env_path = explicit if os.path.exists(explicit) else None
+        if env_path:
+            _apply_env_file(env_path)
+        return
     curr_dir = os.path.abspath(os.getcwd())
     env_path = None
     while curr_dir:
@@ -66,27 +83,31 @@ def _reload_env_safely():
             env_path = fallback_env
 
     if env_path and os.path.exists(env_path):
-        with open(env_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
+        _apply_env_file(env_path)
+
+
+def _apply_env_file(env_path: str) -> None:
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'\"")
+                # A var already present in the process environment at import
+                # time (captured in ``_original_env``) was provided by the
+                # CALLER — Antigravity's mcp_config ``env`` block, a parent
+                # shell, a docker `-e` — and MUST win over .env. Only fill
+                # in vars the caller did not set, and still never clobber a
+                # value changed at runtime after import.
+                if k in _original_env:
                     continue
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    k = k.strip()
-                    v = v.strip().strip("'\"")
-                    # A var already present in the process environment at import
-                    # time (captured in ``_original_env``) was provided by the
-                    # CALLER — Antigravity's mcp_config ``env`` block, a parent
-                    # shell, a docker `-e` — and MUST win over .env. Only fill
-                    # in vars the caller did not set, and still never clobber a
-                    # value changed at runtime after import.
-                    if k in _original_env:
-                        continue
-                    current_val = os.environ.get(k)
-                    original_val = _original_env.get(k)
-                    if current_val == original_val:
-                        os.environ[k] = v
+                current_val = os.environ.get(k)
+                original_val = _original_env.get(k)
+                if current_val == original_val:
+                    os.environ[k] = v
 
 
 class AppConfig(BaseModel):
@@ -230,6 +251,15 @@ def load_config(config_path: str = "config.yaml") -> Config:
     :func:`_config_cache_ttl`); the returned object is shared across callers
     within that window and must be treated as read-only.
     """
+    # Explicit trusted config: GENIUS_CONFIG_PATH pins the yaml and disables
+    # the cwd-upward walk when the caller asked for the default file — running
+    # inside an untrusted repo must not let that repo's config.yaml redirect
+    # service URLs or models. An explicit config_path argument still wins.
+    env_config = (os.environ.get("GENIUS_CONFIG_PATH") or "").strip()
+    explicit_config = bool(env_config) and config_path == "config.yaml"
+    if explicit_config:
+        config_path = os.path.abspath(env_config)
+
     ttl = _config_cache_ttl()
     if ttl > 0:
         with _CONFIG_CACHE_LOCK:
@@ -340,11 +370,35 @@ def load_config(config_path: str = "config.yaml") -> Config:
             for role, port in registry.items():
                 field_name = role_to_field.get(role)
                 if field_name and hasattr(config.services, field_name):
+                    # A registry value is only ever a TCP port: require a real
+                    # integer in 1-65535 (via str() so a float like 8001.5 is
+                    # rejected instead of silently truncated) — junk must not
+                    # smuggle arbitrary URL suffixes into service destinations.
+                    try:
+                        port_num = int(str(port))
+                    except (TypeError, ValueError):
+                        logging.getLogger(__name__).warning(
+                            "Ignoring service registry entry %r: port %r is "
+                            "not an integer",
+                            role,
+                            port,
+                        )
+                        continue
+                    if not 1 <= port_num <= 65535:
+                        logging.getLogger(__name__).warning(
+                            "Ignoring service registry entry %r: port %r out "
+                            "of range 1-65535",
+                            role,
+                            port,
+                        )
+                        continue
                     suffix = ""
                     if under_pytest():
                         suffix = f"/{role}"
                     setattr(
-                        config.services, field_name, f"http://localhost:{port}{suffix}"
+                        config.services,
+                        field_name,
+                        f"http://localhost:{port_num}{suffix}",
                     )
         except Exception as exc:
             # A malformed registry must not silently revert every service URL to
