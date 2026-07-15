@@ -22,7 +22,7 @@ python orchestrator.py --prompt "build a TODO API"   # run the full pipeline dir
 python orchestrator.py --prompt "..." --pipeline e2e # E2E pipeline variant
 python dashboard.py                      # TUI / WebSocket monitoring dashboard (port 8080)
 python control_panel.py                  # web control panel: see pipeline config/model/effort + CLI health, run doctor/pipeline (GENIUS_PANEL_PORT, default 8090)
-python mcp_server.py stdio               # MCP server for Antigravity (18 tools; no arg = HTTP mode)
+python mcp_server.py stdio               # MCP server for Antigravity (19 tools; no arg = HTTP mode)
 
 # Tests
 python -m pytest                         # full suite (CI runs exactly this, on windows-latest, Python 3.11)

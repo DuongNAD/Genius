@@ -112,7 +112,7 @@ python mcp_server.py stdio      # chế độ MCP stdio cho Antigravity
 python mcp_server.py            # (tuỳ chọn) chế độ HTTP, cổng 8000
 ```
 
-Server xây trên **MCP Python SDK chính thức** (`mcp`), hỗ trợ đầy đủ handshake (`initialize` với thương lượng `protocolVersion` / `notifications/initialized` / `ping`) và expose **18 tool** cùng **MCP resources**. Trên wire mỗi tool được đặt tên **`genius_<tên>`** (namespaced để không đụng với các MCP server khác trong cùng cấu hình Antigravity); schema tham số dùng đúng khoá camelCase `inputSchema`, và lỗi khi gọi tool trả về `isError: true` (kèm thông báo) thay vì lỗi protocol, để agent tự sửa. Có thể lộ **tập con tool** qua biến `GENIUS_MCP_TOOLS=genius_orchestrate,genius_doctor,...` để giữ dưới ngân sách ~100 tool khi bật nhiều MCP.
+Server xây trên **MCP Python SDK chính thức** (`mcp`), hỗ trợ đầy đủ handshake (`initialize` với thương lượng `protocolVersion` / `notifications/initialized` / `ping`) và expose **19 tool** cùng **MCP resources** (mới: `orchestrate_revise` — lặp chỉnh sửa bản kế hoạch tại gate design theo feedback của bạn cho tới khi bạn duyệt bằng `orchestrate_approve` mới bắt đầu code). Trên wire mỗi tool được đặt tên **`genius_<tên>`** (namespaced để không đụng với các MCP server khác trong cùng cấu hình Antigravity); schema tham số dùng đúng khoá camelCase `inputSchema`, và lỗi khi gọi tool trả về `isError: true` (kèm thông báo) thay vì lỗi protocol, để agent tự sửa. Có thể lộ **tập con tool** qua biến `GENIUS_MCP_TOOLS=genius_orchestrate,genius_doctor,...` để giữ dưới ngân sách ~100 tool khi bật nhiều MCP.
 
 | Tool (tên trên wire) | Chức năng |
 |------|-----------|

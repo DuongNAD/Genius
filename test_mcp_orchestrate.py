@@ -731,6 +731,198 @@ async def test_orchestrate_approve_requires_awaiting_state():
         )
 
 
+# --- plan revision loop (orchestrate_revise) ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_revise_loops_design_gate(tmp_path):
+    """The plan-review flow: pause at design with the plan inlined, revise it
+    with feedback as many times as the reviewer wants, and start coding only
+    on approve."""
+    feedbacks = []
+
+    async def fake_pipeline(prompt, workspace=None, stage_gate=None, flow="sequential"):
+        await stage_gate("research")
+        round_no = 0
+        while True:
+            (tmp_path / "design.md").write_text(
+                f"plan v{round_no}", encoding="utf-8"
+            )
+            fb = await stage_gate("design")
+            if not fb:
+                break
+            feedbacks.append(fb)
+            round_no += 1
+        await stage_gate("code")
+
+    with patch("orchestrator.run_pipeline", new=AsyncMock(side_effect=fake_pipeline)):
+        out = await mcp_server.dispatch_tool(
+            "orchestrate",
+            {
+                "prompt": "gated build",
+                "workspace": str(tmp_path),
+                "require_approval": True,
+            },
+        )
+        job_id = json.loads(out)["job_id"]
+
+        # research gate: plain approve.
+        job = await _wait_job_state(job_id, "awaiting_approval")
+        assert job["awaiting_stage"] == "research"
+        await mcp_server.dispatch_tool("orchestrate_approve", {"job_id": job_id})
+
+        # design gate, round 0: the plan is inlined for display.
+        job = await _wait_job_state(job_id, "awaiting_approval")
+        assert job["awaiting_stage"] == "design"
+        status = json.loads(
+            await mcp_server.dispatch_tool("orchestrate_status", {"job_id": job_id})
+        )
+        assert status["plan"] == "plan v0"
+        assert "revision_round" not in status
+
+        # Two revision rounds, then approve.
+        revised = json.loads(
+            await mcp_server.dispatch_tool(
+                "orchestrate_revise", {"job_id": job_id, "feedback": "add auth"}
+            )
+        )
+        assert revised["action"] == "revision_requested"
+        assert revised["revision_round"] == 1
+
+        job = await _wait_job_state(job_id, "awaiting_approval")
+        assert job["awaiting_stage"] == "design"
+        status = json.loads(
+            await mcp_server.dispatch_tool("orchestrate_status", {"job_id": job_id})
+        )
+        assert status["plan"] == "plan v1"
+        assert status["revision_round"] == 1
+
+        await mcp_server.dispatch_tool(
+            "orchestrate_revise", {"job_id": job_id, "feedback": "also add tests"}
+        )
+        job = await _wait_job_state(job_id, "awaiting_approval")
+        status = json.loads(
+            await mcp_server.dispatch_tool("orchestrate_status", {"job_id": job_id})
+        )
+        assert status["plan"] == "plan v2"
+        assert status["revision_round"] == 2
+
+        await mcp_server.dispatch_tool("orchestrate_approve", {"job_id": job_id})
+
+        # code gate: plain approve, then completion.
+        job = await _wait_job_state(job_id, "awaiting_approval")
+        assert job["awaiting_stage"] == "code"
+        await mcp_server.dispatch_tool("orchestrate_approve", {"job_id": job_id})
+        await _wait_job_state(job_id, "completed")
+
+    assert feedbacks == ["add auth", "also add tests"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_revise_only_at_design_gate(tmp_path):
+    async def fake_pipeline(prompt, workspace=None, stage_gate=None, flow="sequential"):
+        await stage_gate("research")
+
+    with patch("orchestrator.run_pipeline", new=AsyncMock(side_effect=fake_pipeline)):
+        out = await mcp_server.dispatch_tool(
+            "orchestrate",
+            {
+                "prompt": "gated build",
+                "workspace": str(tmp_path),
+                "require_approval": True,
+            },
+        )
+        job_id = json.loads(out)["job_id"]
+        await _wait_job_state(job_id, "awaiting_approval")
+        with pytest.raises(ValueError, match="design"):
+            await mcp_server.dispatch_tool(
+                "orchestrate_revise", {"job_id": job_id, "feedback": "x"}
+            )
+        # The failed revise must not have consumed the pause.
+        assert mcp_server.ORCHESTRATION_JOBS[job_id]["status"] == "awaiting_approval"
+        await mcp_server.dispatch_tool("orchestrate_approve", {"job_id": job_id})
+        await _wait_job_state(job_id, "completed")
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_revise_requires_awaiting_state_and_feedback(tmp_path):
+    _register("j-revise-not-waiting")
+    with pytest.raises(ValueError):
+        await mcp_server.dispatch_tool(
+            "orchestrate_revise", {"job_id": "j-revise-not-waiting", "feedback": "x"}
+        )
+
+    async def fake_pipeline(prompt, workspace=None, stage_gate=None, flow="sequential"):
+        await stage_gate("design")
+
+    with patch("orchestrator.run_pipeline", new=AsyncMock(side_effect=fake_pipeline)):
+        out = await mcp_server.dispatch_tool(
+            "orchestrate",
+            {
+                "prompt": "gated build",
+                "workspace": str(tmp_path),
+                "require_approval": True,
+            },
+        )
+        job_id = json.loads(out)["job_id"]
+        await _wait_job_state(job_id, "awaiting_approval")
+        with pytest.raises(ValueError, match="feedback"):
+            await mcp_server.dispatch_tool(
+                "orchestrate_revise", {"job_id": job_id, "feedback": "   "}
+            )
+        await mcp_server.dispatch_tool("orchestrate_approve", {"job_id": job_id})
+        await _wait_job_state(job_id, "completed")
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_approval_stages_pauses_only_at_subset(tmp_path):
+    """approval_stages=['design'] gates ONLY the design stage (and implies
+    require_approval): research/code pass straight through."""
+    stages_run = []
+
+    async def fake_pipeline(prompt, workspace=None, stage_gate=None, flow="sequential"):
+        for stage in ("research", "design", "code"):
+            stages_run.append(stage)
+            if stage_gate is not None:
+                await stage_gate(stage)
+
+    with patch("orchestrator.run_pipeline", new=AsyncMock(side_effect=fake_pipeline)):
+        out = await mcp_server.dispatch_tool(
+            "orchestrate",
+            {
+                "prompt": "gated build",
+                "workspace": str(tmp_path),
+                "approval_stages": ["design"],
+            },
+        )
+        job_id = json.loads(out)["job_id"]
+        job = await _wait_job_state(job_id, "awaiting_approval")
+        # The ONLY pause is the design gate; research already ran through.
+        assert job["awaiting_stage"] == "design"
+        assert stages_run == ["research", "design"]
+        await mcp_server.dispatch_tool("orchestrate_approve", {"job_id": job_id})
+        await _wait_job_state(job_id, "completed")
+    assert stages_run == ["research", "design", "code"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_approval_stages_validation():
+    with pytest.raises(ValueError, match="approval_stages"):
+        await mcp_server.dispatch_tool(
+            "orchestrate", {"prompt": "x", "approval_stages": []}
+        )
+    with pytest.raises(ValueError, match="Unknown approval_stages"):
+        await mcp_server.dispatch_tool(
+            "orchestrate", {"prompt": "x", "approval_stages": ["bogus"]}
+        )
+    # approval_stages implies require_approval, which e2e does not support.
+    with pytest.raises(ValueError, match="e2e"):
+        await mcp_server.dispatch_tool(
+            "orchestrate",
+            {"prompt": "x", "pipeline": "e2e", "approval_stages": ["design"]},
+        )
+
+
 @pytest.mark.asyncio
 async def test_orchestrate_require_approval_rejects_e2e():
     with pytest.raises(ValueError):

@@ -35,6 +35,7 @@ EXPECTED_TOOLS = {
     "genius_orchestrate",
     "genius_orchestrate_approve",
     "genius_orchestrate_reject",
+    "genius_orchestrate_revise",
     "genius_orchestrate_status",
     "genius_doctor",
     "genius_debate",

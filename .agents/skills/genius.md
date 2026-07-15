@@ -61,9 +61,11 @@ BUILD steps:
    - `prompt`: the rewritten golden prompt.
    - `pipeline`: `"custom"` — plan-first (Claude Opus) → codex-gpt5.6-sol debate →
      gemini-3.5-flash coding + tests → codex-gpt5.6-sol final review.
-   - `require_approval`: `true` ONLY if the user asked to approve each stage
-     (otherwise omit it). When true, resume with `genius_orchestrate_approve` /
-     `genius_orchestrate_reject` at each `awaiting_approval` pause.
+   - `approval_stages`: `["design"]` — **this is the DEFAULT flow**: the job
+     pauses ONCE with the complete plan so the user reviews it BEFORE any code
+     is written (step 3a). Skip it ONLY if the user explicitly said to build
+     without review ("cứ làm luôn", "không cần duyệt"). If the user asked to
+     approve EVERY stage, pass `require_approval: true` instead.
    - **Do NOT pass a `workspace` argument.** Genius writes to its own writable
      jobs directory, so your project stays clean and artifacts never fail to
      save. (A relative/non-writable workspace is ignored anyway.)
@@ -75,6 +77,28 @@ BUILD steps:
    stage is the long one — often 10+ minutes), `stages` lists what already
    finished (research → design → code → review → deploy), and `workspace` is
    the absolute directory the files land in.
+
+3a. PLAN REVIEW LOOP — when a poll returns `status: "awaiting_approval"` with
+   `awaiting_stage: "design"`:
+   - **Print the ENTIRE `plan` field to the user** (verbatim, in a code block —
+     do not summarize it away; the user reviews the real plan). Mention
+     `revision_round` if > 0.
+   - Ask the user (in their language): what to add, upgrade, or change — or
+     approve.
+   - If the user gives feedback/changes → call `genius_orchestrate_revise`
+     with `job_id` and their feedback (translate to English if needed, keep
+     every requirement). The architect rewrites the plan and the job pauses at
+     the design gate again with the revised `plan` — show it and repeat. There
+     is no round limit: loop until the user is satisfied.
+   - **Coding starts ONLY on explicit user approval** ("duyệt", "ok chốt",
+     "approve", "làm đi"...) → call `genius_orchestrate_approve`. Never
+     approve on the user's behalf. `genius_orchestrate_reject` cancels the
+     whole job (use only if the user abandons it).
+   - Note: the gate times out (default 1h, GENIUS_APPROVAL_TIMEOUT) — if the
+     user goes quiet, warn them the job will fail at the timeout.
+   - If the plan comes back UNCHANGED after a revise, say so — the revision
+     failed validation and was discarded (details in the job logs); refine the
+     feedback and try again.
 
 4. On `completed`: read the artifacts (research / design / review / audit / deploy)
    from the `artifacts_ready` URIs (exact URIs, including the `.md` suffix) and

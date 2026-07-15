@@ -393,6 +393,31 @@ def _collect_artifacts(workspace: str) -> Dict[str, str]:
     return artifacts
 
 
+# Cap for the design plan inlined into orchestrate_status while a job is
+# paused at the design gate. Large enough for any real plan; the full file
+# stays readable via the genius://artifacts resource.
+_PLAN_INLINE_MAX_CHARS = 20000
+
+
+def _inline_plan(job: Dict[str, Any]):
+    """The job's current design.md content (capped) for inline display while
+    paused at the design approval gate, so the client can show the plan to
+    the user — and iterate on it via orchestrate_revise — without a
+    resources/read round trip. None when the file is unreadable."""
+    design_path = os.path.join(job.get("workspace") or "", "design.md")
+    try:
+        with open(design_path, "r", encoding="utf-8", errors="replace") as fh:
+            plan = fh.read()
+    except OSError:
+        return None
+    if len(plan) > _PLAN_INLINE_MAX_CHARS:
+        plan = plan[:_PLAN_INLINE_MAX_CHARS] + (
+            "\n\n...[plan truncated - read genius://artifacts/"
+            f"{job.get('job_id', '')}/design.md for the full plan]"
+        )
+    return plan
+
+
 def _approval_timeout() -> float:
     """Max seconds an awaiting_approval job waits before failing.
 
@@ -606,6 +631,13 @@ async def _watch_job_progress(job: Dict[str, Any]) -> None:
             }
             if job.get("awaiting_stage"):
                 payload["awaiting_stage"] = job["awaiting_stage"]
+                if job["awaiting_stage"] == "design":
+                    payload["hint"] = (
+                        "Plan ready for review: call orchestrate_status to "
+                        "read the 'plan' field and show it to the user, then "
+                        "orchestrate_revise (feedback) to improve it or "
+                        "orchestrate_approve to start coding."
+                    )
             await _notify_progress(payload)
         await asyncio.sleep(_progress_poll_seconds())
 
@@ -616,6 +648,7 @@ async def _run_orchestration(
     pipeline: str,
     workspace: str = None,
     require_approval: bool = False,
+    approval_stages=None,
 ) -> None:
     job = ORCHESTRATION_JOBS[job_id]
     watcher = asyncio.create_task(_watch_job_progress(job))
@@ -631,11 +664,15 @@ async def _run_orchestration(
         stage_gate = None
         if require_approval:
 
-            async def _approval_gate(stage: str) -> None:
+            async def _approval_gate(stage: str):
                 # Pause at a stage boundary until orchestrate_approve /
-                # orchestrate_reject flips the event. Artifacts are collected
-                # first so the reviewer can read the stage output while the
-                # job is paused.
+                # orchestrate_reject / orchestrate_revise flips the event.
+                # Artifacts are collected first so the reviewer can read the
+                # stage output while the job is paused.
+                if approval_stages and stage not in approval_stages:
+                    # The caller gated a subset (e.g. only "design" for the
+                    # plan-review flow): other stages pass straight through.
+                    return None
                 job["awaiting_stage"] = stage
                 job["status"] = "awaiting_approval"
                 job["artifacts"] = _collect_artifacts(workspace or os.getcwd())
@@ -660,6 +697,11 @@ async def _run_orchestration(
                         f"Pipeline stopped: stage '{stage}' was rejected"
                         + (f" ({reason})" if reason else "")
                     )
+                # orchestrate_revise stashed reviewer feedback: hand it to the
+                # pipeline, which revises the stage output and re-enters this
+                # gate. An approve leaves no feedback -> None -> the pipeline
+                # proceeds (the legacy contract).
+                return job.pop("revision_feedback", None)
 
             stage_gate = _approval_gate
 
@@ -754,7 +796,9 @@ def _journal_job(job: Dict[str, Any]) -> None:
             "started_at",
             "finished_at",
             "require_approval",
+            "approval_stages",
             "awaiting_stage",
+            "revision_round",
         )
     }
     try:
@@ -962,6 +1006,23 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             raise ValueError("pipeline must be 'sequential', 'e2e', or 'custom'.")
         workspace = arguments.get("workspace")
         require_approval = bool(arguments.get("require_approval", False))
+        # Optional subset of gates to actually pause at (e.g. ["design"] for
+        # the plan-review-then-code flow). Passing it implies require_approval.
+        approval_stages = arguments.get("approval_stages")
+        if approval_stages is not None:
+            if not isinstance(approval_stages, (list, tuple)) or not approval_stages:
+                raise ValueError(
+                    "approval_stages must be a non-empty list of stage names."
+                )
+            valid_stages = {"research", "design", "code", "review", "devops"}
+            approval_stages = [str(s).strip().lower() for s in approval_stages]
+            unknown = sorted(set(approval_stages) - valid_stages)
+            if unknown:
+                raise ValueError(
+                    f"Unknown approval_stages {unknown}; valid stages: "
+                    f"{sorted(valid_stages)}."
+                )
+            require_approval = True
         if require_approval and pipeline == "e2e":
             raise ValueError(
                 "require_approval is not supported for the 'e2e' pipeline "
@@ -996,6 +1057,7 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             "started_at": time.time(),
             "finished_at": None,
             "require_approval": require_approval,
+            "approval_stages": approval_stages,
             "awaiting_stage": None,
             "approval_event": asyncio.Event(),
             "rejected": False,
@@ -1005,7 +1067,14 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         _prune_finished_jobs()
         _prune_jobs_root()
         task = asyncio.create_task(
-            _run_orchestration(job_id, prompt, pipeline, workspace, require_approval)
+            _run_orchestration(
+                job_id,
+                prompt,
+                pipeline,
+                workspace,
+                require_approval,
+                approval_stages=approval_stages,
+            )
         )
         # Hold a strong ref until the task finishes so it isn't GC-cancelled.
         _ORCHESTRATION_TASKS.add(task)
@@ -1017,12 +1086,15 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
                 if pipeline == "custom"
                 else "research, design, code"
             )
+            if approval_stages:
+                gate_names = ", ".join(approval_stages)
             message = (
-                "Pipeline started WITH approval gates: after each stage "
+                "Pipeline started WITH approval gates: after each gated stage "
                 f"({gate_names}) the job pauses as "
                 "'awaiting_approval' — review the artifacts from "
                 "orchestrate_status, then call orchestrate_approve (or "
-                "orchestrate_reject) with this job_id to continue."
+                "orchestrate_reject; at the design gate orchestrate_revise "
+                "iterates on the plan) with this job_id to continue."
             )
         return json.dumps({"job_id": job_id, "status": "running", "message": message})
 
@@ -1055,6 +1127,15 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
                 view["current_stage"] = current
         if job.get("awaiting_stage"):
             view["awaiting_stage"] = job["awaiting_stage"]
+            if job.get("revision_round"):
+                view["revision_round"] = job["revision_round"]
+            # Inline the current plan while paused at the design gate so the
+            # client can render it for the user's review (and iterate via
+            # orchestrate_revise) without a resources/read round trip.
+            if job["awaiting_stage"] == "design":
+                plan = _inline_plan(job)
+                if plan is not None:
+                    view["plan"] = plan
         # Expose artifacts while paused too, so the reviewer can read the
         # stage output before approving/rejecting.
         if job["status"] in ("completed", "awaiting_approval"):
@@ -1104,6 +1185,50 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
                 "job_id": job_id,
                 "stage": stage,
                 "action": ("rejected" if name == "orchestrate_reject" else "approved"),
+            }
+        )
+
+    if name == "orchestrate_revise":
+        job_id = arguments.get("job_id", "")
+        job = ORCHESTRATION_JOBS.get(job_id)
+        if job is None:
+            raise ValueError(f"Unknown job_id: {job_id}")
+        if job.get("status") != "awaiting_approval":
+            raise ValueError(
+                f"Job {job_id} is not awaiting approval "
+                f"(status: {job.get('status')})."
+            )
+        stage = job.get("awaiting_stage")
+        if stage != "design":
+            raise ValueError(
+                "orchestrate_revise currently supports only the 'design' "
+                f"approval gate (job is awaiting '{stage}'). Use "
+                "orchestrate_approve or orchestrate_reject at this gate."
+            )
+        feedback = (arguments.get("feedback") or "").strip()
+        if not feedback:
+            raise ValueError("orchestrate_revise requires non-empty 'feedback'.")
+        job["revision_feedback"] = feedback
+        job["revision_round"] = int(job.get("revision_round") or 0) + 1
+        # Flip the pause state synchronously (same contract as approve/reject)
+        # so a status poll right after this call never sees a stale pause.
+        job["awaiting_stage"] = None
+        job["status"] = "running"
+        job["approval_event"].set()
+        _journal_job(job)
+        return json.dumps(
+            {
+                "job_id": job_id,
+                "stage": stage,
+                "action": "revision_requested",
+                "revision_round": job["revision_round"],
+                "message": (
+                    "The architect is revising the plan with this feedback. "
+                    "Poll orchestrate_status: the job will pause at the "
+                    "design gate again, with the revised plan inlined in the "
+                    "'plan' field. Repeat orchestrate_revise until the plan "
+                    "is right, then orchestrate_approve to start coding."
+                ),
             }
         )
 
@@ -1346,7 +1471,7 @@ _READ_ONLY_TOOLS = {
 }
 _DESTRUCTIVE_TOOLS = {
     "orchestrate", "orchestrate_approve", "orchestrate_reject",
-    "notebooklm_research",
+    "orchestrate_revise", "notebooklm_research",
 }
 
 

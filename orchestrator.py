@@ -3236,7 +3236,99 @@ async def run_pipeline(
             )
 
             if stage_gate is not None:
-                await stage_gate("design")
+                # The design gate may RETURN reviewer feedback (the MCP
+                # orchestrate_revise tool): revise the plan with the architect
+                # and pause at the SAME gate again, looping until the reviewer
+                # approves (gate returns None/empty — the legacy contract, so
+                # gates that return nothing behave exactly as before). A
+                # revision that fails to produce a valid DesignPlan keeps the
+                # current design and pauses again rather than failing the job.
+                revision_idx = 0
+                while True:
+                    gate_result = await stage_gate("design")
+                    feedback = (
+                        gate_result.strip() if isinstance(gate_result, str) else ""
+                    )
+                    if not feedback:
+                        break
+                    revision_idx += 1
+                    logger.info(
+                        "Design gate returned reviewer feedback (revision %d); "
+                        "re-running the architect.",
+                        revision_idx,
+                    )
+                    revise_prompt = (
+                        "Revise this DesignPlan according to the reviewer "
+                        "feedback below. Keep everything the feedback does not "
+                        "touch unchanged. Respond with EXACTLY ONE ```json "
+                        "fenced block conforming to the DesignPlan schema "
+                        '({"project_name": str, "description": str, "files": '
+                        '[{"path": str, "specification": str}]}) and NOTHING '
+                        "else - no prose before or after the block.\n\n"
+                        f"Reviewer feedback (MUST be addressed):\n{feedback}\n\n"
+                        f"Original design request:\n{claude_prompt}\n\n"
+                        f"Current design (revise this):\n{truncate_log(claude_content)}"
+                    )
+                    try:
+                        revised = await call_api(
+                            claude_url,
+                            api_key,
+                            revise_prompt,
+                            context=scanned_files,
+                            client=client,
+                            poll_timeout=poll_timeout,
+                        )
+                    except Exception as e:  # noqa: BLE001 - keep the gate loop alive
+                        logger.warning(
+                            "Design revision %d call failed (%s); keeping the "
+                            "current design and pausing again.",
+                            revision_idx,
+                            e,
+                        )
+                        continue
+                    save_raw_response(
+                        project_dir, f"design_revision{revision_idx}", revised
+                    )
+                    revised_files = parse_design_for_files(revised)
+                    if not revised_files:
+                        logger.warning(
+                            "Design revision %d was not a parseable DesignPlan; "
+                            "keeping the current design and pausing again.",
+                            revision_idx,
+                        )
+                        continue
+                    lint_blocking, lint_warnings = lint_design_plan(
+                        revised_files, revised
+                    )
+                    for warning in lint_warnings:
+                        logger.warning(f"Design lint: {warning}")
+                    if lint_blocking:
+                        logger.warning(
+                            "Design revision %d failed deterministic lint (%s); "
+                            "keeping the current design and pausing again.",
+                            revision_idx,
+                            "; ".join(lint_blocking),
+                        )
+                        continue
+                    claude_content = revised
+                    files_to_implement = revised_files
+                    _write_design_files(claude_content)
+                    # Re-publish so the post-gate bus retrieve (and every
+                    # later parent_id consumer) sees the REVISED plan.
+                    claude_art_id = await message_bus.publish_async(
+                        Artifact(
+                            name="design_plan",
+                            content=claude_content,
+                            created_by="claude",
+                            parent_id=research_art_id,
+                        )
+                    )
+                    logger.info(
+                        "Design revision %d applied: %d files in the revised "
+                        "plan. Pausing at the design gate for another review.",
+                        revision_idx,
+                        len(files_to_implement),
+                    )
 
             progress_file_path = os.path.join(workspace, ".agents", "CURRENT_PROG.md")
 

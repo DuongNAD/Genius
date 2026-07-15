@@ -133,9 +133,24 @@ TOOLS = [
                     "description": (
                         "Pause after each stage as 'awaiting_approval' until "
                         "orchestrate_approve / orchestrate_reject is called. "
+                        "At the design gate, orchestrate_revise can iterate "
+                        "on the plan with user feedback before approving. "
                         "Gate order — sequential: research, design, code; "
                         "custom: research, design, code, review, devops. "
                         "Not supported for e2e."
+                    ),
+                },
+                "approval_stages": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Pause ONLY at these gates (subset of research/design/"
+                        "code/review/devops); other stages run straight "
+                        "through. Implies require_approval. Use ['design'] "
+                        "for the plan-review-then-code flow: the job pauses "
+                        "once with the full plan, iterate with "
+                        "orchestrate_revise, and coding starts only after "
+                        "orchestrate_approve."
                     ),
                 },
             },
@@ -182,6 +197,35 @@ TOOLS = [
         },
     },
     {
+        "name": "orchestrate_revise",
+        "description": (
+            "Revise the plan a paused orchestrate job is waiting on at the "
+            "'design' approval gate: the architect re-works the DesignPlan "
+            "according to 'feedback', then the job pauses at the SAME gate "
+            "again with the revised plan (orchestrate_status field 'plan'). "
+            "Repeat until the user is satisfied, then call "
+            "orchestrate_approve to start coding. Only valid while status is "
+            "'awaiting_approval' at the design stage."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "The job_id returned by orchestrate",
+                },
+                "feedback": {
+                    "type": "string",
+                    "description": (
+                        "The user's requested additions/changes/upgrades to "
+                        "the plan, passed verbatim to the architect"
+                    ),
+                },
+            },
+            "required": ["job_id", "feedback"],
+        },
+    },
+    {
         "name": "orchestrate_status",
         "description": (
             "Poll the status of a pipeline started by orchestrate. Returns status "
@@ -191,7 +235,9 @@ TOOLS = [
             "per-stage progress, artifacts_ready (job-scoped "
             "genius://artifacts/<job_id>/<name> resource URIs — read them "
             "verbatim via resources/read), and, when completed, the generated "
-            "artifacts. "
+            "artifacts. While paused at the design approval gate it also "
+            "inlines the current plan as 'plan' (show it to the user for "
+            "review) plus 'revision_round'. "
             "Job state survives MCP server restarts: an id from a previous "
             "session is recovered from its on-disk journal (interrupted = the "
             "server restarted mid-run; finished stages' artifacts remain in the "
