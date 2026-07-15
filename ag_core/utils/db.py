@@ -1,10 +1,43 @@
 import asyncio
 import os
+import random
 import sqlite3
 import queue
 import threading
+import time
 from contextlib import contextmanager
 from ag_core.utils.logger import logger
+
+
+def enable_wal(conn, retries: int = 5) -> bool:
+    """Best-effort WAL enablement with a short retry.
+
+    Several processes opening the same fresh SQLite file at once (e.g. three
+    agent CLIs starting together) can make ``PRAGMA journal_mode=WAL`` raise
+    ``database is locked`` even with a busy timeout configured: the journal-
+    mode change needs an exclusive lock, and SQLite returns SQLITE_BUSY
+    immediately — without invoking the busy handler — on deadlock-prone lock
+    upgrades. WAL is a concurrency optimization, not a correctness
+    requirement: after the retries, continue in the default journal mode
+    instead of failing startup.
+    """
+    delay = 0.05
+    for _ in range(max(1, retries)):
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            return True
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                logger.warning(f"Could not enable WAL mode: {exc}")
+                return False
+            time.sleep(delay + random.uniform(0, delay))
+            delay = min(delay * 2, 0.5)
+    logger.warning(
+        f"Could not enable WAL mode after {retries} attempts (database busy); "
+        "continuing in the default journal mode"
+    )
+    return False
+
 
 # `or` (not a get() default) so the blank GENIUS_DB_PATH shipped in
 # .env.example (and put into os.environ as "" by python-dotenv) falls back to
@@ -31,7 +64,7 @@ def init_db():
 
     conn = sqlite3.connect(db_path, timeout=30.0)
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
+        enable_wal(conn)
         # No auto_vacuum pragma: it only applies before the first table exists
         # (silent no-op afterwards), and FULL would move pages on every commit.
         # The pruned tables (seen_jtis) stay bounded by their DELETEs instead.
@@ -65,6 +98,34 @@ def init_db():
             CREATE TABLE IF NOT EXISTS seen_jtis (
                 jti TEXT PRIMARY KEY,
                 exp REAL
+            )
+        """
+        )
+        # Durable skill-server task/idempotency journal (opt-in via
+        # GENIUS_TASK_PERSIST — see ag_core.skill_app). Bounded per role by the
+        # same MAX_TRACKED_TASKS cap as the in-memory stores.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS skill_tasks (
+                task_id TEXT PRIMARY KEY,
+                role TEXT,
+                record TEXT,
+                updated_at REAL
+            )
+        """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_skill_tasks_role_updated "
+            "ON skill_tasks(role, updated_at)"
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS skill_idempotency (
+                role TEXT,
+                idem_key TEXT,
+                task_id TEXT,
+                updated_at REAL,
+                PRIMARY KEY (role, idem_key)
             )
         """
         )
@@ -103,7 +164,10 @@ def get_db_connection():
     db_path = get_db_path()
     conn = sqlite3.connect(db_path, timeout=30.0)
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
+        # Once the DB is in WAL the pragma is a cheap no-op; under startup
+        # contention it can still raise SQLITE_BUSY, which must not take the
+        # whole connection (and its caller) down.
+        enable_wal(conn, retries=3)
         yield conn
     finally:
         conn.close()
@@ -153,7 +217,7 @@ def _db_writer_worker():
                     pass
             try:
                 conn = sqlite3.connect(db_path, timeout=30.0)
-                conn.execute("PRAGMA journal_mode=WAL;")
+                enable_wal(conn)
                 current_conn_path = db_path
             except Exception as e:
                 conn = None

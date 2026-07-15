@@ -9,6 +9,10 @@ The agent/provider wiring mirrors ``ag_core.distributed.worker.execute_task``
 (the proven distributed path) so both transports behave identically.
 """
 
+import asyncio
+import json
+import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Optional
@@ -71,6 +75,139 @@ def evict_oldest(store: dict, cap: int = MAX_TRACKED_TASKS) -> None:
         store.pop(next(iter(store)))
 
 
+def task_persist_enabled() -> bool:
+    """Opt-in durable task/idempotency state (``GENIUS_TASK_PERSIST``).
+
+    When truthy, every task state transition is journaled to SQLite and
+    restored on server start: a poller hitting a restarted server sees a
+    terminal ``failed: server restarted`` record instead of a 404 (which used
+    to hard-fail the whole pipeline for a task that may even have completed),
+    and a retried idempotent /run maps back to its original task instead of
+    running the agent a second time. Off by default — the in-memory behavior
+    stays byte-identical.
+    """
+    return str(os.environ.get("GENIUS_TASK_PERSIST") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _store_task_impl(conn, role, task_id, record_json, now, cap):
+    conn.execute(
+        "INSERT OR REPLACE INTO skill_tasks (task_id, role, record, updated_at) "
+        "VALUES (?, ?, ?, ?)",
+        (task_id, role, record_json, now),
+    )
+    conn.execute(
+        "DELETE FROM skill_tasks WHERE role = ? AND task_id NOT IN ("
+        "SELECT task_id FROM skill_tasks WHERE role = ? "
+        "ORDER BY updated_at DESC LIMIT ?)",
+        (role, role, cap),
+    )
+    conn.commit()
+
+
+def _store_idem_impl(conn, role, idem_key, task_id, now, cap):
+    conn.execute(
+        "INSERT OR REPLACE INTO skill_idempotency "
+        "(role, idem_key, task_id, updated_at) VALUES (?, ?, ?, ?)",
+        (role, idem_key, task_id, now),
+    )
+    conn.execute(
+        "DELETE FROM skill_idempotency WHERE role = ? AND idem_key NOT IN ("
+        "SELECT idem_key FROM skill_idempotency WHERE role = ? "
+        "ORDER BY updated_at DESC LIMIT ?)",
+        (role, role, cap),
+    )
+    conn.commit()
+
+
+def _persist_task(role: str, task_id: str, record: dict) -> None:
+    """Journal one task state. Best-effort: a journaling failure must never
+    fail the request path — the in-memory store remains authoritative."""
+    try:
+        from ag_core.utils.db import enqueue_db_write
+
+        enqueue_db_write(
+            _store_task_impl,
+            role,
+            task_id,
+            json.dumps(record, default=str),
+            time.time(),
+            MAX_TRACKED_TASKS,
+        )
+    except Exception:  # noqa: BLE001 - never fail the request path
+        logger.exception("[skill:%s] failed to persist task %s", role, task_id)
+
+
+def _persist_idem(role: str, idem_key: str, task_id: str) -> None:
+    try:
+        from ag_core.utils.db import enqueue_db_write
+
+        enqueue_db_write(
+            _store_idem_impl,
+            role,
+            idem_key,
+            task_id,
+            time.time(),
+            MAX_TRACKED_TASKS,
+        )
+    except Exception:  # noqa: BLE001 - never fail the request path
+        logger.exception("[skill:%s] failed to persist idempotency key", role)
+
+
+def _restore_persisted_state(role: str, tasks: dict, idempotency: dict) -> None:
+    """Load the journaled state for ``role`` into the in-memory stores.
+
+    Tasks still ``processing`` when the previous process died flip to a
+    terminal failure — the agent run cannot be resumed, and a poller must see
+    a real status rather than a 404 (or worse, a fresh retry silently running
+    the agent twice)."""
+    from ag_core.utils.db import get_db_connection
+
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT task_id, record FROM skill_tasks WHERE role = ? "
+                "ORDER BY updated_at ASC",
+                (role,),
+            )
+            task_rows = cur.fetchall()
+            cur.execute(
+                "SELECT idem_key, task_id FROM skill_idempotency WHERE role = ? "
+                "ORDER BY updated_at ASC",
+                (role,),
+            )
+            idem_rows = cur.fetchall()
+    except Exception:  # noqa: BLE001 - a bad journal must not block startup
+        logger.exception("[skill:%s] could not restore persisted task state", role)
+        return
+
+    for task_id, record_json in task_rows:
+        try:
+            record = json.loads(record_json)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("status") == "processing":
+            record = {
+                "status": "failed",
+                "error": "skill server restarted while the task was processing",
+            }
+            _persist_task(role, task_id, record)
+        tasks[task_id] = record
+    evict_oldest(tasks)
+
+    for idem_key, task_id in idem_rows:
+        if task_id in tasks:
+            idempotency[idem_key] = task_id
+    evict_oldest(idempotency)
+
+
 def build_agent(role: str, stateless: bool = True):
     """Instantiate the agent + provider for ``role``.
 
@@ -88,6 +225,10 @@ def create_skill_app(role: str) -> FastAPI:
     if role not in ROLE_MAP:
         raise ValueError(f"Unknown role: {role}")
 
+    # Snapshot the persistence toggle at app-build time (one consistent answer
+    # for the app's whole lifetime).
+    persist = task_persist_enabled()
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         # Ensure the DB — including the seen_jtis anti-replay table that
@@ -97,6 +238,12 @@ def create_skill_app(role: str) -> FastAPI:
         # authenticated request 401s with "no such table: seen_jtis" while
         # /health still reports ok. Idempotent (CREATE TABLE IF NOT EXISTS).
         init_db()
+        if persist:
+            # Off the event loop: the restore does synchronous SQLite reads
+            # (and possibly re-journals processing->failed flips through the
+            # blocking writer thread). No requests are served until the
+            # lifespan yields, so mutating the stores from the thread is safe.
+            await asyncio.to_thread(_restore_persisted_state, role, tasks, idempotency)
         yield
 
     app = FastAPI(title=f"Genius {role} Skill Server", lifespan=lifespan)
@@ -167,6 +314,17 @@ def create_skill_app(role: str) -> FastAPI:
         if idempotency_key:
             idempotency[idempotency_key] = task_id
             evict_oldest(idempotency)
+        if persist:
+            # Journal only AFTER both in-memory records (the check-and-record
+            # above must stay await-free so concurrent retries can't
+            # double-dispatch), and off the event loop: enqueue_db_write
+            # blocks on the writer thread, which under DB contention (WAL
+            # busy) could otherwise stall every request on this server.
+            await asyncio.to_thread(_persist_task, role, task_id, tasks[task_id])
+            if idempotency_key:
+                await asyncio.to_thread(
+                    _persist_idem, role, idempotency_key, task_id
+                )
 
         async def _execute():
             try:
@@ -181,13 +339,19 @@ def create_skill_app(role: str) -> FastAPI:
                 if request.effort:
                     run_kwargs["effort"] = request.effort
                 output = await agent.run(**run_kwargs)
-                tasks[task_id] = {"status": "completed", "result": output}
+                record = {"status": "completed", "result": output}
+                tasks[task_id] = record
+                if persist:
+                    await asyncio.to_thread(_persist_task, role, task_id, record)
             except Exception as exc:  # noqa: BLE001 - report failure to caller
                 # Server-side traceback too: str(exc) relayed to the client
                 # is all the caller sees, and a CLI/provider failure with no
                 # server log is undebuggable in production.
                 logger.exception("[skill:%s] background task %s failed", role, task_id)
-                tasks[task_id] = {"status": "failed", "error": str(exc)}
+                record = {"status": "failed", "error": str(exc)}
+                tasks[task_id] = record
+                if persist:
+                    await asyncio.to_thread(_persist_task, role, task_id, record)
 
         background_tasks.add_task(_execute)
         return {"task_id": task_id, "status": "processing"}

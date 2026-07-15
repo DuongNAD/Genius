@@ -222,10 +222,16 @@ class VectorMemory:
             os.makedirs(db_dir, exist_ok=True)
         import sqlite3
 
+        from ag_core.utils.db import enable_wal
+
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         try:
-            conn.execute("PRAGMA journal_mode=WAL;")
+            # busy_timeout BEFORE the journal-mode change, and WAL via the
+            # retrying best-effort helper: three agent CLIs booting at once
+            # against the same fresh DB used to kill two of them with
+            # "database is locked" right here.
             conn.execute("PRAGMA busy_timeout = 30000;")
+            enable_wal(conn)
             with conn:
                 conn.execute(
                     """
