@@ -52,6 +52,17 @@ MANIFEST
 # CLI-run job manifest journaled into the workspace root (runtime artifact)
 /job.json
 
+# Hackathon-mode workspace-root artifacts (emitted only under
+# GENIUS_HACKATHON_MODE; runtime output, not source).
+/pitch.md
+/ai_collaboration_log.md
+
+# Pipeline-internal dir: logs, raw agent traces, message-bus DB, generated
+# test modules, and the auto-install venv. A dot-dir (pytest/conformance/gate
+# already skip it) but git does not skip dot-dirs — ignore it explicitly so a
+# real pipeline run never stages its internals.
+/.genius/
+
 # Generated pipeline project outputs (demo runs; excluded from pytest too)
 /projects/
 
