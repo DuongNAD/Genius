@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import hmac
 import socket
@@ -74,6 +74,10 @@ def check_agent_busy(agent_name: str) -> str:
         names_to_check.append("codex_reviewer")
     elif agent_name == "tester":
         names_to_check.append("tester_agent")
+    elif agent_name == "security":
+        names_to_check.append("security_agent")
+    elif agent_name == "devops":
+        names_to_check.append("devops_agent")
 
     try:
         with get_db_connection() as conn:
@@ -182,6 +186,10 @@ def get_status():
         "claude": {"port": 8002, "db_name": "claude", "roles": ["claude"]},
         "codex": {"port": 8003, "db_name": "codex", "roles": ["codex"]},
         "tester": {"port": 8004, "db_name": "tester", "roles": ["tester"]},
+        # All SIX pipeline agents: the dashboard used to omit security/devops,
+        # which made healthy deployments look 4/6.
+        "security": {"port": 8005, "db_name": "security", "roles": ["security"]},
+        "devops": {"port": 8006, "db_name": "devops", "roles": ["devops"]},
     }
 
     result = {}
@@ -339,6 +347,7 @@ def get_index():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
     <title>Genius Web Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -377,7 +386,7 @@ def get_index():
     <main class="flex-grow p-6 space-y-8 max-w-7xl mx-auto w-full">
         <section>
             <h2 class="text-xl font-semibold mb-4 text-gray-300">Agent Server Statuses</h2>
-            <div id="worker-cards-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div id="worker-cards-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
                 <!-- Cards will be dynamically inserted here -->
             </div>
         </section>
@@ -453,9 +462,23 @@ def get_index():
     </footer>
 
     <script>
-        // When the dashboard is token-protected, open /?token=<token>; the
-        // page forwards it to the data endpoints and the websocket.
-        const DASH_TOKEN = new URLSearchParams(window.location.search).get('token') || '';
+        // When the dashboard is token-protected, open /?token=<token> ONCE:
+        // the token is captured into sessionStorage and scrubbed from the URL
+        // (and thus from browser history / referrers), then forwarded to the
+        // data endpoints via header and to the websocket.
+        let DASH_TOKEN = '';
+        try {
+            const _url = new URL(window.location);
+            const _urlToken = _url.searchParams.get('token') || '';
+            if (_urlToken) {
+                sessionStorage.setItem('genius_dash_token', _urlToken);
+                _url.searchParams.delete('token');
+                history.replaceState(null, '', _url);
+            }
+            DASH_TOKEN = _urlToken || sessionStorage.getItem('genius_dash_token') || '';
+        } catch (e) {
+            DASH_TOKEN = new URLSearchParams(window.location.search).get('token') || '';
+        }
         function authHeaders() {
             return DASH_TOKEN ? { 'X-Dashboard-Token': DASH_TOKEN } : {};
         }

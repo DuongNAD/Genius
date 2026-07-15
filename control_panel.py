@@ -263,6 +263,7 @@ _PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <title>Genius — Control Panel</title>
 <style>
 :root{
@@ -359,43 +360,68 @@ textarea{min-height:64px;resize:vertical}
 <script>
 const $ = s => document.querySelector(s);
 // When the panel is token-protected (GENIUS_PANEL_TOKEN set), open
-// /?token=<token>; the page forwards it as X-Panel-Token on every call.
-const PANEL_TOKEN = new URLSearchParams(window.location.search).get('token') || '';
+// /?token=<token> ONCE: the token is captured into sessionStorage and
+// scrubbed from the URL (and thus from history/referrers), then forwarded
+// as X-Panel-Token on every call.
+let PANEL_TOKEN = '';
+try {
+  const _url = new URL(window.location);
+  const _urlToken = _url.searchParams.get('token') || '';
+  if(_urlToken){
+    sessionStorage.setItem('genius_panel_token', _urlToken);
+    _url.searchParams.delete('token');
+    history.replaceState(null, '', _url);
+  }
+  PANEL_TOKEN = _urlToken || sessionStorage.getItem('genius_panel_token') || '';
+} catch (e) {
+  PANEL_TOKEN = new URLSearchParams(window.location.search).get('token') || '';
+}
 function authHeaders(extra){
   const h = extra ? Object.assign({}, extra) : {};
   if(PANEL_TOKEN) h['X-Panel-Token'] = PANEL_TOKEN;
   return h;
 }
+// Everything rendered below comes from config/env/CLI output — data, not
+// markup. Escape it all: a hostile model name or doctor detail string must
+// not become script in an operator's browser.
+function esc(str){
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
 function effChip(e){
   if(!e) return '<span class="chip">—</span>';
-  return `<span class="chip eff ${e}">${e}</span>`;
+  return `<span class="chip eff ${esc(e)}">${esc(e)}</span>`;
 }
 function render(d){
   $('#ts').textContent = 'updated ' + new Date().toLocaleTimeString();
   $('#stages').innerHTML = d.stages.map(s => {
-    if(s.error) return `<div class="card"><div class="stage-h"><b>${s.stage}</b>
+    if(s.error) return `<div class="card"><div class="stage-h"><b>${esc(s.stage)}</b>
       </div><div class="row"><span class="k">error</span>
-      <span class="v">${s.error}</span></div></div>`;
+      <span class="v">${esc(s.error)}</span></div></div>`;
     const fb = s.fallback ? `<div class="row"><span class="k">fallback</span>
-      <span class="v">${s.fallback}</span></div>` : '';
+      <span class="v">${esc(s.fallback)}</span></div>` : '';
     return `<div class="card">
-      <div class="stage-h"><b>${s.stage}</b>
-        <span><span class="dot ${s.cli_status}"></span>
-        <span class="chip">${s.backend}</span></span></div>
-      <div class="role">role: ${s.role} · chain: ${s.chain.join(' → ')}
-        ${s.chain_source!=='default' ? '('+s.chain_source+')':''}</div>
+      <div class="stage-h"><b>${esc(s.stage)}</b>
+        <span><span class="dot ${esc(s.cli_status)}"></span>
+        <span class="chip">${esc(s.backend)}</span></span></div>
+      <div class="role">role: ${esc(s.role)} · chain: ${esc(s.chain.join(' → '))}
+        ${s.chain_source!=='default' ? '('+esc(s.chain_source)+')':''}</div>
       <div class="row"><span class="k">model</span>
-        <span class="v">${s.model}</span></div>
+        <span class="v">${esc(s.model)}</span></div>
       <div class="row"><span class="k">effort</span>
         <span class="v">${effChip(s.effort)}</span></div>
       ${fb}
     </div>`;
   }).join('');
   $('#clis').innerHTML = d.clis.map(c => `<div class="cli">
-      <span class="dot ${c.status}" style="margin-top:5px"></span>
-      <div><b>${c.cli}</b> <span class="chip">${c.status}</span>
-        <div class="d">${c.detail||''}</div>
-        <div class="d">used by: ${(c.dependents||'')}</div></div>
+      <span class="dot ${esc(c.status)}" style="margin-top:5px"></span>
+      <div><b>${esc(c.cli)}</b> <span class="chip">${esc(c.status)}</span>
+        <div class="d">${esc(c.detail||'')}</div>
+        <div class="d">used by: ${esc(c.dependents||'')}</div></div>
     </div>`).join('');
 }
 async function load(){
