@@ -5,9 +5,41 @@ import uuid
 from collections import OrderedDict
 from typing import Dict, Optional, Any
 
+from ag_core.runtime import under_pytest
+
 
 def _truthy(value: Optional[str]) -> bool:
     return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# Endpoints that mutate hub-wide state or dump every task's full payload.
+# When GENIUS_HUB_ADMIN_KEY is set they additionally require an X-Admin-Key
+# header: the shared SKILL_API_KEY then remains a worker/client credential
+# that can register, dispatch and report — but can no longer reconfigure the
+# hub, read every prompt in flight, or write files on the hub host.
+ADMIN_ENDPOINTS = frozenset({"/update_config", "/tasks", "/write_workspace_file"})
+
+
+def hub_admin_key() -> str:
+    """Separate admin credential for ADMIN_ENDPOINTS (GENIUS_HUB_ADMIN_KEY).
+
+    Empty (the default) preserves the legacy single-credential model where the
+    shared SKILL_API_KEY authorizes everything — set it whenever the hub is
+    reachable by machines you don't fully control."""
+    return (os.getenv("GENIUS_HUB_ADMIN_KEY") or "").strip()
+
+
+def workspace_write_enabled() -> bool:
+    """Gate for /write_workspace_file (GENIUS_HUB_WORKSPACE_WRITE).
+
+    The endpoint lets any credentialed caller write files under the hub's
+    workspace root. No production caller uses it (the orchestrator never calls
+    it), so outside pytest it is OFF unless explicitly enabled — ideally
+    together with GENIUS_HUB_ADMIN_KEY so only the admin credential can write.
+    """
+    if _truthy(os.getenv("GENIUS_HUB_WORKSPACE_WRITE")):
+        return True
+    return under_pytest()
 
 
 class TaskQueue(list):
@@ -224,6 +256,25 @@ class CentralHub:
 
         return hmac.compare_digest(str(auth_header), str(self.api_key))
 
+    def _verify_admin(self, headers: Dict[str, str]) -> bool:
+        """Second credential for ADMIN_ENDPOINTS. With no GENIUS_HUB_ADMIN_KEY
+        configured the legacy single-credential model applies (the shared key
+        authorizes everything); with one set, the request must ALSO carry it in
+        ``X-Admin-Key`` — compared in constant time, like the API key."""
+        admin_key = hub_admin_key()
+        if not admin_key:
+            return True
+        provided = headers.get("X-Admin-Key") or headers.get("x-admin-key")
+        if not provided and hasattr(headers, "items"):
+            provided = next(
+                (v for k, v in headers.items() if k.lower() == "x-admin-key"), None
+            )
+        if not provided:
+            return False
+        import hmac
+
+        return hmac.compare_digest(str(provided), admin_key)
+
     def _verify_replay(self, headers: Dict[str, str]) -> bool:
         """Opt-in anti-replay for the HTTP path (GENIUS_HUB_REPLAY_PROTECTION).
 
@@ -330,6 +381,15 @@ class CentralHub:
 
         if not self._verify_replay(headers):
             return 401, {"error": "Stale or replayed request"}, {}
+
+        if endpoint in ADMIN_ENDPOINTS and not self._verify_admin(headers):
+            return 403, {"error": "Admin credential required"}, {}
+
+        if endpoint == "/write_workspace_file":
+            # Handled BEFORE the hub lock: this endpoint touches no hub state,
+            # and holding self.lock across file I/O would stall heartbeats,
+            # dispatch and the sweeper for the write's whole duration.
+            return await self._write_workspace_file(payload)
 
         async with self.lock:
             if endpoint == "/register":
@@ -444,25 +504,38 @@ class CentralHub:
 
             elif endpoint == "/update_config":
                 new_config = payload.get("config", {})
+                if not isinstance(new_config, dict):
+                    return 400, {"error": "config must be an object"}, {}
+                # Strict allowlist: unknown keys used to be stored unvalidated
+                # into self.config; every knob must be a known, FINITE number
+                # (inf/nan pass isinstance checks but wedge the sweeper's
+                # comparisons — timeouts that never expire / never prune).
+                allowed_keys = ("max_workers", "heartbeat_timeout", "task_timeout")
+                unknown = sorted(k for k in new_config if k not in allowed_keys)
+                if unknown:
+                    return 400, {"error": f"Unknown config keys: {unknown}"}, {}
+                import math
+
                 for k, v in new_config.items():
-                    if k in ("max_workers", "heartbeat_timeout", "task_timeout"):
-                        if not isinstance(v, (int, float)) or isinstance(v, bool):
-                            return 400, {"error": f"Invalid type for {k}"}, {}
-                        if v < 0:
-                            return (
-                                400,
-                                {"error": f"Value for {k} cannot be negative"},
-                                {},
-                            )
-                        # A zero timeout makes every worker/task instantly
-                        # "stale" on the next sweep — an authenticated DoS.
-                        # (max_workers=0 is allowed: it's the drain/pause state.)
-                        if k in ("heartbeat_timeout", "task_timeout") and v <= 0:
-                            return (
-                                400,
-                                {"error": f"Value for {k} must be positive"},
-                                {},
-                            )
+                    if not isinstance(v, (int, float)) or isinstance(v, bool):
+                        return 400, {"error": f"Invalid type for {k}"}, {}
+                    if not math.isfinite(v):
+                        return 400, {"error": f"Value for {k} must be finite"}, {}
+                    if v < 0:
+                        return (
+                            400,
+                            {"error": f"Value for {k} cannot be negative"},
+                            {},
+                        )
+                    # A zero timeout makes every worker/task instantly
+                    # "stale" on the next sweep — an authenticated DoS.
+                    # (max_workers=0 is allowed: it's the drain/pause state.)
+                    if k in ("heartbeat_timeout", "task_timeout") and v <= 0:
+                        return (
+                            400,
+                            {"error": f"Value for {k} must be positive"},
+                            {},
+                        )
                 self.config.update(new_config)
                 return 200, {"status": "config_updated", "config": self.config}, {}
 
@@ -473,6 +546,15 @@ class CentralHub:
                 result = payload.get("result")
                 if not task_id or worker_id not in self.workers:
                     return 400, {"error": "Invalid report parameters"}, {}
+                # Reports settle a task: only TERMINAL states are meaningful.
+                # A crafted "pending"/"running" report would corrupt the task
+                # lifecycle (e.g. re-arm the sweeper's timeout on a done task).
+                if status not in ("completed", "failed"):
+                    return (
+                        400,
+                        {"error": "status must be 'completed' or 'failed'"},
+                        {},
+                    )
                 if task_id not in self.tasks:
                     return 404, {"error": "Task not found"}, {}
                 if self.tasks[task_id]["worker_id"] != worker_id:
@@ -527,40 +609,61 @@ class CentralHub:
             elif endpoint == "/tasks":
                 return 200, dict(self.tasks), {}
 
-            elif endpoint == "/write_workspace_file":
-                path = payload.get("path")
-                content = payload.get("content", "")
-                import os
-
-                # Reject absolute paths, ".." segments and drive/ADS markers,
-                # then confirm the resolved target stays inside the workspace
-                # root (also defeats symlink escapes).
-                normalized = path.replace("\\", "/").split("/") if path else []
-                if not path or os.path.isabs(path) or ":" in path or ".." in normalized:
-                    return 400, {"error": "Path traversal detected"}, {}
-                base = os.path.realpath(os.getcwd())
-                target = os.path.realpath(os.path.join(base, path))
-                if target != base and not target.startswith(base + os.sep):
-                    return 400, {"error": "Path traversal detected"}, {}
-
-                dirname = os.path.dirname(target)
-
-                def _write_file():
-                    if dirname:
-                        os.makedirs(dirname, exist_ok=True)
-                    with open(target, "w", encoding="utf-8") as f:
-                        f.write(content)
-
-                try:
-                    # Off the event loop: this runs while holding the hub lock,
-                    # so a synchronous write would block heartbeat processing,
-                    # dispatch, and the sweeper for its whole duration.
-                    await asyncio.to_thread(_write_file)
-                except Exception as e:
-                    return 500, {"error": f"Failed to write file: {str(e)}"}, {}
-                return 200, {"status": "file_written"}, {}
-
         return 404, {"error": "Endpoint not found"}, {}
+
+    async def _write_workspace_file(self, payload: Any) -> tuple[int, Any, Dict]:
+        """/write_workspace_file — admin-gated, disabled outside pytest unless
+        GENIUS_HUB_WORKSPACE_WRITE=1, and confined to the workspace root.
+        Runs WITHOUT the hub lock (touches no hub state)."""
+        if not workspace_write_enabled():
+            return (
+                403,
+                {
+                    "error": "write_workspace_file is disabled; set "
+                    "GENIUS_HUB_WORKSPACE_WRITE=1 on the hub to enable"
+                },
+                {},
+            )
+        path = payload.get("path")
+        content = payload.get("content", "")
+
+        # Reject absolute paths, ".." segments and drive/ADS markers, then
+        # confirm the resolved target stays inside the workspace root (also
+        # defeats symlink escapes). The root defaults to the hub's cwd; pin it
+        # explicitly with GENIUS_HUB_WORKSPACE_ROOT.
+        normalized = path.replace("\\", "/").split("/") if path else []
+        if not path or os.path.isabs(path) or ":" in path or ".." in normalized:
+            return 400, {"error": "Path traversal detected"}, {}
+        base = os.path.realpath(os.getenv("GENIUS_HUB_WORKSPACE_ROOT") or os.getcwd())
+        target = os.path.realpath(os.path.join(base, path))
+        if target != base and not target.startswith(base + os.sep):
+            return 400, {"error": "Path traversal detected"}, {}
+
+        dirname = os.path.dirname(target)
+
+        def _write_file():
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
+            # Narrow the realpath-check -> open TOCTOU window: re-verify the
+            # resolved parent immediately before the open, and refuse to
+            # follow a symlink at the final component (O_NOFOLLOW where the
+            # platform provides it) so a path component swapped in after the
+            # pre-check cannot redirect the write outside base.
+            parent_real = os.path.realpath(dirname or base)
+            if parent_real != base and not parent_real.startswith(base + os.sep):
+                raise PermissionError("Path traversal detected")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(target, flags, 0o644)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+
+        try:
+            # Off the event loop; the hub lock is NOT held here.
+            await asyncio.to_thread(_write_file)
+        except Exception as e:
+            return 500, {"error": f"Failed to write file: {str(e)}"}, {}
+        return 200, {"status": "file_written"}, {}
 
     def _find_eligible_worker(self, role: str) -> Optional[str]:
         # Canonicalize both sides so a "researcher" dispatch matches workers
