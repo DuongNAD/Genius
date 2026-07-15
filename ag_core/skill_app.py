@@ -21,7 +21,11 @@ from ag_core.provider_factory import canonical_role
 from ag_core.utils.db import init_db
 from ag_core.utils.logger import logger
 from ag_core.utils.rate_limiter import make_rate_limit_dependency
-from ag_core.utils.security import checksum_middleware, verify_api_key
+from ag_core.utils.security import (
+    BodySizeLimitMiddleware,
+    checksum_middleware,
+    verify_api_key,
+)
 
 # role -> (agent module, agent class). Derived from the shared factory table
 # (ag_core.agent_factory.AGENT_CLASSES) — same shape as the historical
@@ -97,6 +101,11 @@ def create_skill_app(role: str) -> FastAPI:
 
     app = FastAPI(title=f"Genius {role} Skill Server", lifespan=lifespan)
     app.middleware("http")(checksum_middleware)
+    # Added AFTER the checksum middleware => wraps OUTSIDE it, so the
+    # checksum's own body read streams through the byte counter: chunked /
+    # length-less request bodies are capped pre-auth too, not only the honest
+    # Content-Length ones the middleware fast-rejects.
+    app.add_middleware(BodySizeLimitMiddleware)
 
     # Security and DevOps servers strictly reject empty prompts; the other
     # agents tolerate an empty prompt (they fall back to a sensible default).

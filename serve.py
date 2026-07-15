@@ -218,6 +218,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Genius Central Hub", lifespan=lifespan)
 
+# The catch-all POST below buffers the whole body (request.json()) BEFORE
+# central_hub.handle_request authenticates it — cap the receive stream at the
+# ASGI layer so a chunked/length-less flood can't exhaust RAM pre-auth.
+from ag_core.utils.security import BodySizeLimitMiddleware  # noqa: E402
+
+app.add_middleware(BodySizeLimitMiddleware)
+
 
 @app.post("/{path:path}")
 async def hub_http_route(path: str, request: Request):

@@ -120,6 +120,93 @@ def _max_request_bytes() -> int:
         return 25 * 1024 * 1024
 
 
+class _RequestBodyTooLarge(BaseException):
+    """Internal signal from the counting receive to BodySizeLimitMiddleware.
+
+    Deliberately a BaseException (like asyncio.CancelledError): the abort is
+    raised inside downstream body reads, and application code legitimately
+    wraps those in broad ``except Exception`` blocks (the hub's catch-all does
+    exactly that around ``request.json()``) — the size signal must not be
+    swallowable there, or the cap silently vanishes on that route.
+    """
+
+
+def _wraps_body_too_large(exc: BaseException) -> bool:
+    """True when ``exc`` is (or an ExceptionGroup transitively contains) the
+    body-too-large signal — anyio task groups inside BaseHTTPMiddleware can
+    wrap exceptions raised on the receive path."""
+    if isinstance(exc, _RequestBodyTooLarge):
+        return True
+    sub = getattr(exc, "exceptions", None)
+    if sub:
+        return any(_wraps_body_too_large(e) for e in sub)
+    return False
+
+
+class BodySizeLimitMiddleware:
+    """Pure-ASGI request-body cap, enforced on the receive stream itself.
+
+    ``checksum_middleware``'s Content-Length fast-reject only covers honest
+    clients: a chunked (or length-less) POST still streamed its entire body
+    into ``await request.body()`` / ``request.json()`` BEFORE authentication,
+    so an attacker without SKILL_API_KEY could exhaust RAM anyway. This
+    wrapper counts the actual bytes arriving on the ASGI receive channel and
+    aborts with 413 the moment the running total passes
+    ``GENIUS_MAX_REQUEST_BYTES`` — headers can't lie about it. Register it
+    LAST (outermost) so every downstream body read, including the checksum
+    middleware's, goes through the counter.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        limit = _max_request_bytes()
+        received = 0
+        response_started = False
+
+        async def counting_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    raise _RequestBodyTooLarge()
+            return message
+
+        async def tracking_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, tracking_send)
+        except BaseException as exc:  # noqa: BLE001 - filtered, then re-raised
+            if not _wraps_body_too_large(exc) or response_started:
+                # Not ours (or too late to answer): let it propagate.
+                raise
+            content = {"detail": "Request body too large"}
+            body_bytes = json.dumps(content).encode("utf-8")
+            checksum = hashlib.sha256(body_bytes).hexdigest()
+            await tracking_send(
+                {
+                    "type": "http.response.start",
+                    "status": 413,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body_bytes)).encode("latin-1")),
+                        (b"x-payload-sha256", checksum.encode("latin-1")),
+                    ],
+                }
+            )
+            await tracking_send({"type": "http.response.body", "body": body_bytes})
+
+
 async def checksum_middleware(request: Request, call_next):
     path = request.url.path
     config = load_config()
