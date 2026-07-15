@@ -1746,25 +1746,29 @@ async def call_api(
                                 f"Task '{task_id}' timed out after {poll_timeout} seconds."
                             )
 
-                        tasks_payload = {}
-                        tasks_checksum = calculate_checksum(tasks_payload, secret)
-                        tasks_bytes = json.dumps(
-                            tasks_payload, sort_keys=True, separators=(",", ":")
+                        status_payload = {"task_id": task_id}
+                        status_checksum = calculate_checksum(status_payload, secret)
+                        status_bytes = json.dumps(
+                            status_payload, sort_keys=True, separators=(",", ":")
                         ).encode("utf-8")
-                        headers["X-Payload-SHA256"] = tasks_checksum
+                        headers["X-Payload-SHA256"] = status_checksum
 
+                        # Poll /task_status (a worker/client-credential
+                        # endpoint), NOT /tasks: the full task dump is
+                        # admin-gated when GENIUS_HUB_ADMIN_KEY is set —
+                        # polling it would 403 the whole distributed pipeline
+                        # — and shipping every job's prompts/results on each
+                        # 0.5s poll was wasteful anyway.
                         resp = await http_client.post(
-                            f"{hub_url}/tasks", content=tasks_bytes, headers=headers
+                            f"{hub_url}/task_status",
+                            content=status_bytes,
+                            headers=headers,
                         )
+                        if resp.status_code == 404:
+                            raise PipelineError(f"Task '{task_id}' not found.")
                         resp.raise_for_status()
                         _verify_hub_response_if_signed(resp)
-                        all_tasks = resp.json()
-
-                        task_info = all_tasks.get(task_id)
-                        if not task_info:
-                            raise PipelineError(
-                                f"Task '{task_id}' not found in tasks list."
-                            )
+                        task_info = resp.json()
 
                         status = task_info.get("status")
                         if status == "completed":

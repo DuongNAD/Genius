@@ -352,7 +352,9 @@ async def test_r17_orchestrator_http_fallback():
     # Verify orchestrator distributed mode queries HTTP endpoints if in-memory registry has no workers
     orchestrator.DISTRIBUTED_MODE = True
 
-    # Setup mock HTTP response for the /workers, /dispatch and /tasks endpoints
+    # Setup mock HTTP response for the /workers, /dispatch and /task_status
+    # endpoints (the orchestrator polls per-task /task_status, NOT the
+    # admin-gated /tasks dump).
     mock_workers_resp = MagicMock()
     mock_workers_resp.json.return_value = {
         "worker-1": {"roles": ["grok"], "status": "idle"}
@@ -360,9 +362,12 @@ async def test_r17_orchestrator_http_fallback():
     mock_dispatch_resp = MagicMock()
     mock_dispatch_resp.json.return_value = {"task_id": "task-test-123"}
 
-    mock_tasks_resp = MagicMock()
-    mock_tasks_resp.json.return_value = {
-        "task-test-123": {"status": "completed", "result": "Success Result"}
+    mock_status_resp = MagicMock()
+    mock_status_resp.status_code = 200
+    mock_status_resp.json.return_value = {
+        "task_id": "task-test-123",
+        "status": "completed",
+        "result": "Success Result",
     }
 
     async def mock_post(url, *args, **kwargs):
@@ -370,8 +375,8 @@ async def test_r17_orchestrator_http_fallback():
             return mock_workers_resp
         elif "/dispatch" in url:
             return mock_dispatch_resp
-        elif "/tasks" in url:
-            return mock_tasks_resp
+        elif "/task_status" in url:
+            return mock_status_resp
         raise ValueError(f"Unexpected url {url}")
 
     import serve
