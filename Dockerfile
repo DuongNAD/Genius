@@ -29,7 +29,7 @@ COPY . .
 #
 # To run real pipelines in a container, pick one:
 #   1. Extend this image with the CLIs you use and mount your authenticated
-#      config at runtime, e.g. `-v $HOME/.config/genius-clis:/root/.config`.
+#      config at runtime, e.g. `-v $HOME/.config/genius-clis:/home/genius/.config`.
 #   2. Mount the host binaries + their auth config into the container.
 #   3. Run the pipeline on the host and use the container only for the hub /
 #      dashboard / distributed workers.
@@ -43,6 +43,16 @@ COPY . .
 #
 # (agy and nlm are not on public npm; install them per their own docs.)
 # ---------------------------------------------------------------------------
+
+# Run as a dedicated non-root user. /app must stay writable (the default
+# GENIUS_DB_PATH is /app/genius.db when no /data volume is mounted, and
+# pipeline workspaces live under the repo). /data is pre-created and owned by
+# the app user so the compose named volume inherits that ownership on first
+# use — a root-owned volume would make init_db fail at boot as non-root.
+RUN useradd --create-home --uid 10001 genius \
+    && mkdir -p /data \
+    && chown -R genius:genius /app /data
+USER genius
 
 # Expose ports: Hub (8000), Researcher (8001), Claude (8002), Codex (8003), Tester (8004), Security (8005), DevOps (8006), Dashboard (8080)
 EXPOSE 8000 8001 8002 8003 8004 8005 8006 8080
