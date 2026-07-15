@@ -113,7 +113,12 @@ async def call_api_with_retry(
                 raise e
 
 
-async def wait_for_task(hub, task_id, timeout=1.0):
+# A generous MAX-wait (it breaks out the instant the task is terminal, so a
+# larger ceiling costs nothing on a fast host): under coverage instrumentation
+# the event loop runs 2-3x slower, and a tight 1.0s budget raced — the task
+# hadn't settled yet — even though the un-instrumented run passed. Callers that
+# assert a timeout still pass an explicit small value.
+async def wait_for_task(hub, task_id, timeout=10.0):
     start = time.time()
     while time.time() - start < timeout:
         status = hub.tasks[task_id]["status"]
@@ -1224,6 +1229,11 @@ async def test_t3_comb_6_worker_disconnect_requeue_and_reroute(network, hub):
 @pytest.mark.asyncio
 async def test_t4_workload_1_multi_stage_agent_pipeline(network, hub):
     # Sequential Pipeline: Grok (Research) -> Claude (Design) -> Codex (Review)
+    # These workers never send heartbeats; with the default 0.5s heartbeat
+    # timeout the sweeper would prune them between the sequential stages under
+    # a slow (coverage-instrumented) run. This test exercises throughput, not
+    # pruning, so keep the workers live for its duration.
+    hub.config["heartbeat_timeout"] = 30.0
     w_grok = ClientWorker("w_grok", ["grok_researcher"])
     w_claude = ClientWorker("w_claude", ["claude_architect"])
     w_codex = ClientWorker("w_codex", ["codex_reviewer"])
@@ -1279,6 +1289,10 @@ async def test_t4_workload_1_multi_stage_agent_pipeline(network, hub):
 
 @pytest.mark.asyncio
 async def test_t4_workload_2_high_concurrency_stress(network, hub):
+    # Non-heartbeating workers + a throughput assertion: keep them live so the
+    # sweeper can't prune them (and fail their tasks) mid-run under a slow
+    # coverage-instrumented execution.
+    hub.config["heartbeat_timeout"] = 30.0
     # Register 3 workers with different overlapping roles
     w1 = ClientWorker("w1", ["grok", "claude"])
     w2 = ClientWorker("w2", ["claude", "codex"])
@@ -1310,7 +1324,7 @@ async def test_t4_workload_2_high_concurrency_stress(network, hub):
                 break
             await asyncio.sleep(0.001)
 
-    await wait_for_all_tasks(hub)
+    await wait_for_all_tasks(hub, timeout=10.0)
     assert all(t["status"] == "completed" for t in hub.tasks.values())
     total_completed = w1.tasks_completed + w2.tasks_completed + w3.tasks_completed
     assert total_completed == 20
@@ -1366,6 +1380,9 @@ async def test_t4_workload_3_unstable_network_resilience(network, hub):
 
 @pytest.mark.asyncio
 async def test_t4_workload_4_dynamic_scaling_under_load(network, hub):
+    # Keep the (non-heartbeating) workers live for the whole drain so the
+    # sweeper can't prune them under a slow coverage-instrumented run.
+    hub.config["heartbeat_timeout"] = 30.0
     # Dispatch 10 tasks when 0 workers are active
     for i in range(10):
         payload = {"role": "grok", "task_data": f"load_{i}"}
@@ -1390,7 +1407,7 @@ async def test_t4_workload_4_dynamic_scaling_under_load(network, hub):
                 break
             await asyncio.sleep(0.001)
 
-    await wait_for_all_tasks(hub)
+    await wait_for_all_tasks(hub, timeout=10.0)
 
     assert hub.task_queue.qsize() == 0
     assert all(t["status"] == "completed" for t in hub.tasks.values())
