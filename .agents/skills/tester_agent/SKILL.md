@@ -6,7 +6,13 @@ description: Tester Agent receives Codex's review output, scans project files, a
 
 This skill allows the user to invoke the Tester Agent. It scans the project files and uses Codex's review output to generate unit tests and test scenarios.
 
-## CLI Arguments
+## Usage
 
-- `--review`: Path to the file containing Codex's review output (Required).
-- `--output`: Path to write the generated unit tests (Default: `test_generated.py`).
+```bash
+python .agents/skills/tester_agent/run.py <prompt...>
+```
+
+There are no CLI flags: every argument is joined into a single prompt (e.g.
+the code or review output to generate tests for). The agent scans the current
+workspace for context itself and writes the generated tests to its default
+output file, `test_generated.py`, in the working directory.

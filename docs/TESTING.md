@@ -3,10 +3,11 @@
 > Tài liệu này hợp nhất `TEST_READY.md`, `test_report.md` và `challenge.md` (bản gốc trong [`history/`](./history/)).
 > Tài liệu **canonical về hạ tầng test phân tán** vẫn là [`../TEST_INFRA.md`](../TEST_INFRA.md) (được tooling `.claude/` tham chiếu).
 
-## 1. Trạng thái hiện tại (2026-07-04, sau R4)
+## 1. Trạng thái hiện tại (2026-07-15, sau đợt hardening P0/P1)
 
-- **918 test** thu thập: **915 pass, 3 skip** (0 fail), ~2 phút trên máy dev. Bộ test **hermetic**: `conftest.py`/`ag_core.config` không nạp `.env` dưới pytest nên kết quả khớp CI dù máy dev có `.env`.
-- **CI** (`.github/workflows/ci.yml`): ma trận per-OS theo nhánh — `windows-latest` cho `win`/`main`, `macos-latest` cho `mac`/`main` (bản mac chạy kèm uvloop) — Python 3.11, `pip install -r requirements.txt` → `python -m pytest`. `pytest-timeout` đặt trần 300s/test (backstop treo); `PytestUnraisableExceptionWarning` bị gate thành lỗi (bắt task async rò rỉ).
+- **1.274 test** thu thập: **1.271 pass, 3 skip** (0 fail), ~2 phút trên máy dev. Bộ test **hermetic**: `conftest.py`/`ag_core.config` không nạp `.env` dưới pytest nên kết quả khớp CI dù máy dev có `.env`.
+- **Coverage mã production: ~83%** (đo bằng `python -m pytest --cov=. --cov-fail-under=80`, cấu hình loại trừ test/scaffolding trong `.coveragerc`).
+- **CI** (`.github/workflows/ci.yml`): ma trận per-OS theo nhánh — `windows-latest` cho `win`/`main`, `macos-latest` cho `mac`/`main` (bản mac chạy kèm uvloop) — Python 3.11, `pip install -r requirements.txt` → `python -m pytest`. `pytest-timeout` đặt trần 300s/test (backstop treo); `PytestUnraisableExceptionWarning` bị gate thành lỗi (bắt task async rò rỉ). Job **`coverage`** riêng (macOS, nhánh `mac`/`main`) chạy suite dưới pytest-cov với **ngưỡng chặn 80%** — tách khỏi job pytest thuần vì instrumentation đổi timing; chỉ nâng ngưỡng lên, không hạ xuống.
 - **Gate độc lập OS** (job `lint-and-audit` + `docker-build` trên `ubuntu-latest`, mọi nhánh): `flake8 .`, `pip check`, `pip-audit` (advisory), và `docker build` smoke. Ngoài ra **pre-commit** vẫn chạy black 24.4.2 + flake8 cục bộ.
 - **Không chạy 2 tiến trình pytest cùng lúc** trên một máy (dùng chung `genius.db` + service registry).
 
