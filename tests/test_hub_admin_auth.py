@@ -13,7 +13,6 @@ import os
 
 import pytest
 
-from ag_core.distributed import hub as hub_mod
 from ag_core.distributed.hub import ADMIN_ENDPOINTS, CentralHub
 
 SHARED_KEY = "unit-shared-key"
@@ -185,8 +184,9 @@ async def test_distributed_dispatch_and_poll_work_with_admin_key_set(
 
 
 @pytest.mark.asyncio
-async def test_workspace_write_disabled_in_production_by_default(hub, monkeypatch):
-    monkeypatch.setattr(hub_mod, "under_pytest", lambda: False)
+async def test_workspace_write_disabled_without_env(hub, monkeypatch):
+    # Env-only gate: no pytest signal opens it. Unset -> disabled, even under
+    # the test suite (which otherwise turns it on in conftest).
     monkeypatch.delenv("GENIUS_HUB_WORKSPACE_WRITE", raising=False)
     payload = {"path": "x.txt", "content": "hi"}
     status, body, _ = await hub.handle_request(
@@ -198,7 +198,6 @@ async def test_workspace_write_disabled_in_production_by_default(hub, monkeypatc
 
 @pytest.mark.asyncio
 async def test_workspace_write_opt_in_env_and_pinned_root(hub, monkeypatch, tmp_path):
-    monkeypatch.setattr(hub_mod, "under_pytest", lambda: False)
     monkeypatch.setenv("GENIUS_HUB_WORKSPACE_WRITE", "1")
     monkeypatch.setenv("GENIUS_HUB_WORKSPACE_ROOT", str(tmp_path))
     payload = {"path": "out/x.txt", "content": "hi"}

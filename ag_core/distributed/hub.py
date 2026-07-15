@@ -5,8 +5,6 @@ import uuid
 from collections import OrderedDict
 from typing import Dict, Optional, Any
 
-from ag_core.runtime import under_pytest
-
 
 def _truthy(value: Optional[str]) -> bool:
     return str(value or "").strip().lower() in ("1", "true", "yes", "on")
@@ -34,12 +32,13 @@ def workspace_write_enabled() -> bool:
 
     The endpoint lets any credentialed caller write files under the hub's
     workspace root. No production caller uses it (the orchestrator never calls
-    it), so outside pytest it is OFF unless explicitly enabled — ideally
-    together with GENIUS_HUB_ADMIN_KEY so only the admin credential can write.
+    it), so it is OFF unless GENIUS_HUB_WORKSPACE_WRITE is explicitly truthy —
+    ideally together with GENIUS_HUB_ADMIN_KEY so only the admin credential can
+    write. This intentionally consults NO pytest signal: a security gate must
+    not open just because a stray PYTEST_CURRENT_TEST is set in the hub's
+    environment (the test suite enables it explicitly via conftest instead).
     """
-    if _truthy(os.getenv("GENIUS_HUB_WORKSPACE_WRITE")):
-        return True
-    return under_pytest()
+    return _truthy(os.getenv("GENIUS_HUB_WORKSPACE_WRITE"))
 
 
 class TaskQueue(list):

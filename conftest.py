@@ -15,6 +15,11 @@ os.environ["SKILL_API_KEY"] = "mock-skill-key"
 os.environ.setdefault("OPENAI_API_KEY", "mock-key")
 os.environ.setdefault("ANTHROPIC_API_KEY", "mock-key")
 os.environ.setdefault("GROK_API_KEY", "mock-key")
+# The hub's /write_workspace_file gate is env-only in production (it consults
+# NO pytest signal, by design). The distributed tests that exercise the
+# endpoint expect it enabled, so the suite turns it on explicitly here;
+# individual tests that assert the disabled default delenv it via monkeypatch.
+os.environ.setdefault("GENIUS_HUB_WORKSPACE_WRITE", "1")
 
 
 @pytest.fixture(autouse=True, scope="function")
