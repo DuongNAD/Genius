@@ -26,11 +26,21 @@ version: '3.8'
 x-skill-api-key: &skill_api_key
   SKILL_API_KEY=${SKILL_API_KEY:?set SKILL_API_KEY (host env or .env next to docker-compose.yml)}
 
-# Container hardening shared by every service: no privilege escalation via
-# setuid binaries (the image already runs as the non-root `genius` user).
+# Container hardening shared by every service (merged into each via `<<`):
+# - no privilege escalation via setuid binaries (the image already runs as the
+#   non-root `genius` user);
+# - drop ALL Linux capabilities — the coordination surfaces bind ports >1024
+#   and need none;
+# - bound the process count so a fork bomb / runaway subprocess fan-out can't
+#   exhaust host PIDs.
+# mem_limit / cpus are intentionally left to the deployment (they'd OOM-kill an
+# operator who bakes the heavy agent CLIs into the image); set them per-host.
 x-hardening: &hardening
   security_opt:
     - no-new-privileges:true
+  cap_drop:
+    - ALL
+  pids_limit: 512
 
 services:
   hub:
