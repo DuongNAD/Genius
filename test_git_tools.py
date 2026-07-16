@@ -5,35 +5,45 @@ import subprocess
 from ag_core.utils.git import GitManager, GitError
 
 
-def test_url_credentials_construction():
+def test_auth_env_construction():
+    """Credentials travel in the subprocess env (GIT_ASKPASS bridge), never
+    in the URL/argv. The username/password split mirrors the retired URL
+    forms: user+token, token-as-username (PAT form), user with empty
+    password."""
+    git = GitManager(username="john", token="secret123")
+    env = git._auth_env("https://github.com/foo/bar.git")
+    assert os.path.isfile(env["GIT_ASKPASS"])
+    assert env["GENIUS_GIT_ASKPASS_USERNAME"] == "john"
+    assert env["GENIUS_GIT_ASKPASS_PASSWORD"] == "secret123"
+
+    # Non-http(s) remotes and credential-less managers inject nothing.
+    assert git._auth_env("git@github.com:foo/bar.git") is None
+    assert GitManager(username="", token="")._auth_env("https://x/y.git") is None
+
+    token_only = GitManager(username="", token="secret123")
+    env = token_only._auth_env("https://github.com/foo/bar.git")
+    assert env["GENIUS_GIT_ASKPASS_USERNAME"] == "secret123"
+    assert env["GENIUS_GIT_ASKPASS_PASSWORD"] == ""
+
+    user_only = GitManager(username="john", token="")
+    env = user_only._auth_env("https://github.com/foo/bar.git")
+    assert env["GENIUS_GIT_ASKPASS_USERNAME"] == "john"
+    assert env["GENIUS_GIT_ASKPASS_PASSWORD"] == ""
+
+
+def test_strip_url_credentials():
     git = GitManager(username="john", token="secret123")
     assert (
-        git._get_auth_url("https://github.com/foo/bar.git")
-        == "https://john:secret123@github.com/foo/bar.git"
+        git._strip_url_credentials("https://olduser:oldpass@github.com/foo/bar.git")
+        == "https://github.com/foo/bar.git"
     )
     assert (
-        git._get_auth_url("http://example.com/repo")
-        == "http://john:secret123@example.com/repo"
+        git._strip_url_credentials("https://sometoken@github.com/foo/bar.git")
+        == "https://github.com/foo/bar.git"
     )
     assert (
-        git._get_auth_url("git@github.com:foo/bar.git") == "git@github.com:foo/bar.git"
-    )
-
-    git_token_only = GitManager(username="", token="secret123")
-    assert (
-        git_token_only._get_auth_url("https://github.com/foo/bar.git")
-        == "https://secret123@github.com/foo/bar.git"
-    )
-
-    git_user_only = GitManager(username="john", token="")
-    assert (
-        git_user_only._get_auth_url("https://github.com/foo/bar.git")
-        == "https://john@github.com/foo/bar.git"
-    )
-
-    assert (
-        git._get_auth_url("https://olduser:oldpass@github.com/foo/bar.git")
-        == "https://john:secret123@github.com/foo/bar.git"
+        git._strip_url_credentials("https://github.com/foo/bar.git")
+        == "https://github.com/foo/bar.git"
     )
 
 
