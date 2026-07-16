@@ -466,6 +466,12 @@ load();
 
 
 def main() -> None:
+    # Opt-in production profile: same fail-closed startup gate as serve.py /
+    # mcp_server.py (no-op unless GENIUS_SECURE_DEFAULTS is set).
+    from ag_core.security_profile import enforce_secure_defaults
+
+    enforce_secure_defaults(distributed=False)
+
     import uvicorn
 
     host = os.getenv("GENIUS_PANEL_HOST") or "127.0.0.1"

@@ -8,6 +8,7 @@ from typing import List
 from dotenv import load_dotenv
 
 from ag_core.runtime import under_pytest
+from ag_core.security_profile import secure_defaults_enabled
 
 _original_env = dict(os.environ)
 
@@ -30,6 +31,14 @@ def _load_env():
     if explicit:
         if os.path.exists(explicit):
             load_dotenv(explicit, override=False)
+        return
+    # Production profile: with no explicitly pinned .env, load NOTHING. The
+    # cwd-upward walk ingests whatever workspace the process starts in —
+    # exactly the untrusted input GENIUS_SECURE_DEFAULTS forbids — and it
+    # runs at import time, BEFORE any entrypoint can check the profile, so
+    # the gate must live here. (os.environ is still the real process
+    # environment at this point: nothing has loaded a .env yet.)
+    if secure_defaults_enabled():
         return
     curr_dir = os.path.abspath(os.getcwd())
     while curr_dir:
@@ -63,6 +72,11 @@ def _reload_env_safely():
         env_path = explicit if os.path.exists(explicit) else None
         if env_path:
             _apply_env_file(env_path)
+        return
+    # Same secure-mode contract as _load_env: no pinned .env means no .env —
+    # the reload path must not reintroduce the cwd walk the import gate
+    # refused.
+    if secure_defaults_enabled():
         return
     curr_dir = os.path.abspath(os.getcwd())
     env_path = None
@@ -259,6 +273,27 @@ def load_config(config_path: str = "config.yaml") -> Config:
     explicit_config = bool(env_config) and config_path == "config.yaml"
     if explicit_config:
         config_path = os.path.abspath(env_config)
+
+    # Production-profile backstop. The entrypoint gate
+    # (security_profile.enforce_secure_defaults) gives the friendly startup
+    # refusal; this keeps library embedders fail-closed too: in secure mode
+    # the yaml must be pinned — never walked up from an untrusted cwd — and a
+    # pinned-but-missing file must not silently fall back to built-in
+    # defaults. An explicit config_path ARGUMENT is a programmatic caller's
+    # own choice and stays allowed.
+    if secure_defaults_enabled():
+        if config_path == "config.yaml":
+            raise RuntimeError(
+                "GENIUS_SECURE_DEFAULTS is on but GENIUS_CONFIG_PATH is not "
+                "set — refusing to walk the current directory for "
+                "config.yaml; pin an absolute trusted path."
+            )
+        if explicit_config and not os.path.isfile(config_path):
+            raise RuntimeError(
+                "GENIUS_SECURE_DEFAULTS is on and GENIUS_CONFIG_PATH points "
+                f"to a missing file: {config_path!r} — refusing to fall back "
+                "to built-in defaults."
+            )
 
     ttl = _config_cache_ttl()
     if ttl > 0:

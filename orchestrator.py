@@ -4835,6 +4835,14 @@ async def run_e2e_pipeline(
 
 
 def main():
+    # Opt-in production profile: fail closed before any pipeline work (same
+    # gate as serve.py / mcp_server.py; a no-op unless GENIUS_SECURE_DEFAULTS
+    # is set). Deliberately ahead of argparse so a violating environment is
+    # reported even on an incomplete command line.
+    from ag_core.security_profile import enforce_secure_defaults
+
+    enforce_secure_defaults(distributed=False)
+
     parser = argparse.ArgumentParser(
         description="Multi-agent CLI Orchestrator pipeline executing Research -> Claude -> Antigravity -> Codex -> Tester."
     )

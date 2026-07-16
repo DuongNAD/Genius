@@ -711,6 +711,12 @@ def get_index():
 
 
 if __name__ == "__main__":
+    # Opt-in production profile: same fail-closed startup gate as serve.py /
+    # mcp_server.py (no-op unless GENIUS_SECURE_DEFAULTS is set).
+    from ag_core.security_profile import enforce_secure_defaults
+
+    enforce_secure_defaults(distributed=False)
+
     import uvicorn
 
     # Bind localhost by default so the data endpoints (full prompt/result/error

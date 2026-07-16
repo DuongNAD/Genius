@@ -1631,6 +1631,14 @@ async def _run_sdk_stdio():
 
 
 if __name__ == "__main__":
+    # Opt-in production profile: fail closed BEFORE serving anything, on both
+    # transports — this is the primary entrypoint when Genius runs as an MCP
+    # server, so it must enforce the same gate serve.py does. On stdio the
+    # SystemExit message goes to stderr, keeping stdout pure JSON-RPC.
+    from ag_core.security_profile import enforce_secure_defaults
+
+    enforce_secure_defaults(distributed=False)
+
     if len(sys.argv) > 1 and sys.argv[1] == "stdio":
         # Must be the asyncio backend: the engine uses asyncio.create_task /
         # Event / wait_for / to_thread directly (uvloop is asyncio-compatible).

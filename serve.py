@@ -970,15 +970,9 @@ async def main_async():
     # Production profile (opt-in): fail closed at startup when the convenience
     # defaults are left fail-open. No-op unless GENIUS_SECURE_DEFAULTS is set,
     # so local / trusted-LAN runs are unchanged.
-    from ag_core.security_profile import secure_defaults_violations
+    from ag_core.security_profile import enforce_secure_defaults
 
-    _profile_problems = secure_defaults_violations(distributed=distributed)
-    if _profile_problems:
-        raise SystemExit(
-            "Refusing to start — GENIUS_SECURE_DEFAULTS is on and these "
-            "fail-open settings are not overridden:\n- "
-            + "\n- ".join(_profile_problems)
-        )
+    enforce_secure_defaults(distributed=distributed)
 
     if auto_pilot:
         selected_roles = [
