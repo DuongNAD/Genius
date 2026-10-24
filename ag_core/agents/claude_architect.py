@@ -4,11 +4,11 @@ from ag_core.interfaces.base_agent import BaseAgent
 from ag_core.interfaces.base_provider import BaseProvider
 from ag_core.config import Config, load_config
 from ag_core.models import DesignPlan
-from ag_core.utils.prompt_templates import ARCHITECT_PROMPT
+from ag_core.utils.prompt_templates import ARCHITECT_PROMPT, ARCHITECT_FEW_SHOT
 
 
 def _architect_system_prompt() -> str:
-    """ARCHITECT_PROMPT + the DesignPlan JSON schema + a worked example.
+    """ARCHITECT_PROMPT + the DesignPlan JSON schema + a multi-tier production worked example.
 
     Entirely static, so it is built once at import — the schema dump and
     json.dumps used to run on every request.
@@ -22,16 +22,7 @@ def _architect_system_prompt() -> str:
         ARCHITECT_PROMPT
         + f"\n\nThe single ```json block must conform to this DesignPlan JSON schema:\n{schema_json}"
         "\n\nExample of a valid response (structure only — adapt to the actual request):\n"
-        "```json\n"
-        "{\n"
-        '  "project_name": "todo_api",\n'
-        '  "description": "A small FastAPI TODO service.",\n'
-        '  "files": [\n'
-        '    {"path": "src/main.py", "specification": "FastAPI app exposing GET/POST /todos backed by an in-memory store. Define a Todo model with id:int and title:str, plus list_todos() and create_todo() handlers."},\n'
-        '    {"path": "tests/test_main.py", "specification": "pytest tests using FastAPI TestClient that cover listing todos and creating a todo, asserting status codes and response bodies."}\n'
-        "  ]\n"
-        "}\n"
-        "```"
+        + ARCHITECT_FEW_SHOT
     )
 
 

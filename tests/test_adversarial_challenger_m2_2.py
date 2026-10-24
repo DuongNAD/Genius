@@ -1,4 +1,4 @@
-﻿# tests/test_adversarial_challenger_m2_2.py
+# tests/test_adversarial_challenger_m2_2.py
 import asyncio
 import json
 import time
@@ -198,7 +198,11 @@ async def test_worker_unexpected_websocket_close(run_server):
                 if data.get("type") in ("run_task", "dispatch"):
                     # Task is dispatched! Signal the test to trigger disconnection
                     task_started_event.set()
-                    # Do not report result; just hold connection to simulate executing task
+                    try:
+                        async for _ in ws:
+                            pass
+                    except Exception:
+                        pass
                     break
 
     worker_task = asyncio.create_task(run_flaky_worker())
@@ -321,6 +325,11 @@ async def test_result_payload_tampering_leaks_worker(run_server):
                     }
                     await ws.send(json.dumps(res_payload))
                     task_dispatched_event.set()
+                    try:
+                        async for _ in ws:
+                            pass
+                    except Exception:
+                        pass
                     break
 
     worker_task = asyncio.create_task(run_tampering_worker())

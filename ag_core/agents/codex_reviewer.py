@@ -204,12 +204,13 @@ class CodexReviewerAgent(BaseAgent):
                     user_prompt, content, scanned_files.keys()
                 )
 
-                retry_prompt = (
-                    f"The test suite failed with exit code {pytest_exit_code}.\n"
-                    f"Test logs:\n{pytest_logs}\n\n"
-                    f"Please fix the bugs in the code. Original prompt: {user_prompt}\n\n"
-                    "Do NOT run tests, commands, or tools. Output ONLY the "
-                    "complete file content in a single ```python fenced block."
+                from ag_core.utils.prompt_templates import CODEX_RETRY_PROMPT
+
+                retry_prompt = CODEX_RETRY_PROMPT.format(
+                    file_path=target_file or "target file",
+                    exit_code=pytest_exit_code,
+                    error_logs=pytest_logs,
+                    security_report=f"Linter findings:\n{linter_findings}" if linter_findings else "",
                 )
                 response = await self.provider.send_prompt(
                     retry_prompt, system=CODER_PROMPT

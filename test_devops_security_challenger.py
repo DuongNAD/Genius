@@ -16,26 +16,15 @@ from ag_core.utils.jwt import encode_jwt
 from test_e2e import get_valid_api_key
 
 
+from ag_core.testing.fixtures import mock_all_providers
+
+
 @pytest.fixture(autouse=True)
 def mock_providers():
-    from unittest.mock import AsyncMock, patch
-
-    mock_openai_res = {
-        "content": "Mocked Security Agent Audit Report Output",
-        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-    }
-    mock_anthropic_res = {
-        "content": "Mocked DevOps Agent Deployment Configuration Output",
-        "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
-    }
-    with patch(
-        "ag_core.providers.openai_provider.OpenAIProvider.send_prompt",
+    with mock_all_providers(), patch(
+        "ag_core.interfaces.base_agent.BaseAgent.scan_context_async",
         new_callable=AsyncMock,
-        return_value=mock_openai_res,
-    ), patch(
-        "ag_core.providers.anthropic_provider.AnthropicProvider.send_prompt",
-        new_callable=AsyncMock,
-        return_value=mock_anthropic_res,
+        return_value=({}, ""),
     ):
         yield
 

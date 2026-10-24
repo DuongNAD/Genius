@@ -108,46 +108,70 @@ async def _run_debate(design: str, prompt: str, rounds: int) -> str:
     Both agents are built through execute_agent (make_provider role wiring, so
     per-role fallback chains apply): the critic uses the researcher role
     (agy/Gemini by default), the refiner the claude role. Early-exits when the
-    critic answers with :data:`DEBATE_APPROVAL_MARKER`. Returns a JSON payload
-    with the refined design and a per-round summary.
+    critic answers with :data:`DEBATE_APPROVAL_MARKER` or a structured DebateVerdict.
+    Returns a JSON payload with the refined design and a per-round summary.
     """
+    from ag_core.utils.prompt_templates import (
+        CRITIC_DEBATE_PROMPT,
+        ARCHITECT_REFINE_PROMPT,
+        DEBATE_SYNTHESIS_PROMPT,
+    )
+    from orchestrator import is_debate_approved, parse_debate_verdict
+
     current = design
     approved = False
     rounds_summary: List[Dict[str, Any]] = []
     for round_idx in range(1, rounds + 1):
-        critic_prompt = (
-            "You are CriticReviewer, a critic agent. Analyze the following "
-            "draft design proposed by Claude.\n"
-            "Identify potential architectural flaws, security risks, missing "
-            "requirements, or execution challenges.\n"
-            "Provide constructive criticism and suggest concrete improvements. "
-            "If the draft design is correct, complete, and needs no further "
-            f"improvements, include `{DEBATE_APPROVAL_MARKER}` in your "
-            "response.\n\n"
-            f"Draft Design:\n{current}\n\n"
-            f"Original Prompt:\n{prompt}"
+        critic_prompt = CRITIC_DEBATE_PROMPT.format(
+            draft_plan=current,
+            context=prompt,
         )
         # Empty context dict: the design under debate is already in the
         # prompt; do not re-scan the whole workspace on every round.
         critique = await execute_agent("research", critic_prompt, {})
-        if DEBATE_APPROVAL_MARKER in critique:
+        is_appr = is_debate_approved(critique)
+        verdict = parse_debate_verdict(critique)
+        verdict_dict = (
+            verdict.model_dump()
+            if verdict and hasattr(verdict, "model_dump")
+            else (verdict.dict() if verdict else None)
+        )
+
+        if is_appr:
             approved = True
             rounds_summary.append(
-                {"round": round_idx, "approved": True, "critique": critique}
+                {
+                    "round": round_idx,
+                    "approved": True,
+                    "critique": critique,
+                    "verdict": verdict_dict,
+                }
             )
             break
-        refine_prompt = (
-            "You are Claude, the architect agent. Refine your draft design "
-            "based on the constructive criticism from CriticReviewer.\n"
-            "Address the identified issues and incorporate the suggested "
-            "improvements, producing a final refined design.\n\n"
-            f"Previous Draft Design:\n{current}\n\n"
-            f"CriticReviewer's Criticism:\n{critique}\n\n"
-            f"Original Prompt:\n{prompt}"
-        )
+
+        if round_idx == rounds:
+            # Final round consensus synthesis
+            refine_prompt = DEBATE_SYNTHESIS_PROMPT.format(
+                draft_plan=current,
+                criticism=critique,
+                context=prompt,
+            )
+        else:
+            refine_prompt = ARCHITECT_REFINE_PROMPT.format(
+                draft_plan=current,
+                criticism=critique,
+                context=prompt,
+            )
+
         current = await execute_agent("design", refine_prompt, {})
         rounds_summary.append(
-            {"round": round_idx, "approved": False, "critique": critique}
+            {
+                "round": round_idx,
+                "approved": False,
+                "critique": critique,
+                "verdict": verdict_dict,
+                "synthesized": round_idx == rounds,
+            }
         )
     return json.dumps(
         {"design": current, "approved": approved, "rounds": rounds_summary}

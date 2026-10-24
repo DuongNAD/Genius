@@ -9,6 +9,7 @@ from typing import Any, Tuple
 # test of this repo: its content is arbitrary LLM output and must never be
 # collected (mirrors pytest.ini's norecursedirs exclusion of projects/).
 collect_ignore = ["test_generated.py"]
+pytest_plugins = ["ag_core.testing.fixtures"]
 
 # Set up default test environment variables before any tests or modules are loaded
 os.environ["SKILL_API_KEY"] = "mock-skill-key"

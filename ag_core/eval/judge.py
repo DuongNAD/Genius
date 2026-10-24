@@ -13,6 +13,7 @@ to a real CLI.
 """
 
 import logging
+from ag_core.utils.prompt_templates import JUDGE_CALIBRATION_ANCHORS
 
 logger = logging.getLogger("ag_core.eval")
 
@@ -22,7 +23,8 @@ JUDGE_SYSTEM_PROMPT = (
     "Be calibrated: reserve 5 for genuinely excellent work and 1 for work "
     "that fails the goal. Do not be swayed by verbosity or confidence. "
     'Respond with ONLY a JSON object of the form {"score": <int>, '
-    '"explanation": "<brief reason>"} and nothing else.'
+    '"explanation": "<brief reason>"} and nothing else.\n\n'
+    + JUDGE_CALIBRATION_ANCHORS
 )
 
 # Judging is a reasoning task; reuse the architect ("claude") role's

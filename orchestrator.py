@@ -344,6 +344,112 @@ def parse_design_for_files(design_content: str) -> list:
     return files
 
 
+def parse_devops_artifacts(devops_content: str) -> list:
+    """
+    Parses devops_content for individual deployment files and artifacts.
+    Supports both structured DevOpsPlan JSON objects and fenced code blocks with
+    '# filepath: <relative/path>' (or //, --, <!--) headers.
+    Returns a list of DevOpsArtifact instances (or dicts).
+    """
+    from ag_core.models import DevOpsArtifact, DevOpsPlan
+
+    artifacts = []
+
+    # 1. Try parsing a DevOpsPlan JSON block
+    candidates = re.findall(
+        r"```json\s*(.*?)```", devops_content, re.DOTALL | re.IGNORECASE
+    )
+    candidates.append(devops_content)
+    for text in candidates:
+        for obj in _iter_json_objects(text):
+            if isinstance(obj, dict) and "artifacts" in obj:
+                try:
+                    if hasattr(DevOpsPlan, "model_validate"):
+                        plan = DevOpsPlan.model_validate(obj)
+                    else:
+                        plan = DevOpsPlan.parse_obj(obj)
+                    if plan.artifacts:
+                        return list(plan.artifacts)
+                except Exception:
+                    pass
+
+    # 2. Extract fenced code blocks with filepath annotations
+    code_blocks = re.findall(
+        r"```[a-zA-Z0-9_-]*\s*\r?\n(.*?)\r?\n?```", devops_content, re.DOTALL
+    )
+    for block in code_blocks:
+        m = re.search(r"(?:#|//|--|<!--)\s*(?:filepath|path):\s*([^\s\n\r>]+)", block)
+        if m:
+            filepath = m.group(1).strip().strip("\"'")
+            artifacts.append(DevOpsArtifact(path=filepath, content=block.strip(), description=""))
+
+    return artifacts
+
+
+def materialize_devops_artifacts(devops_content: str, project_dir: str) -> list:
+    """
+    Parses and writes out individual DevOps files (e.g. Dockerfile, docker-compose.yml,
+    .github/workflows/ci.yml) directly to project_dir using safe_join.
+    Returns a list of written file paths.
+    """
+    artifacts = parse_devops_artifacts(devops_content)
+    materialized_paths = []
+    for art in artifacts:
+        rel_path = art.path if hasattr(art, "path") else art.get("path", "")
+        content = art.content if hasattr(art, "content") else art.get("content", "")
+        if not rel_path or not content:
+            continue
+        try:
+            target_path = safe_join(project_dir, rel_path)
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            _write_text(target_path, content)
+            materialized_paths.append(target_path)
+            logger.info(f"Materialized DevOps artifact: {rel_path} -> {target_path}")
+        except Exception as e:
+            logger.warning(f"Failed to materialize DevOps artifact '{rel_path}': {e}")
+    return materialized_paths
+
+
+def parse_debate_verdict(critic_content: str):
+    """
+    Extract a structured DebateVerdict from the critic agent's output.
+    Returns a DebateVerdict instance or None if no structured verdict object is present.
+    """
+    if not critic_content:
+        return None
+    from ag_core.models import DebateVerdict
+
+    candidates = re.findall(
+        r"```json\s*(.*?)```", critic_content, re.DOTALL | re.IGNORECASE
+    )
+    candidates.append(critic_content)
+    for text in candidates:
+        for obj in _iter_json_objects(text):
+            if isinstance(obj, dict) and ("approved" in obj or "score" in obj or "criteria_scores" in obj):
+                try:
+                    if hasattr(DebateVerdict, "model_validate"):
+                        return DebateVerdict.model_validate(obj)
+                    else:
+                        return DebateVerdict.parse_obj(obj)
+                except Exception:
+                    pass
+    return None
+
+
+def is_debate_approved(critic_content: str) -> bool:
+    """
+    Check if the critic approved the draft architecture plan.
+    Prioritizes structured DebateVerdict (approved=True or score >= 4.0 with no flaws).
+    Falls back to checking the presence of '[APPROVED]' in free-text responses for backward compatibility.
+    """
+    if not critic_content:
+        return False
+    verdict = parse_debate_verdict(critic_content)
+    if verdict is not None:
+        return verdict.is_approved
+    return "[APPROVED]" in critic_content
+
+
 def safe_join(base_dir: str, rel_path: str) -> str:
     """
     Join an (untrusted, model-supplied) relative path onto base_dir, guaranteeing
@@ -1387,10 +1493,17 @@ async def process_single_file(
             # 1. Call Codex API /code
             codex_req_prompt = f"/code Implement the file '{file_path}' according to this specification:\n{specification}"
             if attempt > 1:
-                codex_req_prompt += f"\n\nPrevious implementation attempt failed check.\nTest Failures/Logs:\n{truncate_log(test_failures_logs)}\n\nSecurity Report:\n{truncate_log(security_report)}"
-                codex_req_prompt += (
-                    "\n\nDo NOT run tests, commands, or tools. Output ONLY the "
-                    "complete file content in a single ```python fenced block."
+                from ag_core.utils.prompt_templates import CODEX_RETRY_PROMPT
+
+                sec_rep = f"Security Report:\n{truncate_log(security_report)}" if security_report else ""
+                codex_req_prompt = (
+                    CODEX_RETRY_PROMPT.format(
+                        file_path=file_path,
+                        exit_code=1,
+                        error_logs=truncate_log(test_failures_logs),
+                        security_report=sec_rep,
+                    )
+                    + f"\n\nSpecification:\n{specification}"
                 )
 
             try:
@@ -1969,17 +2082,20 @@ async def run_pipeline(
             logger.info(
                 f"--- Starting Multi-Agent Debate Refinement (Max Rounds: {max_debate_rounds}) ---"
             )
+            from ag_core.utils.prompt_templates import (
+                CRITIC_DEBATE_PROMPT,
+                ARCHITECT_REFINE_PROMPT,
+                DEBATE_SYNTHESIS_PROMPT,
+            )
+
             for round_idx in range(1, max_debate_rounds + 1):
                 logger.info(
                     f"Debate Round {round_idx} Start: Critic reviewing Claude's draft plan..."
                 )
 
-                critic_prompt = (
-                    "You are CriticReviewer, a critic agent. Analyze the following draft architecture plan proposed by Claude.\n"
-                    "Identify potential architectural flaws, security risks, missing requirements, or execution challenges.\n"
-                    "Provide constructive criticism and suggest concrete improvements. If the draft architecture plan is correct, complete, and needs no further improvements, include `[APPROVED]` in your response.\n\n"
-                    f"Draft Architecture Plan:\n{claude_content}\n\n"
-                    f"Original Research and Context:\n{claude_prompt}"
+                critic_prompt = CRITIC_DEBATE_PROMPT.format(
+                    draft_plan=claude_content,
+                    context=claude_prompt,
                 )
                 # A debate-round failure must not lose the design Claude
                 # already produced: design.md is written before the debate, so
@@ -2010,9 +2126,9 @@ async def run_pipeline(
                     )
                     break
 
-                if "[APPROVED]" in critic_content:
+                if is_debate_approved(critic_content):
                     logger.info(
-                        f"Debate Round {round_idx} End: Critic approved the plan with [APPROVED]. Exiting debate loop early."
+                        f"Debate Round {round_idx} End: Critic approved the plan. Exiting debate loop early."
                     )
                     break
 
@@ -2020,15 +2136,22 @@ async def run_pipeline(
                     f"Debate Round {round_idx}: Critique received. Sending to Claude for refinement..."
                 )
 
-                claude_refine_prompt = (
-                    "You are Claude, the architect agent. Refine your draft architecture plan based on the constructive criticism from CriticReviewer.\n"
-                    "Address the identified issues and incorporate the suggested improvements, producing a final refined architecture plan.\n"
-                    "Output the refined plan as EXACTLY ONE ```json fenced block conforming to the same DesignPlan schema "
-                    "(project_name, description, and files[] where each file has path + specification) and nothing else.\n\n"
-                    f"Previous Draft Plan:\n{claude_content}\n\n"
-                    f"CriticReviewer's Criticism:\n{critic_content}\n\n"
-                    f"Original Research and Context:\n{claude_prompt}"
-                )
+                if round_idx == max_debate_rounds:
+                    logger.info(
+                        f"Debate Round {round_idx}: Reached max rounds without approval. Performing consensus synthesis..."
+                    )
+                    claude_refine_prompt = DEBATE_SYNTHESIS_PROMPT.format(
+                        draft_plan=claude_content,
+                        criticism=critic_content,
+                        context=claude_prompt,
+                    )
+                else:
+                    claude_refine_prompt = ARCHITECT_REFINE_PROMPT.format(
+                        draft_plan=claude_content,
+                        criticism=critic_content,
+                        context=claude_prompt,
+                    )
+
                 try:
                     claude_content = await call_api(
                         claude_url,
@@ -2326,6 +2449,7 @@ async def run_pipeline(
             try:
                 _write_text(deploy_file, devops_content)
                 _write_text(os.path.join(project_dir, "deploy.md"), devops_content)
+                materialize_devops_artifacts(devops_content, project_dir)
             except Exception as e:
                 raise PipelineError(
                     f"Failed to write DevOps output to {deploy_file}: {e}"
@@ -2596,6 +2720,7 @@ async def run_pipeline(
             _write_text(deploy_file, devops_content)
             proj_deploy_file = os.path.join(project_dir, "deploy.md")
             _write_text(proj_deploy_file, devops_content)
+            materialize_devops_artifacts(devops_content, project_dir)
         except Exception as e:
             raise PipelineError(f"Failed to write DevOps output to {deploy_file}: {e}")
 
@@ -2717,17 +2842,20 @@ async def run_e2e_pipeline(
             logger.info(
                 f"--- Starting E2E Debate Refinement (Max Rounds: {max_debate_rounds}) ---"
             )
+            from ag_core.utils.prompt_templates import (
+                CRITIC_DEBATE_PROMPT,
+                ARCHITECT_REFINE_PROMPT,
+                DEBATE_SYNTHESIS_PROMPT,
+            )
+
             for round_idx in range(1, max_debate_rounds + 1):
                 logger.info(
                     f"E2E Debate Round {round_idx} Start: Critic reviewing Claude's draft plan..."
                 )
 
-                critic_prompt = (
-                    "You are CriticReviewer, a critic agent. Analyze the following draft plan proposed by Claude.\n"
-                    "Identify potential flaws, security risks, missing requirements, or execution challenges.\n"
-                    "Provide constructive criticism and suggest concrete improvements. If the draft plan is correct, complete, and needs no further improvements, include `[APPROVED]` in your response.\n\n"
-                    f"Draft Plan:\n{claude_content}\n\n"
-                    f"Original Prompt:\n{prompt}"
+                critic_prompt = CRITIC_DEBATE_PROMPT.format(
+                    draft_plan=claude_content,
+                    context=prompt,
                 )
                 # Mirror of the sequential pipeline: a debate failure must not
                 # lose the plan already written to disk before the debate.
@@ -2756,9 +2884,9 @@ async def run_e2e_pipeline(
                     )
                     break
 
-                if "[APPROVED]" in critic_content:
+                if is_debate_approved(critic_content):
                     logger.info(
-                        f"E2E Debate Round {round_idx} End: Critic approved the plan with [APPROVED]. Exiting debate loop early."
+                        f"E2E Debate Round {round_idx} End: Critic approved the plan. Exiting debate loop early."
                     )
                     break
 
@@ -2766,13 +2894,22 @@ async def run_e2e_pipeline(
                     f"E2E Debate Round {round_idx}: Critique received. Sending to Claude for refinement..."
                 )
 
-                claude_refine_prompt = (
-                    "You are Claude, the architect agent. Refine your draft plan based on the constructive criticism from CriticReviewer.\n"
-                    "Address the identified issues and incorporate the suggested improvements, producing a final refined plan.\n\n"
-                    f"Previous Draft Plan:\n{claude_content}\n\n"
-                    f"CriticReviewer's Criticism:\n{critic_content}\n\n"
-                    f"Original Prompt:\n{prompt}"
-                )
+                if round_idx == max_debate_rounds:
+                    logger.info(
+                        f"E2E Debate Round {round_idx}: Reached max rounds without approval. Performing consensus synthesis..."
+                    )
+                    claude_refine_prompt = DEBATE_SYNTHESIS_PROMPT.format(
+                        draft_plan=claude_content,
+                        criticism=critic_content,
+                        context=prompt,
+                    )
+                else:
+                    claude_refine_prompt = ARCHITECT_REFINE_PROMPT.format(
+                        draft_plan=claude_content,
+                        criticism=critic_content,
+                        context=prompt,
+                    )
+
                 try:
                     claude_content = await call_api(
                         claude_url,
@@ -2882,11 +3019,16 @@ async def run_e2e_pipeline(
 
                     codex_prompt = f"/code Implement the file '{file_path}' according to this specification:\n{specification}"
                     if attempt > 1:
-                        codex_prompt += f"\n\nPrevious implementation attempt failed verification.\nErrors/Logs:\n{truncate_log(codex_error_log)}"
-                        codex_prompt += (
-                            "\n\nDo NOT run tests, commands, or tools. Output "
-                            "ONLY the complete file content in a single "
-                            "```python fenced block."
+                        from ag_core.utils.prompt_templates import CODEX_RETRY_PROMPT
+
+                        codex_prompt = (
+                            CODEX_RETRY_PROMPT.format(
+                                file_path=file_path,
+                                exit_code=1,
+                                error_logs=truncate_log(codex_error_log),
+                                security_report="",
+                            )
+                            + f"\n\nSpecification:\n{specification}"
                         )
 
                     # An API/agent failure inside an attempt must not abort the
@@ -3030,7 +3172,16 @@ async def run_e2e_pipeline(
                         f"Code:\n\n{implemented_code}"
                     )
                     if attempt > 1:
-                        tester_prompt += f"\n\nPrevious test generation attempt failed verification.\nErrors/Logs:\n{truncate_log(tester_error_log)}"
+                        from ag_core.utils.prompt_templates import TESTER_RETRY_PROMPT
+
+                        tester_prompt = (
+                            TESTER_RETRY_PROMPT.format(
+                                file_path=file_path,
+                                exit_code=1,
+                                error_logs=truncate_log(tester_error_log),
+                            )
+                            + f"\n\nCode under test:\n\n{implemented_code}"
+                        )
 
                     try:
                         tester_raw = await call_api(

@@ -103,10 +103,15 @@ class TesterAgent(BaseAgent):
                 if exit_code == 0:
                     break
                 else:
+                    from ag_core.utils.prompt_templates import TESTER_RETRY_PROMPT
+
                     retry_prompt = (
-                        f"The previously generated test code failed to run. Pytest exit code: {exit_code}.\n"
-                        f"Error logs:\n{test_failures_logs}\n\n"
-                        f"Please fix the test code and return it. Original context:\n{full_prompt}"
+                        TESTER_RETRY_PROMPT.format(
+                            file_path=output_file,
+                            exit_code=exit_code,
+                            error_logs=test_failures_logs,
+                        )
+                        + f"\n\nOriginal context:\n{full_prompt}"
                     )
                     response = await self.provider.send_prompt(
                         retry_prompt, system=TESTER_PROMPT

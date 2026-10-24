@@ -1,0 +1,7 @@
+{
+  "name": "Genius",
+  "category": "01_AI_Agents",
+  "tech": "Python",
+  "command": "python -m ...",
+  "description": "Genius Multi-Agent Framework tự động hóa quy trình phần mềm"
+}
